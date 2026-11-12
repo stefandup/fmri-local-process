@@ -1,0 +1,20 @@
+site_name: fMRI Local Process
+docs_dir: docs
+site_dir: build_output/docs_site
+theme:
+  name: material
+  features:
+    - navigation.footer
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+
+nav:
+  - Home: index.md
+  - For Contributors:
+      - Golden Rules: golden-rules.md
+  - AI Style Guide: ai-style-guide.md

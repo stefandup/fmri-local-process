@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fmri-local-process"
+dynamic = ["version", "dependencies"]
+description = "Local fMRI preprocessing, QC and region timeseries viewer."
+authors = [{ name = "Stefan du Plessis" }]
+
+[tool.setuptools_scm]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+# [project.scripts] -- add CLI/GUI entry points here once src/ exists, e.g.
+# fmri_process = "fmri_local_process.cli.process:main"
+# fmri_viewer = "fmri_local_process.gui.viewer:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "INFO"

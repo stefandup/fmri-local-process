@@ -1,0 +1,7 @@
+click
+rich
+numpy
+pandas
+scipy
+matplotlib
+PySide6

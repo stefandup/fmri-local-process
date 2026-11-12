@@ -1,0 +1,23 @@
+/.venv/
+/.vscode/
+/.codex/
+/results/
+/temp/
+temp/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ruff_cache/
+.pytest_cache/
+.DS_Store
+*.csv
+**.log
+logs/
+/build_output/
+build_log.txt
+*.ipynb
+
+# Imaging data never goes into git (incl. the AI-cleared data folder)
+/safe_data_source/
+*.nii
+*.nii.gz
