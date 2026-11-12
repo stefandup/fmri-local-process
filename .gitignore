@@ -23,3 +23,6 @@ build_log.txt
 /safe_data_source/
 *.nii
 *.nii.gz
+
+behavioural_processing_r_scripts
+philani_behav_files
