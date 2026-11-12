@@ -267,18 +267,68 @@ def log_subject_id(log_file: Path) -> str:
     return log_file.name.split("-")[0]
 
 
-def task_for_log(log_file: Path) -> BehavTask | None:
-    """Guess the task from the log's file or folder name (e.g. ".../emolabeling/x.log")."""
-    names = (log_file.name.lower(), log_file.parent.name.lower())
+def task_for_log(log_file: Path, root: Path | None = None) -> BehavTask | None:
+    """Guess the task from 'cogreappraisal'/'emolabeling' in the log's path.
+
+    With root, every folder between root and the log counts (e.g. root/emolabeling/2024/x.log);
+    without, only the file name and its parent folder.
+    """
+    if root is not None and log_file.is_relative_to(root):
+        names = [part.lower() for part in log_file.relative_to(root).parts]
+    else:
+        names = [log_file.name.lower(), log_file.parent.name.lower()]
     return next((t for t in BEHAV_TASKS if any(t.log_subdir in n for n in names)), None)
 
 
-def find_subject_logs(log_dir: Path, subject_id: str) -> list[Path]:
-    """<subject id>-*.log files in log_dir; macOS "._" resource-fork files are ignored."""
-    if not log_dir.is_dir():
-        return []
-    return sorted(
-        p
-        for p in log_dir.glob("*.log")
-        if not p.name.startswith("._") and log_subject_id(p) == subject_id
-    )
+@dataclass(frozen=True)
+class LogTarget:
+    log_file: Path
+    task: BehavTask
+    stem: str  # sub-<id>_task-<task>[_run-<n>]_events
+
+
+def find_logs(input_path: Path) -> list[Path]:
+    """input_path itself if it's a file, else every .log below it (macOS "._" files skipped)."""
+    if input_path.is_file():
+        return [input_path]
+    return sorted(p for p in input_path.rglob("*.log") if not p.name.startswith("._"))
+
+
+LogGroups = dict[tuple[str, str], list[tuple[Path, BehavTask]]]
+"""(subject id, BIDS task label) -> that subject's logs for the task, sorted by path."""
+
+
+def group_logs(
+    logs: list[Path], task: BehavTask | None = None, root: Path | None = None
+) -> tuple[LogGroups, list[Path]]:
+    """Group logs by subject + task; also returns the logs whose task can't be told."""
+    groups: LogGroups = {}
+    unknown = []
+    for log_file in sorted(logs):
+        log_task = task or task_for_log(log_file, root)
+        if log_task is None:
+            unknown.append(log_file)
+            continue
+        groups.setdefault((log_subject_id(log_file), log_task.task), []).append(
+            (log_file, log_task)
+        )
+    return groups, unknown
+
+
+def plan_log_targets(
+    logs: list[Path], task: BehavTask | None = None, root: Path | None = None
+) -> tuple[list[LogTarget], list[Path]]:
+    """Output stem for each log, plus the logs whose task can't be told.
+
+    Several logs for the same subject + task get run-1, run-2, ... (sorted by path) so none
+    overwrites another -- same naming as the crosscheck staging area.
+    """
+    groups, unknown = group_logs(logs, task, root)
+    targets = []
+    for (subject_id, task_label), group in sorted(groups.items()):
+        for run, (log_file, log_task) in enumerate(group, start=1):
+            parts = [f"sub-{subject_id}", f"task-{task_label}"]
+            if len(group) > 1:
+                parts.append(f"run-{run}")
+            targets.append(LogTarget(log_file, log_task, "_".join([*parts, "events"])))
+    return targets, unknown

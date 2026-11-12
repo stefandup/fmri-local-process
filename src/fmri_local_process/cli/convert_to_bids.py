@@ -25,6 +25,18 @@ from fmri_local_process.processing.philani_bids import (
 
 console = Console()
 
+EXAMPLES_EPILOG = """
+Examples:
+
+\b
+  Convert everything, with behavioural logs (Windows has no FreeSurfer, so no defacing):
+  fmri_convert_to_bids D:\\philani D:\\philani_bids --behav-logs D:\\behav_logs --no-deface
+
+\b
+  Rebuild an old flat-layout BIDS folder from scratch, without prompts:
+  fmri_convert_to_bids D:\\philani D:\\philani_bids --behav-logs D:\\behav_logs --reset -y
+"""
+
 
 def print_report(report: ConversionReport) -> None:
     table = Table(title="BIDS conversion")
@@ -33,13 +45,16 @@ def print_report(report: ConversionReport) -> None:
     table.add_row("converted/updated", str(len(report.converted)))
     table.add_row(f"[yellow]staged in {PENDING_DIR}/", f"[yellow]{len(report.pending)}")
     table.add_row("skipped sessions (>1 GB)", str(len(report.skipped)))
-    table.add_row("[red]failed series", f"[red]{len(report.failures)}")
+    table.add_row("[yellow]missing behavioural logs", f"[yellow]{len(report.missing)}")
+    table.add_row("[red]failed", f"[red]{len(report.failures)}")
     console.print(table)
+    for what in report.missing:
+        console.print(f"[yellow]MISSING[/yellow] {what} log")
     for what, why in report.failures:
         console.print(f"[red]FAILED[/red] {what}: {why}")
 
 
-@click.command()
+@click.command(epilog=EXAMPLES_EPILOG)
 @click.version_option(package_name="fmri-local-process")
 @click.argument("dicom_root", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.argument("bids_root", type=click.Path(file_okay=False, path_type=Path))
@@ -53,7 +68,8 @@ def print_report(report: ConversionReport) -> None:
     "--behav-logs",
     "behav_root",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
-    help="philani_behavioural_logs folder (with cogreappraisal/ and emolabeling/) -> events.tsv.",
+    help="Folder searched recursively for behavioural *.log files (task from "
+    "'cogreappraisal'/'emolabeling' in the path) -> events.tsv. May be DICOM_ROOT itself.",
 )
 @click.option(
     "--dcm2niix",
@@ -75,8 +91,13 @@ def main(
 ) -> None:
     """Convert DICOM_ROOT (one folder per scan session) into a BIDS dataset at BIDS_ROOT.
 
-    Every session is written as sub-<id>/ses-<n>/, n = 1, 2, ... in scan-date order.
-    Repeated runs and ambiguous behavioural logs are staged in BIDS_ROOT/crosscheck_pending/.
+    Every session is written as sub-<id>/ses-<n>/, n = 1, 2, ... in calendar order of the
+    YYYYMMDD date in the session folder name. Repeated runs, ambiguous behavioural logs and
+    logs for subjects without a DICOM session are staged in BIDS_ROOT/crosscheck_pending/.
+
+    With --behav-logs, every subject is expected to have a Reappraisal and a Matching log;
+    a missing one is logged and listed as MISSING, and conversion carries on. events.tsv
+    onset/duration are in seconds, onset from the first scanner pulse (BIDS convention).
 
     \b
     NOTE: a BIDS_ROOT written by the old philaniToBIDS.sh (or an earlier version of this

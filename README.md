@@ -7,7 +7,7 @@
 
 ```powershell
 fmri_convert_to_bids <DICOM_ROOT> <BIDS_ROOT> --behav-logs <BEHAV_LOGS> [--no-deface] [--reset]
-fmri_behav_events <log file> -o <out dir> [--compare]   # one log; --compare runs the old R
+fmri_behav_events <log file | folder> <out dir> [--subject_id P001] [--rerun] [--compare]
 ```
 
 - Every scan session becomes `sub-<id>/ses-<n>/`, in calendar order of the scan date.

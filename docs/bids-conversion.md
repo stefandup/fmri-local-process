@@ -5,7 +5,7 @@ Two commands, both thin wrappers around `src/fmri_local_process/processing/`:
 | Command | What it does |
 |---|---|
 | `fmri_convert_to_bids` | Converts a folder of DICOM sessions into a BIDS dataset, including behavioural `events.tsv` files when given `--behav-logs`. |
-| `fmri_behav_events` | Converts **one** behavioural `.log` into an `events.tsv` using the same code. `--compare` runs the original R script on the same log and reports any differences. |
+| `fmri_behav_events` | Batch-converts behavioural `.log` files (one file, or a whole folder) into `events.tsv` files using the same code. `--compare` runs the original R script on each log and reports any differences. |
 
 This is a Python port of `philani_scripts/philaniToBIDS.sh` and the behavioural Rmds in
 `philani_scripts/behavioural_processing_r_scripts/`. Neither command needs R, `jq` or bash.
@@ -19,10 +19,15 @@ DICOM_ROOT/
   20240131_<x>_<subject id>[_...]/   one folder per scan session; date is YYYYMMDD
     .../<n>_rest_AP/                 series folders, found anywhere inside
   trash/                             ignored
-BEHAV_LOGS/                          only with --behav-logs
-  cogreappraisal/<subject id>-*.log
-  emolabeling/<subject id>-*.log
+BEHAV_LOGS/                          only with --behav-logs; searched recursively
+  .../cogreappraisal/.../<subject id>-*.log
+  .../emolabeling/.../<subject id>-*.log
 ```
+
+Each log's task comes from `cogreappraisal` or `emolabeling` appearing anywhere in its path
+below `BEHAV_LOGS`, as a folder name or in the file name. Logs with neither are ignored. The
+subject ID is the part of the file name before the first `-`. `BEHAV_LOGS` can be
+`DICOM_ROOT` itself if the logs live alongside the DICOMs.
 
 Folders that are empty or don't start with a valid `YYYYMMDD_` date are skipped with a
 warning.
@@ -58,12 +63,14 @@ The converter never guesses which of several candidates is the right one. It sta
 | Situation | Staged as |
 |---|---|
 | Several series of the same scan in one session | `crosscheck_pending/sub-<id>/ses-<n>/<datatype>/..._run-<k>_<suffix>` |
-| Several logs for a subject + task, or a log that can't be tied to exactly one session with that task | `crosscheck_pending/sub-<id>/func/sub-<id>_task-<task>_run-<k>_events.tsv` (+ `.json` naming the source log) |
+| Several logs for a subject + task, a log that can't be tied to exactly one session with that task, or a log for a subject with no DICOM session | `crosscheck_pending/sub-<id>/func/sub-<id>_task-<task>_run-<k>_events.tsv` (+ `.json` naming the source log) |
 
 At crosscheck, put the chosen file into the main tree under its run-less name. Re-runs
 then leave that item alone and don't stage it again.
 
-A task that was scanned but has no log is reported as a **failure**, and the exit code is 1.
+Every subject is expected to have both a Reappraisal log and a Matching log. A missing one is
+logged, listed as **MISSING** in the summary, and conversion carries on. It does not affect
+the exit code.
 
 ### Re-running
 
@@ -94,20 +101,30 @@ python -m pip install -e . --no-deps
 python -m pytest -q
 # expect: all passed
 
-# 3. One behavioural log -> events.tsv
-fmri_behav_events <path\to\P001-emolabeling.log> -o results\behav
-# expect: "Wrote N events to results\behav\sub-P001_task-Matching_events.tsv"
+# 3. Behavioural logs -> events.tsv (a single .log, or a folder searched recursively)
+fmri_behav_events <BEHAV_LOGS> results\behav
+# expect: a progress bar, then a summary table (written / skipped / failed);
+#         results\behav\sub-<id>_task-<task>[_run-<n>]_events.tsv
 
-# 4. Same, checked against the original R (needs R with rmarkdown, tidyverse, stringr)
+# 4. One participant, redone and checked against the original R
+#    (needs R with rmarkdown, tidyverse and stringr)
 $env:PHILANI_RMD_DIR = "C:\Users\stefan\philani_scripts\behavioural_processing_r_scripts"
-fmri_behav_events <path\to\P001-emolabeling.log> -o results\behav --compare
-# expect: "Python and R agree", or one DIFF line per mismatching cell (exit code 1)
+fmri_behav_events <BEHAV_LOGS> results\behav --subject_id P001 --rerun --compare
+# expect: "R agrees" in the summary, or one DIFF line per mismatching cell (exit code 1)
 
 # 5. Full conversion on a small DICOM folder (Windows: no FreeSurfer, so --no-deface)
 fmri_convert_to_bids <DICOM_ROOT> results\bids --behav-logs <BEHAV_LOGS> --no-deface -y
 # expect: a summary table (converted / staged / skipped / failed), and
 #         results\bids\sub-*\ses-*\{anat,func}; anything ambiguous in crosscheck_pending\
 ```
+
+`fmri_behav_events` works like the vr_lab_toolbox batch tools:
+- `--subject_id` limits it to one participant.
+- An `events.tsv` that already exists is skipped unless you pass `--rerun`.
+- A log that fails is reported and the rest still run.
+- The exit code is 1 if any log failed or differed from R.
+- The task comes from `cogreappraisal` or `emolabeling` in the log's file or folder name.
+  Pass `--task` to override it.
 
 `--compare` converts R's output to the Python conventions before comparing. Times are
 divided by 10 000 (0.1 ms to seconds) and both sides are aligned at their first row, because

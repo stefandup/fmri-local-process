@@ -164,22 +164,56 @@ def test_compare_with_r_agrees_after_unit_conversion(tmp_path: Path) -> None:
     assert compare_with_r(table, r_csv) == ["row 2 rating: python '3', R '5'"]
 
 
-def test_behav_events_cli_writes_tsv(tmp_path: Path) -> None:
-    log_file = tmp_path / "emolabeling" / "P001-emolabeling.log"
-    log_file.parent.mkdir()
-    lines = presentation_log(EMO_COLUMNS, emolabeling_rows(complete=True), EMO_RESPONSES)
-    log_file.write_text(NEWLINE.join(lines) + NEWLINE)
+def write_log(path: Path, lines: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(NEWLINE.join(lines) + NEWLINE)
 
-    result = CliRunner().invoke(behav_events.main, [str(log_file), "-o", str(tmp_path / "out")])
 
-    assert result.exit_code == 0, result.output
-    rows = read_tsv(tmp_path / "out" / "sub-P001_task-Matching_events.tsv")
+def test_behav_events_cli_loops_over_folder(tmp_path: Path) -> None:
+    logs, out = tmp_path / "logs", tmp_path / "out"
+    emo = presentation_log(EMO_COLUMNS, emolabeling_rows(complete=True), EMO_RESPONSES)
+    write_log(logs / "emolabeling" / "P001-emolabeling.log", emo)
+    write_log(logs / "emolabeling" / "P002-emolabeling.log", emo)
+    write_log(logs / "cogreappraisal" / "P001-cogreappraisal.log", ["broken"])
+    runner = CliRunner()
+
+    result = runner.invoke(behav_events.main, [str(logs), str(out)])
+
+    assert result.exit_code == 1, result.output  # the broken log fails, the others still run
+    assert sorted(p.name for p in out.iterdir()) == [
+        "sub-P001_task-Matching_events.tsv",
+        "sub-P002_task-Matching_events.tsv",
+    ]
+    rows = read_tsv(out / "sub-P001_task-Matching_events.tsv")
     assert [r["sub_acc"] for r in rows[:2]] == ["n/a", "0.5"]
 
-    no_rmd = CliRunner().invoke(
-        behav_events.main, [str(log_file), "--compare"], env={"PHILANI_RMD_DIR": ""}
-    )
+    # Re-run with a subject filter: existing output is skipped unless --rerun.
+    (out / "sub-P001_task-Matching_events.tsv").write_text("old")
+    args = [str(logs / "emolabeling"), str(out), "--subject_id", "P001"]
+    assert runner.invoke(behav_events.main, args).exit_code == 0
+    assert (out / "sub-P001_task-Matching_events.tsv").read_text() == "old"
+    assert runner.invoke(behav_events.main, [*args, "--rerun"]).exit_code == 0
+    assert (out / "sub-P001_task-Matching_events.tsv").read_text() != "old"
+
+    no_rmd = runner.invoke(behav_events.main, [*args, "--compare"], env={"PHILANI_RMD_DIR": ""})
     assert no_rmd.exit_code == 2 and "--rmd-dir" in no_rmd.output
+
+
+def test_plan_log_targets_numbers_repeat_logs_and_flags_unknown_task() -> None:
+    logs = [
+        Path("emolabeling/P001-emolabeling.log"),
+        Path("emolabeling/P001-emolabeling-redo.log"),
+        Path("cogreappraisal/P001-x.log"),
+        Path("misc/P001-other.log"),
+    ]
+    targets, unknown = bl.plan_log_targets(logs)
+
+    assert [t.stem for t in targets] == [
+        "sub-P001_task-Matching_run-1_events",
+        "sub-P001_task-Matching_run-2_events",
+        "sub-P001_task-Reappraisal_events",
+    ]
+    assert unknown == [Path("misc/P001-other.log")]
 
 
 def test_truncated_log_raises_value_error() -> None:
@@ -187,8 +221,19 @@ def test_truncated_log_raises_value_error() -> None:
         bl.cogreappraisal_events(["Scenario", "", "", "Subject\tEvent Type", "", "P001\tPulse"])
 
 
-def test_find_subject_logs_ignores_other_subjects_and_mac_files(tmp_path: Path) -> None:
-    for name in ("P001-emolabeling.log", "._P001-emolabeling.log", "P0011-emolabeling.log"):
-        (tmp_path / name).write_text("")
-    assert [p.name for p in bl.find_subject_logs(tmp_path, "P001")] == ["P001-emolabeling.log"]
-    assert bl.find_subject_logs(tmp_path / "missing", "P001") == []
+def test_find_logs_is_recursive_and_task_comes_from_path_below_root(tmp_path: Path) -> None:
+    root = tmp_path / "emolabeling_study"  # an ancestor named like a task must not count
+    rel_paths = [
+        "cogreappraisal/2024/P001-a.log",
+        "._P001-a.log",
+        "misc/P002-emolabeling.log",
+        "misc/P003-x.log",
+    ]
+    for rel in rel_paths:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("")
+
+    groups, unknown = bl.group_logs(bl.find_logs(root), root=root)
+
+    assert sorted(groups) == [("P001", "Reappraisal"), ("P002", "Matching")]
+    assert unknown == [root / "misc" / "P003-x.log"]

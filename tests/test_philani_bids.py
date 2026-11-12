@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from fmri_local_process.processing import behav_logs as bl
 from fmri_local_process.processing import philani_bids as pb
 from fmri_local_process.processing.behav_logs import BehavTask, EventTable
 from fmri_local_process.processing.dcm2niix import Dcm2niixNotFoundError, find_dcm2niix
@@ -148,7 +149,9 @@ def fake_extract(lines: Sequence[str]) -> EventTable:
 @pytest.fixture
 def behav_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Behavioural log root with only the Matching task, whose 'parser' echoes line 1."""
-    monkeypatch.setattr(pb, "BEHAV_TASKS", (BehavTask("emolabeling", "Matching", fake_extract),))
+    only_matching = (BehavTask("emolabeling", "Matching", fake_extract),)
+    monkeypatch.setattr(pb, "BEHAV_TASKS", only_matching)
+    monkeypatch.setattr(bl, "BEHAV_TASKS", only_matching)
     root = tmp_path / "behav"
     (root / "emolabeling").mkdir(parents=True)
     return root
@@ -158,13 +161,18 @@ def test_single_log_single_session_goes_into_func(tmp_path: Path, behav_root: Pa
     dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
     bids.mkdir()
     make_series(dicoms, "20240101_X_P001", "4_labeling_task_AP")
-    (behav_root / "emolabeling" / "P001-emolabeling.log").write_text("match\n")
+    nested = behav_root / "emolabeling" / "2024" / "P001-run.log"  # task from a parent folder
+    nested.parent.mkdir()
+    nested.write_text("match\n")
+    other = behav_root / "notes" / "P001-other.log"  # no task in its path: ignored
+    other.parent.mkdir()
+    other.write_text("not a task log\n")
 
     report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None, behav_root)
 
     events = bids / "sub-P001" / "ses-1" / "func" / "sub-P001_ses-1_task-Matching_events.tsv"
     assert events.read_text().splitlines()[1] == "0\t100\tmatch\t1"
-    assert read_json(events.with_suffix(".json")) == {"SourceLog": "P001-emolabeling.log"}
+    assert read_json(events.with_suffix(".json")) == {"SourceLog": "P001-run.log"}
     assert "sub-P001_ses-1_task-Matching_events" in report.converted
 
 
@@ -196,14 +204,31 @@ def test_ambiguous_logs_staged_for_crosscheck(
     assert not list((bids / "sub-P001").rglob("*_events.tsv"))
 
 
-def test_missing_log_for_scanned_task_is_a_failure(tmp_path: Path, behav_root: Path) -> None:
+def test_missing_log_is_reported_not_a_failure(tmp_path: Path, behav_root: Path) -> None:
     dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
     bids.mkdir()
     make_series(dicoms, "20240101_X_P001", "4_labeling_task_AP")
+    make_series(dicoms, "20240101_X_P002", "5_rest_AP")  # no labeling scan: log still expected
 
     report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None, behav_root)
 
-    assert [what for what, _ in report.failures] == ["sub-P001_task-Matching_events"]
+    assert report.missing == ["sub-P001_task-Matching", "sub-P002_task-Matching"]
+    assert report.failures == []
+    assert len(report.converted) == 2  # the scans still converted
+
+
+def test_log_without_dicom_session_is_staged(tmp_path: Path, behav_root: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20240101_X_P001", "4_labeling_task_AP")
+    (behav_root / "emolabeling" / "P001-emolabeling.log").write_text("match\n")
+    (behav_root / "emolabeling" / "P009-emolabeling.log").write_text("match\n")
+
+    report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None, behav_root)
+
+    staged = bids / pb.PENDING_DIR / "sub-P009" / "func"
+    assert (staged / "sub-P009_task-Matching_run-1_events.tsv").exists()
+    assert "sub-P009_task-Matching_run-1_events" in report.pending
 
 
 def test_reset_removes_subjects_pending_and_crosscheck_files(tmp_path: Path) -> None:

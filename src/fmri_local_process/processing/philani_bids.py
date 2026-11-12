@@ -24,7 +24,9 @@ from pathlib import Path
 from fmri_local_process.processing.behav_logs import (
     BEHAV_TASKS,
     BehavTask,
-    find_subject_logs,
+    LogGroups,
+    find_logs,
+    group_logs,
     read_log_lines,
     write_events_tsv,
 )
@@ -104,6 +106,7 @@ class BidsSession:
 class ConversionReport:
     converted: list[str] = field(default_factory=list)
     pending: list[str] = field(default_factory=list)  # staged in crosscheck_pending/
+    missing: list[str] = field(default_factory=list)  # expected behavioural logs not found
     skipped: list[str] = field(default_factory=list)
     failures: list[tuple[str, str]] = field(default_factory=list)  # (what, why)
 
@@ -299,17 +302,19 @@ def convert_behaviour(
     subject_id: str,
     sessions_with_task: list[BidsSession],
     task: BehavTask,
-    behav_root: Path,
+    logs: list[Path],
     bids_root: Path,
     report: ConversionReport,
 ) -> None:
-    """Events for one subject/task: straight into the session if unambiguous, else staged."""
-    logs = find_subject_logs(behav_root / task.log_subdir, subject_id)
+    """Events for one subject/task: straight into the session if unambiguous, else staged.
+
+    Every subject is expected to have a log for every task; a missing one is logged and
+    counted in report.missing, and conversion carries on.
+    """
     entities = f"task-{task.task}"
     if not logs:
-        if sessions_with_task:
-            what = f"sub-{subject_id}_{entities}_events"
-            report.failures.append((what, f"no log in {behav_root / task.log_subdir}"))
+        log.warning("sub-%s: no %s log found", subject_id, task.log_subdir)
+        report.missing.append(f"sub-{subject_id}_{entities}")
         return
 
     if len(logs) == 1 and len(sessions_with_task) == 1:
@@ -371,7 +376,9 @@ def convert_dicom_root(
     report = ConversionReport()
     write_dataset_description(bids_root)
     ensure_bidsignore(bids_root)
-    for subject_id, sessions in number_sessions(find_sessions(dicom_root)).items():
+    log_groups = find_behav_logs(behav_root) if behav_root is not None else {}
+    subjects = number_sessions(find_sessions(dicom_root))
+    for subject_id, sessions in subjects.items():
         series = {s: match_series(s.dicom.folder) for s in sessions}
         for session in sessions:
             log.info("%s from %s", session.prefix, session.dicom.folder.name)
@@ -380,6 +387,24 @@ def convert_dicom_root(
             continue
         for task in BEHAV_TASKS:
             with_task = [s for s in sessions if any(r.task_name == task.task for r in series[s])]
-            convert_behaviour(subject_id, with_task, task, behav_root, bids_root, report)
+            logs = [path for path, _ in log_groups.get((subject_id, task.task), [])]
+            convert_behaviour(subject_id, with_task, task, logs, bids_root, report)
+
+    # Logs for subjects without any DICOM session: staged, so crosscheck sees them.
+    tasks = {t.task: t for t in BEHAV_TASKS}
+    for (subject_id, task_label), group in sorted(log_groups.items()):
+        if subject_id not in subjects:
+            log.warning("sub-%s: %s log(s) but no DICOM session", subject_id, task_label)
+            logs = [path for path, _ in group]
+            convert_behaviour(subject_id, [], tasks[task_label], logs, bids_root, report)
     remove_stray_logs(bids_root)
     return report
+
+
+def find_behav_logs(behav_root: Path) -> LogGroups:
+    """Every .log below behav_root, grouped by subject + task (task from the path)."""
+    groups, unknown = group_logs(find_logs(behav_root), root=behav_root)
+    for path in unknown:
+        log.debug("Ignoring %s: no task name in its path", path)
+    log.info("Found %d behavioural log(s) in %s", sum(map(len, groups.values())), behav_root)
+    return groups
