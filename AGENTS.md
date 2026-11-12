@@ -31,8 +31,24 @@ learn along the way, so:
 * **BUILD** → back to the default build-fast mode.
 * **PLAN: <task>** → outline the approach and the files that will change, then stop and wait
   before implementing. Use for larger or risky changes.
+* **RUN PLAN: <what>** → give the exact command(s) for the user to run themselves, and
+  **don't execute them**. Use the template below: pwsh syntax, run from the repo root with
+  `.venv` active, one line of *why* per command, and what output to expect or check. If a step
+  depends on the previous one's output, say so and stop there. One-shot: the next message
+  goes back to the active mode.
 * **QUICK: <question>** → a succinct explanation plus a brief general example; no edits.
 * **REVIEW** / **EVALUATE** → run Review Mode (below).
+
+### Command Plan Template (for RUN PLAN — not executed)
+
+```powershell
+# 1. <why this step>
+<cmd 1>
+# expect: <what success looks like>
+
+# 2. <why this step>
+<cmd 2>
+```
 
 ---
 
