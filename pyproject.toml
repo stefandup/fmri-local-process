@@ -13,9 +13,8 @@ authors = [{ name = "Stefan du Plessis" }]
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
 
-# [project.scripts] -- add CLI/GUI entry points here once src/ exists, e.g.
-# fmri_process = "fmri_local_process.cli.process:main"
-# fmri_viewer = "fmri_local_process.gui.viewer:main"
+[project.scripts]
+fmri_convert_to_bids = "fmri_local_process.cli.convert_to_bids:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -28,6 +27,10 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
 
 [tool.pytest.ini_options]
 log_cli = true

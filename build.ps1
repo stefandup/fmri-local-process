@@ -18,10 +18,12 @@ $PayloadPath = Join-Path $BuildOutput "payload"
 # because installer filenames carry the version, so stale ones would otherwise pile up.
 $InstallerPath = Join-Path $BuildOutput "installer"
 
-# PLACEHOLDER: the entry script and the exe/bundle name. The entry script doesn't exist yet.
-$EntryScript = Join-Path $PSScriptRoot "src\fmri_local_process\main.py"
-$AppName = "fmri_local_process"
+$EntryScript = Join-Path $PSScriptRoot "src\fmri_local_process\cli\convert_to_bids.py"
+$AppName = "fmri_convert_to_bids"
 $PackageName = "fmri-local-process"
+# dcm2niix.exe + its MSVC runtime DLLs, fetched by tools\fetch_dcm2niix.ps1. Bundled into the
+# app's dcm2niix\ subfolder, where processing\dcm2niix.py looks for it when frozen.
+$Dcm2niixDir = Join-Path $PSScriptRoot "third_party\dcm2niix_win"
 
 # Resolved once, up front, so `pip install -e .` and PyInstaller always run through the
 # same interpreter (and so read/write the same setuptools_scm version metadata).
@@ -55,11 +57,19 @@ No option given: prints this help and exits without building anything.
 }
 
 function Build-Exes {
+    if (-not (Test-Path (Join-Path $Dcm2niixDir "dcm2niix.exe"))) {
+        & (Join-Path $PSScriptRoot "tools\fetch_dcm2niix.ps1")
+    }
+    $bundleArgs = Get-ChildItem $Dcm2niixDir -File | ForEach-Object {
+        "--add-binary"; "$($_.FullName);dcm2niix"
+    }
+
     & $Python -m pip install -e . --no-deps
     Assert-Success "pip install -e ."
     # --noconfirm: skip PyInstaller's interactive "will be REMOVED! Continue?" prompt.
     & $Python -m PyInstaller --noconfirm --workpath $WorkPath --distpath $DistPath `
-        --specpath $WorkPath --name $AppName --onedir $EntryScript
+        --specpath $WorkPath --name $AppName --onedir --console `
+        --copy-metadata $PackageName @bundleArgs $EntryScript
     Assert-Success "PyInstaller build"
 }
 

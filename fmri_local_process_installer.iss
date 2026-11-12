@@ -7,8 +7,8 @@
 #endif
 #define MyAppPublisher "Stellenbosch University"
 #define MyAppURL "https://www.sun.ac.za"
-; PLACEHOLDER: matches $AppName in build.ps1.
-#define MyAppExeName "fmri_local_process.exe"
+; Matches $AppName in build.ps1.
+#define MyAppExeName "fmri_convert_to_bids.exe"
 #define MyAppId "05C45EB1-8EDF-41EA-A79E-BC1A8E0645B3"
 
 [Setup]
