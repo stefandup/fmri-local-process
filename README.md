@@ -1,7 +1,39 @@
 # fmri_local_process
 
-> **Status: idea / skeleton.** Nothing below is built yet. This is the pencilled-in plan to
-> take forward step by step.
+> **Status:** step 0, the Philani DICOM → BIDS conversion, works and is tested on synthetic
+> data. Everything from "The idea" onwards is still the plan.
+
+## 0. DICOM → BIDS conversion (built)
+
+```powershell
+fmri_convert_to_bids <DICOM_ROOT> <BIDS_ROOT> --behav-logs <BEHAV_LOGS> [--no-deface] [--reset]
+fmri_behav_events <log file> -o <out dir> [--compare]   # one log; --compare runs the old R
+```
+
+- Every scan session becomes `sub-<id>/ses-<n>/`, in calendar order of the scan date.
+- Behavioural logs become BIDS `events.tsv` files: seconds, onsets from the first scanner
+  pulse. This is a Python port of the Rmds, so R isn't needed.
+- Repeated runs, and logs that can't be tied to one session, are staged in
+  `crosscheck_pending/` for crosscheck instead of being guessed.
+- An old flat-layout BIDS folder (from `philaniToBIDS.sh`) needs `--reset`.
+
+Full details and a step-by-step "test it yourself" plan:
+[docs/bids-conversion.md](docs/bids-conversion.md).
+
+### Next steps
+
+1. **Check the port against R on real logs.** Run `fmri_behav_events --compare` on a few
+   complete and aborted logs of both tasks. Then drop the `--compare` flag and
+   `processing/behav_compare.py`.
+2. **Port the crosscheck tool.** `philani_scripts/philaniBIDSspreadsheet.py` (Streamlit)
+   doesn't know about `ses-<n>/` or `crosscheck_pending/` yet. It needs to promote the chosen
+   run or log into the main tree, move the rest to `trash/`, and record the choice in
+   `selected_runs.json`.
+3. **Check the dummy-scan assumption.** Events onsets assume the first logged pulse is the
+   first volume saved in the BOLD file.
+4. **Packaging.** Add `fmri_behav_events` to the PyInstaller and installer builds if it
+   should ship. It is only on PATH via `pip install -e .` for now.
+5. **Linux build.** Run `./build.sh` and `packaging/install.sh` on Ubuntu.
 
 ## The idea
 
@@ -62,13 +94,13 @@ raw BOLD (BIDS) ──► fmri_process (CLI) ──► derivatives/ ──► QC
   by convention.
 - **Atlas** for region selection (e.g. Schaefer, Harvard-Oxford via `nilearn.datasets`).
 
-## Planned layout (not created yet)
+## Layout
 
 ```
 src/fmri_local_process/
-  cli/          # thin click entry points
-  processing/   # the actual preprocessing / QC logic
-  gui/          # PySide6 timeseries viewer
+  cli/          # thin click entry points (convert_to_bids, behav_events)
+  processing/   # the actual logic (philani_bids, behav_logs, dcm2niix, deface, ...)
+  gui/          # PySide6 timeseries viewer (planned)
 tests/
 ```
 

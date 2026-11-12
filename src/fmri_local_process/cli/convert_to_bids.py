@@ -17,6 +17,7 @@ from fmri_local_process.processing.dcm2niix import (
 )
 from fmri_local_process.processing.deface import DefaceUnavailableError, make_mri_deface
 from fmri_local_process.processing.philani_bids import (
+    PENDING_DIR,
     ConversionReport,
     convert_dicom_root,
     reset_bids_root,
@@ -29,8 +30,9 @@ def print_report(report: ConversionReport) -> None:
     table = Table(title="BIDS conversion")
     table.add_column("Result")
     table.add_column("Count", justify="right")
-    table.add_row("converted/updated series", str(len(report.converted)))
-    table.add_row("skipped subjects (>1 GB)", str(len(report.skipped)))
+    table.add_row("converted/updated", str(len(report.converted)))
+    table.add_row(f"[yellow]staged in {PENDING_DIR}/", f"[yellow]{len(report.pending)}")
+    table.add_row("skipped sessions (>1 GB)", str(len(report.skipped)))
     table.add_row("[red]failed series", f"[red]{len(report.failures)}")
     console.print(table)
     for what, why in report.failures:
@@ -45,7 +47,13 @@ def print_report(report: ConversionReport) -> None:
 @click.option(
     "--reset",
     is_flag=True,
-    help="Delete sub-* folders, crosscheck.json and selected_runs.json in BIDS_ROOT first.",
+    help=f"First delete sub-*, {PENDING_DIR}/ and the crosscheck JSON files in BIDS_ROOT.",
+)
+@click.option(
+    "--behav-logs",
+    "behav_root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="philani_behavioural_logs folder (with cogreappraisal/ and emolabeling/) -> events.tsv.",
 )
 @click.option(
     "--dcm2niix",
@@ -60,11 +68,21 @@ def main(
     bids_root: Path,
     no_deface: bool,
     reset: bool,
+    behav_root: Path | None,
     dcm2niix_path: Path | None,
     yes: bool,
     verbose: bool,
 ) -> None:
-    """Convert DICOM_ROOT (one folder per scan session) into a BIDS dataset at BIDS_ROOT."""
+    """Convert DICOM_ROOT (one folder per scan session) into a BIDS dataset at BIDS_ROOT.
+
+    Every session is written as sub-<id>/ses-<n>/, n = 1, 2, ... in scan-date order.
+    Repeated runs and ambiguous behavioural logs are staged in BIDS_ROOT/crosscheck_pending/.
+
+    \b
+    NOTE: a BIDS_ROOT written by the old philaniToBIDS.sh (or an earlier version of this
+    tool) uses the flat sub-<id>/anat layout without ses-<n>/. Re-run with --reset to
+    rebuild it in the session layout.
+    """
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(message)s",
@@ -79,6 +97,8 @@ def main(
     logging.info("Using dcm2niix at %s", exe)
     if deface is None:
         logging.warning("--no-deface: T1w images will NOT be defaced")
+    if behav_root is None:
+        logging.warning("No --behav-logs: events.tsv files will NOT be created")
 
     if not bids_root.exists():
         if not yes:
@@ -90,8 +110,12 @@ def main(
             click.confirm(f"Delete all sub-* folders in {bids_root}?", abort=True)
         reset_bids_root(bids_root)
 
-    report = convert_dicom_root(dicom_root, bids_root, partial(run_dcm2niix, exe), deface)
+    report = convert_dicom_root(
+        dicom_root, bids_root, partial(run_dcm2niix, exe), deface, behav_root
+    )
     print_report(report)
+    if report.pending:
+        console.print(f"[yellow]Resolve {bids_root / PENDING_DIR} at crosscheck.")
     sys.exit(1 if report.failures else 0)
 
 

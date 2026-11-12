@@ -15,6 +15,7 @@ dependencies = { file = ["requirements.txt"] }
 
 [project.scripts]
 fmri_convert_to_bids = "fmri_local_process.cli.convert_to_bids:main"
+fmri_behav_events = "fmri_local_process.cli.behav_events:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
