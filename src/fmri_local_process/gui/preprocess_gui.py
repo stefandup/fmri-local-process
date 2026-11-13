@@ -75,6 +75,7 @@ from fmri_local_process.processing.cpac_docker import (
     bids_tasks,
     bold_sessions,
     docker_memory_gb,
+    explain_failure,
     find_docker,
     finished_node,
     host_memory_gb,
@@ -741,6 +742,8 @@ class PreprocessWindow(QMainWindow):
         subject = selected[0]
         title = QLabel(f"<h2>sub-{subject}</h2>")
         self.outputs_layout.addWidget(title)
+        if self.statuses.get(subject) == "failed":
+            self.outputs_layout.addWidget(self._failure_group(subject, self.output_folder))
         bolds = preprocessed_bolds(self.output_folder, subject)
         group = QGroupBox(f"Preprocessed BOLD ({len(bolds)})")
         grid = QGridLayout(group)
@@ -755,6 +758,19 @@ class PreprocessWindow(QMainWindow):
         self.outputs_layout.addWidget(group)
         self.outputs_layout.addStretch(1)
         self._show_log(subject)
+
+    def _failure_group(self, subject: str, output_folder: Path) -> QGroupBox:
+        """Why this subject's last C-PAC run failed, read back from its saved log."""
+        group = QGroupBox("Why it failed")
+        group.setStyleSheet(accent_group_box_stylesheet(ERROR_COLOR))
+        layout = QVBoxLayout(group)
+        cause = explain_failure(subject_console_log(output_folder, subject), output_folder)
+        label = QLabel(cause or "No known cause recognised; see the C-PAC Log tab.")
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        label.setStyleSheet(f"color: {ERROR_COLOR}; font-weight: bold;")
+        layout.addWidget(label)
+        return group
 
     def _show_log(self, subject: str) -> None:
         if self.output_folder is None:

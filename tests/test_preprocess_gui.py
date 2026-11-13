@@ -10,7 +10,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings, Qt  # noqa: E402 -- needs QT_QPA_PLATFORM set first
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 from fmri_local_process.gui import preprocess_gui  # noqa: E402
 
@@ -82,6 +82,8 @@ def test_roster_statuses_and_task_filter(
     window.subject_table.selectRow(1)
     assert window._selected_subjects() == ["P02"]
     assert "crashed" in window.log_text.toPlainText()
+    texts = [label.text() for label in window.outputs_widget.findChildren(QLabel)]
+    assert any(text.startswith("No known cause recognised") for text in texts)
 
 
 def test_read_log_tail_keeps_the_end(tmp_path: Path) -> None:
