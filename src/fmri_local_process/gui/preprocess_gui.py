@@ -127,6 +127,7 @@ log = logging.getLogger(__name__)
 
 SETTINGS_APP = "FmriPreprocess"
 TASK_LIST_HEIGHT = 96  # ~4 rows; more tasks scroll
+SUMMARY_MIN_WIDTH = 200
 LOG_TAIL_LINES = 400
 MAX_MISSING_SHOWN = 12
 DOCKER_RECHECK_MS = 30_000
@@ -758,6 +759,7 @@ class PreprocessWindow(QMainWindow):
 
     def _build_summary_group(self) -> QGroupBox:
         group = QGroupBox("Summary")
+        group.setMinimumWidth(SUMMARY_MIN_WIDTH)  # else the grid squeezes it to a word per line
         group.setStyleSheet(accent_group_box_stylesheet(HOME_BASE_ACCENT_COLOR))
         layout = QVBoxLayout(group)
         self.summary_label = QLabel("")

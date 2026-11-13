@@ -1,7 +1,9 @@
 # fmri_local_process
 
-> **Status:** step 0, the Philani DICOM → BIDS conversion, works and is tested on synthetic
-> data. Everything from "The idea" onwards is still the plan.
+> **Status:** step 0, the Philani DICOM → BIDS conversion, and step 1a, C-PAC preprocessing,
+> are built and tested on synthetic data. Everything from "The idea" onwards is still the
+> plan. User guides: [docs/bids-conversion.md](docs/bids-conversion.md) and
+> [docs/preprocessing.md](docs/preprocessing.md) (or `mkdocs serve`).
 
 ## 0. DICOM → BIDS conversion (built)
 
@@ -59,7 +61,9 @@ fmri_preprocess <BIDS_ROOT> <OUTPUT> [--subject_id P001] [--task Rest [--task Ma
   (shown as ■ stopped). Closing the window offers the same. Containers are named
   `fmri_cpac_sub-<id>`, so a subject can't be started twice.
 - `fmri_preprocess_gui` does the same from a window (vr_lab_toolbox process-results
-  layout): pick the BIDS and output folders, task, CPUs and memory, then click "Preprocess".
+  layout): pick the BIDS and output folders, tasks, subjects at once, CPUs and memory, then
+  click "Preprocess". Step-by-step guide with a numbered screenshot:
+  [docs/preprocessing.md](docs/preprocessing.md).
   It shows each subject's status, its preprocessed BOLD files, and the end of its C-PAC log.
   Clicking a subject also previews what C-PAC already generated for it: the QC figures
   (framewise displacement, motion, BOLD SNR; zoomable), brain slices (sagittal / coronal /
