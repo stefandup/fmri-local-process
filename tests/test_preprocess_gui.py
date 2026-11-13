@@ -328,33 +328,39 @@ def test_task_ticks_filter_and_partial(
     assert window._tasks() == ["Rest"] and window.subjects == ["P01", "P02"]
 
 
-def test_pause_freezes_running_and_holds_new_subjects(
+def test_stop_now_frees_resources_and_marks_the_subject(
     window: preprocess_gui.PreprocessWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     window.memory_probe.wait()
     QApplication.processEvents()
     window.docker_error = ""
-    release = threading.Event()
+    container_killed = threading.Event()
     started: list[str] = []
-    docker_calls: list[tuple[list[str], bool]] = []
+    stopped_calls: list[list[str]] = []
 
     def fake_preprocess(*args: object) -> str | None:
         subject, on_line = args[3], args[-1]
         assert isinstance(subject, str) and callable(on_line)
         started.append(subject)
-        release.wait(10)
         on_line('[Node] Finished "anat_preproc".')
-        return None
+        container_killed.wait(10)  # runs until docker stops it
+        return "C-PAC exit 137"
 
-    def fake_pause(_docker: Path, subjects: list[str], pause: bool) -> str | None:
-        docker_calls.append((list(subjects), pause))
+    def fake_stop(_docker: Path, subjects: list[str], grace_s: int = 10) -> str | None:
+        stopped_calls.append(list(subjects))
+        container_killed.set()
         return None
 
     monkeypatch.setattr(preprocess_gui, "find_docker", lambda: Path("docker"))
     monkeypatch.setattr(preprocess_gui, "docker_memory_gb", lambda _docker: 64.0)
     monkeypatch.setattr(preprocess_gui, "image_present", lambda *_: True)
     monkeypatch.setattr(preprocess_gui, "preprocess_subject", fake_preprocess)
-    monkeypatch.setattr(preprocess_gui, "pause_containers", fake_pause)
+    monkeypatch.setattr(preprocess_gui, "stop_containers", fake_stop)
+    monkeypatch.setattr(
+        preprocess_gui.QMessageBox,
+        "question",
+        lambda *_: preprocess_gui.QMessageBox.StandardButton.Yes,
+    )
     window._set_bids_folder(make_bids(tmp_path / "bids"))
     window._set_output_folder(tmp_path / "out")
     window._refresh_roster()
@@ -367,18 +373,16 @@ def test_pause_freezes_running_and_holds_new_subjects(
         time.sleep(0.01)
     assert started == ["P01"]
 
-    window._on_pause()
-    window.pause_pool.submit(lambda: None).result(10)  # the docker call has run
-    assert docker_calls == [(["P01"], True)]
-    assert window.pause_button.text() == "Resume"
-    release.set()  # P01 ends (as if it had been unpaused and finished)
-    time.sleep(0.2)
-    assert started == ["P01"]  # P02 waits while paused
-
-    window._on_pause()  # resume
-    window.pause_pool.submit(lambda: None).result(10)
+    window._on_stop_now()
+    assert not window.stop_now_button.isEnabled()
     worker.wait(10_000)
     QApplication.processEvents()
-    assert started == ["P01", "P02"]
-    assert window.worker is None and not window.batch_paused
-    assert "sub-P02: preprocessed" in window.activity_text.toPlainText()
+    assert stopped_calls == [["P01"]]
+    assert started == ["P01"]  # P02 never started
+    assert window.worker is None
+    log_text = window.activity_text.toPlainText()
+    assert "sub-P01: stopped after 1 steps" in log_text and "FAILED" not in log_text
+    assert window.statuses["P01"] == "stopped"
+    window.subject_table.selectRow(0)
+    texts = [label.text() for label in window.outputs_widget.findChildren(QLabel)]
+    assert any(text.startswith("Stopped by you before it finished") for text in texts)

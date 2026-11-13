@@ -8,6 +8,7 @@ import pytest
 
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
+    STOPPED_MARKER,
     UNKNOWN_EXPECTED_OUTPUTS,
     ParallelPlan,
     StartGate,
@@ -22,6 +23,7 @@ from fmri_local_process.processing.cpac_docker import (
     host_memory_gb,
     is_preprocessed,
     is_subject_done,
+    mark_stopped,
     memory_problem,
     missing_outputs,
     parallel_warning,
@@ -31,6 +33,7 @@ from fmri_local_process.processing.cpac_docker import (
     subject_console_log,
     subject_tasks,
     suggest_plan,
+    was_stopped,
 )
 
 
@@ -342,3 +345,17 @@ def test_explain_failure_container_already_running(tmp_path: Path) -> None:
     )
     cause = explain_failure(console_log, tmp_path)
     assert cause is not None and "already running in Docker" in cause
+
+
+def test_stopped_marker_ends_the_log(tmp_path: Path) -> None:
+    console_log = tmp_path / "log" / "fmri_preprocess_sub-P01.txt"
+    assert not was_stopped(console_log)  # no log yet
+    console_log.parent.mkdir()
+    console_log.write_text("x" * 5000 + "\nKilled\n")
+    assert not was_stopped(console_log)
+    mark_stopped(console_log)
+    assert was_stopped(console_log) and console_log.read_text().endswith(STOPPED_MARKER + "\n")
+    cause = explain_failure(console_log, tmp_path)
+    assert cause is not None and cause.startswith("Stopped by you")
+    console_log.write_text("a new run started\n")  # the next run rewrites the log
+    assert not was_stopped(console_log)

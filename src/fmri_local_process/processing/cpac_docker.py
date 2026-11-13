@@ -419,7 +419,7 @@ def build_cpac_command(
 ) -> list[str]:
     """`docker run` for one subject's C-PAC 'preproc' pipeline (only tasks' BOLD, if given).
 
-    The container is named after the subject (container_name), so it can be paused, and
+    The container is named after the subject (container_name), so it can be stopped, and
     Docker refuses to start a second run of a subject that is still running.
 
     Only sub-<subject>/ and dataset_description.json are mounted: C-PAC walks the whole
@@ -451,22 +451,47 @@ def container_name(subject: str) -> str:
     return f"fmri_cpac_sub-{subject}"
 
 
-def pause_containers(docker: Path, subjects: Iterable[str], pause: bool) -> str | None:
-    """`docker pause` (or unpause) these subjects' containers: frozen in place, memory kept,
-    no CPU used. None when it worked, else docker's complaint."""
+def stop_containers(docker: Path, subjects: Iterable[str], grace_s: int = 10) -> str | None:
+    """`docker stop` these subjects' containers (killed after grace_s), freeing their CPUs
+    and memory; --rm then removes them. Finished steps stay in the working folder, so a
+    rerun resumes. None when it worked, else docker's complaint."""
     names = [container_name(subject) for subject in subjects]
     if not names:
         return None
-    action = "pause" if pause else "unpause"
     try:
         result = subprocess.run(
-            [str(docker), action, *names], capture_output=True, text=True, timeout=60
+            [str(docker), "stop", "-t", str(grace_s), *names],
+            capture_output=True,
+            text=True,
+            timeout=grace_s + 60,
         )
     except subprocess.TimeoutExpired:
-        return f"'docker {action}' didn't answer within 60 s."
+        return "'docker stop' didn't answer in time."
     if result.returncode == 0:
         return None
-    return (result.stderr or result.stdout).strip() or f"'docker {action}' failed"
+    return (result.stderr or result.stdout).strip() or "'docker stop' failed"
+
+
+STOPPED_MARKER = "[fmri_preprocess] Stopped by the user before C-PAC finished."
+
+
+def mark_stopped(console_log: Path) -> None:
+    """Note at the end of a subject's console log that the user stopped the run."""
+    console_log.parent.mkdir(parents=True, exist_ok=True)
+    with console_log.open("a", encoding="utf-8") as out:
+        out.write(f"\n{STOPPED_MARKER}\n")
+
+
+def was_stopped(console_log: Path) -> bool:
+    """True when the last run in this console log was stopped by the user (reads the tail
+    only: these logs reach many MB)."""
+    try:
+        with console_log.open("rb") as log_file:
+            log_file.seek(max(0, console_log.stat().st_size - 512))
+            tail = log_file.read().decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    return tail.rstrip().endswith(STOPPED_MARKER)
 
 
 def image_present(docker: Path, image: str) -> bool:
@@ -574,11 +599,15 @@ def explain_failure(console_log: Path, output_root: Path) -> str | None:
                 f"Not enough memory: C-PAC's largest step needs {biggest:.1f} GB. Raise Memory "
                 f"to at least {math.ceil(biggest) + 1} GB (Docker Desktop must allow it)."
             )
+    if lines and lines[-1] == STOPPED_MARKER:
+        return (
+            "Stopped by you before it finished. Run it again (Run mode 'Skip done, resume "
+            "the rest') to pick up where it stopped: finished steps are reused."
+        )
     if any(NAME_IN_USE in line for line in lines):
         return (
             "This subject's C-PAC container is already running in Docker (maybe from an "
-            "earlier session, or paused). Let it finish, or stop it in Docker Desktop, then "
-            "run again."
+            "earlier session). Let it finish, or stop it in Docker Desktop, then run again."
         )
     if any(OUTPUT_IO_ERROR in line for line in lines):
         return (

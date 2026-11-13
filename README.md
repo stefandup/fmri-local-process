@@ -53,10 +53,11 @@ fmri_preprocess <BIDS_ROOT> <OUTPUT> [--subject_id P001] [--task Rest [--task Ma
   allows, you get a warning and a suggestion that fits (about 10 GB and at least 2 CPUs
   per subject; the GUI's "Suggest" button fills it in). Container starts are spaced 10 s apart.
 - The GUI ticks BOLD tasks in a list (all ticked = every task); each subject still runs once,
-  with its ticked tasks together (`--bold_label task-A task-B`). While running, "Pause" freezes
-  the containers (`docker pause`: CPUs free, memory kept) and starts no new subjects;
-  "Resume" carries on where they were. Containers are named `fmri_cpac_sub-<id>`, so a
-  subject can't be started twice.
+  with its ticked tasks together (`--bold_label task-A task-B`). While running, "Stop now"
+  stops the containers (`docker stop`), freeing CPU and memory for other work on the PC;
+  running the batch again later resumes each stopped subject from its last finished step
+  (shown as ■ stopped). Closing the window offers the same. Containers are named
+  `fmri_cpac_sub-<id>`, so a subject can't be started twice.
 - `fmri_preprocess_gui` does the same from a window (vr_lab_toolbox process-results
   layout): pick the BIDS and output folders, task, CPUs and memory, then click "Preprocess".
   It shows each subject's status, its preprocessed BOLD files, and the end of its C-PAC log.

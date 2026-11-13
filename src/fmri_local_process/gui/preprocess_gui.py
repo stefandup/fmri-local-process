@@ -102,16 +102,18 @@ from fmri_local_process.processing.cpac_docker import (
     host_memory_gb,
     image_present,
     is_subject_done,
+    mark_stopped,
     memory_problem,
     missing_outputs,
     parallel_warning,
-    pause_containers,
     preprocess_subject,
     preprocessed_bolds,
     run_cpac,
+    stop_containers,
     subject_console_log,
     subject_tasks_in,
     suggest_plan,
+    was_stopped,
 )
 from fmri_local_process.processing.cpac_outputs import (
     QcFigure,
@@ -133,6 +135,7 @@ STATUS_ICON = {
     "done": ("✓", OK_COLOR),
     "partial": ("◐", WARNING_COLOR),
     "failed": ("✗", ERROR_COLOR),
+    "stopped": ("■", WARNING_COLOR),
     "running": ("▶", RUNNING_COLOR),
     "not run": ("○", UNKNOWN_COLOR),
 }
@@ -142,6 +145,7 @@ STATUS_LEGEND = (
     "expected\n"
     "◐ (several tasks ticked) some are preprocessed, others not yet\n"
     "✗ C-PAC ran (a log exists) but its output is incomplete\n"
+    "■ stopped by you before it finished; running it again resumes it\n"
     "▶ running now\n"
     "○ not run yet"
 )
@@ -201,16 +205,12 @@ class PreprocessThread(QThread):
         self.run_settings = run
         self.stop_requested = False
         self.docker: Path | None = None
-        # Pause: no new subject starts (resume_event cleared) and running containers are
-        # frozen with `docker pause`. A container that starts while paused (it was already
-        # past the check) is frozen at its first console line.
-        self.paused = False
-        self.resume_event = threading.Event()
-        self.resume_event.set()
-        self.pause_lock = threading.Lock()
+        # Stop now: `docker stop` the running containers. One that is still starting (no
+        # container to stop yet) is stopped at its first console line instead.
+        self.stop_now_requested = False
+        self.lock = threading.Lock()
         self.active: set[str] = set()  # subjects whose container is (about to be) running
-        self.frozen: set[str] = set()  # ... and of those, the ones docker paused
-        self.unpausable: set[str] = set()  # docker refused; not retried until resume
+        self.stopping: set[str] = set()  # ... and of those, the ones docker was told to stop
 
     def run(self) -> None:
         run = self.run_settings
@@ -254,21 +254,19 @@ class PreprocessThread(QThread):
             summary.skipped.append(subject)
             self.subject_finished.emit(subject, 0, False)
             return
-        self.resume_event.wait()
         gate.wait()
-        self.resume_event.wait()  # paused while waiting for a start slot
-        if self.stop_requested:  # pressed while waiting
-            summary.stopped = True
-            return
-        with self.pause_lock:
+        with self.lock:  # under the lock, so stop_now() can't miss a starting subject
+            if self.stop_requested:  # pressed while waiting for a start slot
+                summary.stopped = True
+                return
             self.active.add(subject)
         self.subject_started.emit(index, len(run.subjects), subject)
         steps_done = 0
 
         def on_line(line: str) -> None:
             nonlocal steps_done
-            if self.paused and subject not in self.frozen | self.unpausable:
-                self.freeze(subject, retry=False)
+            if self.stop_now_requested and subject not in self.stopping:
+                self.stop_container(subject)
             node = finished_node(line)
             if node is not None:
                 steps_done += 1
@@ -295,52 +293,47 @@ class PreprocessThread(QThread):
         except Exception as e:  # noqa: BLE001 -- one subject's crash mustn't end the batch
             log.exception("sub-%s crashed", subject)
             failure = f"{type(e).__name__}: {e}"
-        with self.pause_lock:
+        with self.lock:
             self.active.discard(subject)
-            self.frozen.discard(subject)
+            stopped = subject in self.stopping
         if failure is None:
             summary.done.append(subject)
             self.message.emit(f"sub-{subject}: preprocessed ({steps_done} steps)", False)
+        elif stopped:
+            mark_stopped(subject_console_log(run.output_root, subject))
+            summary.stopped = True
+            self.message.emit(
+                f"sub-{subject}: stopped after {steps_done} steps; running it again resumes it",
+                False,
+            )
         else:
             summary.failed.append((subject, failure))
             self.message.emit(f"sub-{subject} FAILED: {failure}", True)
         self.subject_finished.emit(subject, steps_done, failure is None)
 
-    def freeze(self, subject: str, retry: bool) -> None:
-        """`docker pause` one subject's container. retry: a container that doesn't exist
-        yet (still starting) is tried again at its first console line, without a message."""
-        with self.pause_lock:
-            if not self.paused or self.docker is None or subject not in self.active:
+    def stop_container(self, subject: str) -> None:
+        """`docker stop` one subject's container (blocks up to ~10 s)."""
+        with self.lock:
+            if self.docker is None or subject not in self.active or subject in self.stopping:
                 return
-            error = pause_containers(self.docker, [subject], pause=True)
-            if error is None:
-                self.frozen.add(subject)
-                self.message.emit(f"sub-{subject}: paused", False)
-            elif not retry:
-                self.unpausable.add(subject)
-                self.message.emit(f"sub-{subject}: couldn't pause: {error}", True)
+            self.stopping.add(subject)
+        error = stop_containers(self.docker, [subject])
+        if error is not None and "No such container" in error:
+            with self.lock:  # still starting: stopped at its first console line instead
+                self.stopping.discard(subject)
+        elif error is not None:
+            self.message.emit(f"sub-{subject}: couldn't stop its container: {error}", True)
 
-    def pause(self) -> None:
-        """Start no new subjects and freeze the running ones (blocks on docker: call it
-        off the GUI thread)."""
-        self.paused = True
-        self.resume_event.clear()
-        with self.pause_lock:
+    def stop_now(self) -> list[str]:
+        """Start no new subjects and stop the running containers, freeing their CPUs and
+        memory; returns the subjects stopped (blocks on docker: call it off the GUI thread)."""
+        with self.lock:
+            self.stop_requested = True
+            self.stop_now_requested = True
             running = sorted(self.active)
         for subject in running:
-            self.freeze(subject, retry=True)
-
-    def resume(self) -> None:
-        """Unfreeze the paused containers and let new subjects start again (blocks on docker)."""
-        with self.pause_lock:
-            self.paused = False
-            if self.docker is not None and self.frozen:
-                error = pause_containers(self.docker, sorted(self.frozen), pause=False)
-                if error is not None:
-                    self.message.emit(f"Couldn't resume all containers: {error}", True)
-            self.frozen.clear()
-            self.unpausable.clear()
-        self.resume_event.set()
+            self.stop_container(subject)
+        return running
 
     def relay_pull_line(self, line: str) -> None:
         # Without a TTY docker prints one line per layer event; only completions matter.
@@ -409,8 +402,7 @@ class PreprocessWindow(QMainWindow):
         # Untick-list rather than tick-list, so newly found subjects start ticked.
         self.unticked: set[str] = set()
         self.unticked_tasks: set[str] = set()
-        self.batch_paused = False
-        self.pause_pool = ThreadPoolExecutor(max_workers=1)  # docker pause / unpause calls
+
         self._build_ui()
         self._restore_settings()
 
@@ -693,19 +685,18 @@ class PreprocessWindow(QMainWindow):
             "off cleanly."
         )
         self.stop_button.clicked.connect(self._on_stop)
-        self.pause_button = QPushButton("Pause")
-        self.pause_button.setToolTip(
+        self.stop_now_button = QPushButton("Stop now (free CPU and memory)")
+        self.stop_now_button.setToolTip(
             wrap_tooltip(
-                "Pause: freezes the running C-PAC container(s) in place (docker pause) and "
-                "starts no new subjects; the CPUs are free again, but their memory stays in "
-                "use. Resume carries on exactly where they were. Don't restart Docker or the "
-                "PC while paused: that ends the frozen runs (rerunning them reuses finished "
-                "steps)."
+                "Stops the running C-PAC container(s) at once (docker stop) and starts no new "
+                "subjects, so the PC is free for other work. Nothing finished is lost: run "
+                "the batch again later (Run mode 'Skip done, resume the rest') and each "
+                "stopped subject picks up from its last finished step."
             )
         )
-        self.pause_button.clicked.connect(self._on_pause)
-        head.addWidget(self.pause_button)
+        self.stop_now_button.clicked.connect(self._on_stop_now)
         head.addWidget(self.stop_button)
+        head.addWidget(self.stop_now_button)
         layout.addLayout(head)
 
         self.step_bar = QProgressBar()
@@ -916,8 +907,9 @@ class PreprocessWindow(QMainWindow):
             return "done"
         if self._tasks_to_do(subject) != subject_tasks_in(self.bids_folder, subject, tasks):
             return "partial"  # several tasks ticked, some already preprocessed on their own
-        if subject_console_log(self.output_folder, subject).is_file():
-            return "failed"
+        console_log = subject_console_log(self.output_folder, subject)
+        if console_log.is_file():
+            return "stopped" if was_stopped(console_log) else "failed"
         return "not run"
 
     def _tasks_to_do(self, subject: str) -> list[str]:
@@ -1152,7 +1144,7 @@ class PreprocessWindow(QMainWindow):
         self._show_previews(subject)
         title = QLabel(f"<h2>sub-{subject}</h2>")
         self.outputs_layout.addWidget(title)
-        if self.statuses.get(subject) == "failed":
+        if self.statuses.get(subject) in ("failed", "stopped"):
             self.outputs_layout.addWidget(self._failure_group(subject, self.output_folder))
         if self.statuses.get(subject) == "partial":
             self.outputs_layout.addWidget(self._partial_group(self._tasks_to_do(subject)))
@@ -1193,15 +1185,18 @@ class PreprocessWindow(QMainWindow):
         return group
 
     def _failure_group(self, subject: str, output_folder: Path) -> QGroupBox:
-        """Why this subject's last C-PAC run failed, read back from its saved log."""
-        group = QGroupBox("Why it failed")
-        group.setStyleSheet(accent_group_box_stylesheet(ERROR_COLOR))
+        """Why this subject's last C-PAC run failed (or that it was stopped), read back
+        from its saved log."""
+        stopped = self.statuses.get(subject) == "stopped"
+        color = WARNING_COLOR if stopped else ERROR_COLOR
+        group = QGroupBox("Stopped before it finished" if stopped else "Why it failed")
+        group.setStyleSheet(accent_group_box_stylesheet(color))
         layout = QVBoxLayout(group)
         cause = explain_failure(subject_console_log(output_folder, subject), output_folder)
         label = QLabel(cause or "No known cause recognised; see the C-PAC Log tab.")
         label.setWordWrap(True)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        label.setStyleSheet(f"color: {ERROR_COLOR}; font-weight: bold;")
+        label.setStyleSheet(f"color: {color}; font-weight: bold;")
         layout.addWidget(label)
         return group
 
@@ -1375,8 +1370,7 @@ class PreprocessWindow(QMainWindow):
         self.subject_bar.setValue(0)
         self.subject_bar.setFormat("Subjects: %v of %m done")
         self.stop_button.setEnabled(True)
-        self.batch_paused = False
-        self.pause_button.setText("Pause")
+        self.stop_now_button.setEnabled(True)
         self.run_group.setVisible(True)
         self.spinner_timer.start()
         self._update_run_title()
@@ -1392,11 +1386,7 @@ class PreprocessWindow(QMainWindow):
     def _update_run_title(self) -> None:
         self.spinner_index = (self.spinner_index + 1) % len(SPINNER)
         spinner = SPINNER[self.spinner_index]
-        if self.batch_paused:
-            spinner = "⏸"
-        if self.batch_paused and not self.running:
-            self.run_title.setText(f"{spinner}  Paused")
-        elif not self.running:
+        if not self.running:
             self.run_title.setText(f"{spinner}  {self.run_stage}")
         elif len(self.running) == 1:
             subject, state = next(iter(self.running.items()))
@@ -1430,29 +1420,25 @@ class PreprocessWindow(QMainWindow):
             self.worker.stop_requested = True
             self.stop_button.setEnabled(False)
             self._log_activity("Stopping once the running subject(s) finish...")
-            if self.batch_paused:  # they can only finish when running
-                self._on_pause()
 
-    def _on_pause(self) -> None:
-        """Pause or resume the batch; docker is called on a helper thread, its messages
-        come back through the worker's message signal."""
+    def _on_stop_now(self) -> None:
         worker = self.worker
         if worker is None:
             return
-        # One helper thread, so a quick pause-resume runs in the order clicked.
-        self.batch_paused = not self.batch_paused
-        if self.batch_paused:
-            self._log_activity(
-                "Pausing: running containers are frozen, no new subjects start. Click "
-                "Resume to carry on."
-            )
-            self.pause_pool.submit(worker.pause)
-        else:
-            self._log_activity("Resuming...")
-            self.pause_pool.submit(worker.resume)
-        self.pause_button.setText("Resume" if self.batch_paused else "Pause")
-        self._update_run_title()
-        self._update_live_line()
+        answer = QMessageBox.question(
+            self,
+            "Stop now?",
+            f"Stop the {len(self.running) or 'running'} C-PAC container(s) now and start no "
+            "new subjects? This frees the CPUs and memory. Finished steps are kept: running "
+            "the batch again later resumes each subject where it stopped.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.stop_button.setEnabled(False)
+        self.stop_now_button.setEnabled(False)
+        self.run_stage = "Stopping..."
+        self._log_activity("Stopping the running C-PAC container(s) now...")
+        threading.Thread(target=worker.stop_now, daemon=True).start()  # docker takes ~10 s
 
     def _on_subject_started(self, _index: int, _total: int, subject: str) -> None:
         if not self.running:  # re-read: the last subject may have just saved a new count
@@ -1491,7 +1477,6 @@ class PreprocessWindow(QMainWindow):
             self.worker.wait()
         self.worker = None
         self.running.clear()
-        self.batch_paused = False
         self._set_live_line(None)
         self.spinner_timer.stop()
         self.run_group.setVisible(False)
@@ -1546,8 +1531,8 @@ class PreprocessWindow(QMainWindow):
             if self.step_estimate:
                 percent = min(99, 100 * state.steps // self.step_estimate)
                 count += f" of ~{self.step_estimate} ({percent}%)"
-            state_word = "⏸ PAUSED" if self.batch_paused else f"{SPINNER[self.spinner_index]} BUSY"
-            text = f"{state_word} sub-{subject}: {count}, {elapsed // 60}m{elapsed % 60:02d}s"
+            spinner = SPINNER[self.spinner_index]
+            text = f"{spinner} BUSY sub-{subject}: {count}, {elapsed // 60}m{elapsed % 60:02d}s"
             lines.append(f"{text} - {state.last_step or 'starting container'}")
         self._set_live_line("\n".join(lines) or None)
 
@@ -1559,21 +1544,33 @@ class PreprocessWindow(QMainWindow):
                 self.docker_control.wait()
             event.accept()
             return
-        answer = QMessageBox.question(
-            self,
-            "C-PAC is still running",
-            "Closing now leaves the running C-PAC container(s) going in Docker Desktop "
-            "(stop it there if needed) and the rest of the batch won't start. Close anyway?",
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("C-PAC is still running")
+        box.setText(
+            "Stop C-PAC and close, freeing the CPUs and memory? Finished steps are kept: "
+            "running the batch again later resumes each subject where it stopped.\n\n"
+            "Or close and leave the running container(s) going in Docker (the rest of the "
+            "batch won't start)."
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        stop = box.addButton("Stop C-PAC and close", QMessageBox.ButtonRole.AcceptRole)
+        leave = box.addButton("Leave running and close", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() not in (stop, leave):
             event.ignore()
             return
-        # A QThread destroyed while running aborts the process with a crash dialog, and the
-        # worker is blocked on docker for possibly hours: save settings and leave at once,
-        # after unfreezing paused containers (nothing would resume them later).
         self.settings.sync()
-        if self.batch_paused:
-            self.worker.resume()
+        if box.clickedButton() is stop:
+            self.setEnabled(False)
+            self._log_activity("Stopping C-PAC before closing (up to ~10 s)...")
+            QApplication.processEvents()
+            stopped = self.worker.stop_now()
+            if self.output_folder is not None:  # the worker threads won't get to it
+                for subject in stopped:
+                    mark_stopped(subject_console_log(self.output_folder, subject))
+        # A QThread destroyed while running aborts the process with a crash dialog, and the
+        # worker may be blocked on docker for hours: leave at once.
         os._exit(0)
 
 
