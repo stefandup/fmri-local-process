@@ -4,6 +4,7 @@ C-PAC delegates to FSL / AFNI / ANTs, which don't run natively on Windows, so th
 container does the work; this module only builds the `docker run` call and checks output.
 """
 
+import fnmatch
 import logging
 import math
 import os
@@ -103,6 +104,29 @@ def find_docker() -> Path:
     return Path(exe)
 
 
+DOCKER_DESKTOP_ACTIONS = ("start", "restart", "stop")
+
+
+def docker_desktop(action: str, timeout_s: float = 300) -> str | None:
+    """`docker desktop <action>` (start / restart / stop the Docker Desktop engine); None
+    when it worked, else why not. Needs Docker Desktop 4.37+ for the `desktop` command."""
+    if action not in DOCKER_DESKTOP_ACTIONS:
+        raise ValueError(f"unknown Docker Desktop action {action!r}")
+    exe = shutil.which("docker")
+    if exe is None:
+        return "docker not found on PATH. Install Docker Desktop."
+    try:
+        result = subprocess.run(
+            [exe, "desktop", action], capture_output=True, text=True, timeout=timeout_s
+        )
+    except subprocess.TimeoutExpired:
+        return f"'docker desktop {action}' didn't finish within {timeout_s:g} s."
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        return f"'docker desktop {action}' failed: {detail}"
+    return None
+
+
 def bold_glob(task: str | None) -> str:
     """Glob for raw BOLD files, of one task (e.g. 'Rest') or of all tasks."""
     return f"*_task-{task}_*bold.nii.gz" if task else "*_bold.nii.gz"
@@ -143,19 +167,108 @@ def bold_sessions(bids_root: Path, subject: str, task: str | None = None) -> lis
 def is_preprocessed(
     output_root: Path, subject: str, sessions: list[str], task: str | None = None
 ) -> bool:
-    """True when C-PAC wrote a preprocessed BOLD (of task) for every session.
+    """True when C-PAC wrote a preprocessed BOLD (of task) for every session, and none of
+    the outputs it said it would write (its expectedOutputs.yml) are missing.
 
     C-PAC names outputs '<unique_id>_..._desc-preproc_bold.nii.gz' with unique_id
-    '[sub-]<subject>_ses-<n>', under OUTPUT/output/pipeline_<name>/.
+    '[sub-]<subject>_ses-<n>', under OUTPUT/output/pipeline_<name>/. The preproc BOLD is
+    copied out before the other outputs, so a run that dies while copying still has it.
     """
     found = {
         nifti.name.removeprefix("sub-")
         for nifti in (output_root / "output").rglob("*desc-preproc*_bold.nii.gz")
         if task is None or f"_task-{task}_" in nifti.name
     }
-    return bool(sessions) and all(
+    has_bold = bool(sessions) and all(
         any(name.startswith(f"{subject}_ses-{ses}_") for name in found) for ses in sessions
     )
+    return has_bold and not any(missing_outputs(output_root, subject, sessions, task).values())
+
+
+UNKNOWN_EXPECTED_OUTPUTS = "unknown: the last C-PAC run stopped before listing its outputs"
+
+
+def expected_outputs_file(output_root: Path, subject: str, session: str) -> Path | None:
+    """The newest expectedOutputs.yml C-PAC wrote for this session, or None if never run."""
+    unique_id = f"{subject}_ses-{session}"
+    candidates = [
+        path
+        for path in (output_root / "log").glob(f"pipeline_*/*{unique_id}/*_expectedOutputs.yml")
+        if path.parent.name.removeprefix("sub-") == unique_id
+    ]
+    return max(candidates, key=lambda path: path.stat().st_mtime, default=None)
+
+
+def read_expected_outputs(path: Path) -> dict[str, list[str]]:
+    """expectedOutputs.yml as {'anat': [glob, ...], 'func': [...]}.
+
+    The file is a flat 'section:' / '- glob' list, so it's read directly rather than
+    adding a YAML dependency for it.
+    """
+    sections: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("- ") and current is not None:
+            current.append(line[2:].strip().strip("'\""))
+        elif line.endswith(":") and not line.startswith(" "):
+            current = sections.setdefault(line[:-1].strip(), [])
+    return sections
+
+
+def clear_subject_results(output_root: Path, subject: str) -> list[Path]:
+    """Delete this subject's C-PAC working and output folders (so a rerun starts from
+    scratch), returning what was deleted. Logs are kept: they explain earlier failures."""
+    targets = [
+        *(output_root / "working").glob(f"pipeline_*/cpac_sub-{subject}_ses-*"),
+        *(output_root / "output").glob(f"pipeline_*/sub-{subject}"),
+    ]
+    for target in targets:
+        shutil.rmtree(target)
+    return targets
+
+
+def short_output_name(pattern: str) -> str:
+    """'sub-1*_ses-1*_desc-brain*_mask*' -> 'desc-brain_mask' (for display)."""
+    parts = pattern.replace("*", "").split("_")
+    return "_".join(part for part in parts if not part.startswith(("sub-", "ses-")))
+
+
+def missing_outputs(
+    output_root: Path, subject: str, sessions: list[str], task: str | None = None
+) -> dict[str, list[str]]:
+    """Per session, the outputs C-PAC expected to write but didn't, as 'func: desc-x_bold'.
+
+    Sessions C-PAC never started (no expectedOutputs.yml) are left out. With a task, only
+    that task's func outputs count (the patterns themselves don't name a task).
+    """
+    missing: dict[str, list[str]] = {}
+    for session in sessions:
+        expected_file = expected_outputs_file(output_root, subject, session)
+        if expected_file is None:
+            continue
+        expected = read_expected_outputs(expected_file)
+        if not expected:
+            # C-PAC empties the file when it starts, so a run that died early leaves it so.
+            missing[session] = [UNKNOWN_EXPECTED_OUTPUTS]
+            continue
+        session_dirs = list(
+            (output_root / "output").glob(f"pipeline_*/sub-{subject}/ses-{session}")
+        )
+        gaps = []
+        for section, patterns in expected.items():
+            names = [
+                file.name
+                for session_dir in session_dirs
+                for file in (session_dir / section).glob("*")
+                if section != "func" or task is None or f"_task-{task}_" in file.name
+            ]
+            gaps += [
+                f"{section}: {short_output_name(pattern)}"
+                for pattern in patterns
+                if not any(fnmatch.fnmatchcase(name, pattern) for name in names)
+            ]
+        missing[session] = gaps
+    return missing
 
 
 def preprocessed_bolds(output_root: Path, subject: str) -> list[Path]:
@@ -215,12 +328,20 @@ def pull_image(docker: Path, image: str) -> int:
 
 
 NODE_FINISHED = re.compile(r'\[Node\] Finished "([^"]+)"')
+# A resumed run reuses finished steps from the working folder; nipype logs each once as
+# '[Job N] Cached (node)' instead of running it. Counting them keeps the step count (and
+# the saved per-subject estimate) the same whether a run started fresh or resumed.
+JOB_CACHED = re.compile(r"\[Job \d+\] Cached \(([^)]+)\)")
 
 
 def finished_node(line: str) -> str | None:
-    """Name of the nipype node a C-PAC console line reports as finished, else None."""
-    match = NODE_FINISHED.search(line)
-    return match.group(1) if match else None
+    """Name of the nipype node a C-PAC console line reports as finished (or reused from
+    an earlier run, marked ' (cached)'), else None."""
+    if match := NODE_FINISHED.search(line):
+        return match.group(1)
+    if match := JOB_CACHED.search(line):
+        return f"{match.group(1)} (cached)"
+    return None
 
 
 def run_cpac(
@@ -258,6 +379,7 @@ CRASH_FILE = re.compile(rf"Saving crash info to {OUTPUT_MOUNT}/(\S+)")
 TOOL_ERROR = re.compile(r"\*\* (?:FATAL )?ERROR:\s*(.+)")
 PYTHON_ERROR = re.compile(r"^\s*([\w.]*(?:Error|Exception)): (.+)")
 TOO_FEW_VOLUMES = re.compile(r"too many for (\d+) retained time points")
+OUTPUT_IO_ERROR = f"[Errno 5] Input/output error: '{OUTPUT_MOUNT}/"
 ANSI_CODE = re.compile(r"\x1b\[[0-9;]*m")  # terminal colours AFNI writes into its errors
 
 
@@ -298,6 +420,13 @@ def explain_failure(console_log: Path, output_root: Path) -> str | None:
                 f"Not enough memory: C-PAC's largest step needs {biggest:.1f} GB. Raise Memory "
                 f"to at least {math.ceil(biggest) + 1} GB (Docker Desktop must allow it)."
             )
+    if any(OUTPUT_IO_ERROR in line for line in lines):
+        return (
+            "Docker lost access to the output folder mid-run ('Input/output error' writing to "
+            f"{OUTPUT_MOUNT}); not a pipeline error. Common causes: the PC slept, Docker "
+            "Desktop's file sharing dropped, or antivirus/sync locked files. Run it again: "
+            "finished steps are reused from the working folder."
+        )
     failed_nodes = list(
         dict.fromkeys(m.group(1) for line in lines if (m := NODE_FAILED.search(line)))
     )
@@ -341,5 +470,11 @@ def preprocess_subject(
         return None
     cause = explain_failure(console_log, output_root)
     if cause is None:
-        cause = f"C-PAC exit {returncode}" if returncode else "no preprocessed BOLD written"
+        n_missing = sum(map(len, missing_outputs(output_root, subject, sessions, task).values()))
+        if returncode:
+            cause = f"C-PAC exit {returncode}"
+        elif n_missing:
+            cause = f"{n_missing} expected output(s) not written"
+        else:
+            cause = "no preprocessed BOLD written"
     return f"{cause} (full log: {console_log})"

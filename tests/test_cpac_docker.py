@@ -3,17 +3,23 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
+    UNKNOWN_EXPECTED_OUTPUTS,
     bids_subjects,
     bids_tasks,
     bold_sessions,
     build_cpac_command,
+    clear_subject_results,
+    docker_desktop,
     explain_failure,
     finished_node,
     host_memory_gb,
     is_preprocessed,
     memory_problem,
+    missing_outputs,
     preprocess_subject,
     preprocessed_bolds,
     run_cpac,
@@ -25,6 +31,11 @@ def test_finished_node_parses_nipype_lines() -> None:
     line = '\t [Node] Finished "resample_o", elapsed time 0.871706s.\n'
     assert finished_node(line) == "resample_o"
     assert finished_node('\t [Node] Setting-up "resample_o" in "/tmp/x".\n') is None
+    cached = "\t [Job 87] Cached (cpac_sub-1_ses-1.json_space-template_desc-brain_mask_77).\n"
+    assert (
+        finished_node(cached) == "cpac_sub-1_ses-1.json_space-template_desc-brain_mask_77 (cached)"
+    )
+    assert finished_node("\t [Job 87] Completed (cpac_sub-1_ses-1.x).\n") is None
 
 
 def test_run_cpac_streams_lines_and_logs(tmp_path: Path) -> None:
@@ -89,6 +100,75 @@ def test_is_preprocessed_needs_every_session(tmp_path: Path) -> None:
     assert not is_preprocessed(out, "P01", ["1", "2"])
     assert not is_preprocessed(out, "P0", ["1"])  # no prefix matches
     assert not is_preprocessed(out, "P01", [])
+
+
+EXPECTED_OUTPUTS = """anat:
+- sub-P01*_ses-1*_desc-preproc*_T1w*
+func:
+- sub-P01*_ses-1*_desc-preproc*_bold*
+- sub-P01*_ses-1*_space-MNI152NLin6ASym*_desc-preproc*_bold*
+"""
+
+
+def make_partial_run(out: Path) -> Path:
+    """A crashed-while-copying run: the native preproc BOLD written, the MNI one not."""
+    log_dir = out / "log" / "pipeline_cpac_preproc" / "sub-P01_ses-1"
+    log_dir.mkdir(parents=True)
+    (log_dir / "sub-P01_ses-1_expectedOutputs.yml").write_text(EXPECTED_OUTPUTS)
+    session = out / "output" / "pipeline_cpac_preproc" / "sub-P01" / "ses-1"
+    (session / "anat").mkdir(parents=True)
+    (session / "func").mkdir()
+    (session / "anat" / "sub-P01_ses-1_desc-preproc_T1w.nii.gz").touch()
+    (session / "func" / "sub-P01_ses-1_task-rest_desc-preproc_bold.nii.gz").touch()
+    return session
+
+
+def test_missing_outputs_make_a_run_incomplete(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    session = make_partial_run(out)
+    assert missing_outputs(out, "P01", ["1"]) == {
+        "1": ["func: space-MNI152NLin6ASym_desc-preproc_bold"]
+    }
+    assert not is_preprocessed(out, "P01", ["1"])
+
+    mni = "sub-P01_ses-1_task-rest_space-MNI152NLin6ASym_desc-preproc_bold.nii.gz"
+    (session / "func" / mni).touch()
+    assert missing_outputs(out, "P01", ["1"]) == {"1": []}
+    assert is_preprocessed(out, "P01", ["1"])
+    # Another task's func outputs don't count for this task.
+    assert "func: desc-preproc_bold" in missing_outputs(out, "P01", ["1"], "Matching")["1"]
+    assert missing_outputs(out, "P01", ["2"]) == {}  # C-PAC never started ses-2
+
+    # A rerun that dies at startup leaves the file empty: unknown, so not complete.
+    (out / "log/pipeline_cpac_preproc/sub-P01_ses-1/sub-P01_ses-1_expectedOutputs.yml").write_text(
+        ""
+    )
+    assert missing_outputs(out, "P01", ["1"]) == {"1": [UNKNOWN_EXPECTED_OUTPUTS]}
+    assert not is_preprocessed(out, "P01", ["1"])
+
+
+def test_clear_subject_results_keeps_logs_and_other_subjects(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    make_partial_run(out)
+    working = out / "working" / "pipeline_cpac_preproc"
+    (working / "cpac_sub-P01_ses-1").mkdir(parents=True)
+    (working / "cpac_sub-P011_ses-1").mkdir()
+    other = out / "output" / "pipeline_cpac_preproc" / "sub-P011"
+    other.mkdir()
+    removed = clear_subject_results(out, "P01")
+    assert len(removed) == 2
+    assert not (working / "cpac_sub-P01_ses-1").exists()
+    assert (working / "cpac_sub-P011_ses-1").exists() and other.exists()
+    assert (out / "log" / "pipeline_cpac_preproc" / "sub-P01_ses-1").exists()
+
+
+def test_explain_failure_lost_output_mount(tmp_path: Path) -> None:
+    console_log = tmp_path / "log.txt"
+    console_log.write_text(
+        "OSError: [Errno 5] Input/output error: '/outputs/working/x/result_x.pklz'\n"
+    )
+    cause = explain_failure(console_log, tmp_path)
+    assert cause is not None and cause.startswith("Docker lost access to the output folder")
 
 
 def test_command_mounts_only_the_subject(tmp_path: Path) -> None:
@@ -168,6 +248,11 @@ def test_explain_failure_unknown(tmp_path: Path) -> None:
     console_log.write_text("all good\n")
     assert explain_failure(console_log, tmp_path) is None
     assert explain_failure(tmp_path / "missing.txt", tmp_path) is None
+
+
+def test_docker_desktop_rejects_unknown_actions() -> None:
+    with pytest.raises(ValueError):
+        docker_desktop("rm -rf")
 
 
 def test_memory_problem() -> None:

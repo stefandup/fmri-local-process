@@ -15,7 +15,7 @@ from fmri_local_process.processing.dcm2niix import (
     find_dcm2niix,
     run_dcm2niix,
 )
-from fmri_local_process.processing.deface import DefaceUnavailableError, make_mri_deface
+from fmri_local_process.processing.deface import DefaceUnavailableError, make_deface
 from fmri_local_process.processing.philani_bids import (
     PENDING_DIR,
     ConversionReport,
@@ -29,8 +29,12 @@ EXAMPLES_EPILOG = """
 Examples:
 
 \b
-  Convert everything, with behavioural logs (Windows has no FreeSurfer, so no defacing):
-  fmri_convert_to_bids D:\\philani D:\\philani_bids --behav-logs D:\\behav_logs --no-deface
+  Convert everything, with behavioural logs (defaced with the installer's Docker defacer):
+  fmri_convert_to_bids D:\\philani D:\\philani_bids --behav-logs D:\\behav_logs
+
+\b
+  Deface with your own mri_deface + templates (or a FreeSurfer home) instead:
+  fmri_convert_to_bids D:\\philani D:\\philani_bids --freesurfer D:\\tools\\mri_deface
 
 \b
   Rebuild an old flat-layout BIDS folder from scratch, without prompts:
@@ -65,7 +69,14 @@ def print_report(report: ConversionReport) -> None:
 @click.version_option(package_name="fmri-local-process")
 @click.argument("dicom_root", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.argument("bids_root", type=click.Path(file_okay=False, path_type=Path))
-@click.option("--no-deface", is_flag=True, help="Skip T1w face removal (needs FreeSurfer).")
+@click.option("--no-deface", is_flag=True, help="Skip T1w face removal.")
+@click.option(
+    "--freesurfer",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Deface with the mri_deface in this folder: a FreeSurfer home, or a folder holding "
+    "mri_deface, talairach_mixed_with_skull.gca and face.gca. Default: $FREESURFER_HOME, "
+    "else the defacer in the installer-built philani_fmri_process Docker image.",
+)
 @click.option(
     "--reset",
     is_flag=True,
@@ -96,6 +107,7 @@ def main(
     dicom_root: Path,
     bids_root: Path,
     no_deface: bool,
+    freesurfer: Path | None,
     reset: bool,
     behav_root: Path | None,
     dcm2niix_path: Path | None,
@@ -126,7 +138,7 @@ def main(
 
     try:
         exe = find_dcm2niix(dcm2niix_path)
-        deface = None if no_deface else make_mri_deface()
+        deface = None if no_deface else make_deface(freesurfer)
     except (Dcm2niixNotFoundError, DefaceUnavailableError) as e:
         raise click.ClickException(str(e)) from e
     logging.info("Using dcm2niix at %s", exe)

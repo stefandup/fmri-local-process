@@ -99,9 +99,13 @@ function Build-Installer {
         robocopy $bundleDir $PayloadPath /E /NFL /NDL /NJH /NJS /NP | Out-Null
         if ($LASTEXITCODE -ge 8) { throw "Copying $app into the payload failed ($LASTEXITCODE)" }
     }
-    # The installer's optional "download C-PAC image" step pulls the tag fmri_preprocess runs.
+    # The installer's Docker setup (packaging\docker\, shipped as {app}\docker\) pulls the
+    # C-PAC tag fmri_preprocess runs and builds the defacer image processing\deface.py looks for.
+    Copy-Item (Join-Path $PSScriptRoot "packaging\docker") (Join-Path $PayloadPath "docker") -Recurse
     $cpacImage = (& $Python -c "from fmri_local_process.processing.cpac_docker import CPAC_IMAGE; print(CPAC_IMAGE)").Trim()
     Assert-Success "Reading CPAC_IMAGE"
+    $defaceImage = (& $Python -c "from fmri_local_process.processing.deface import DEFACE_IMAGE; print(DEFACE_IMAGE)").Trim()
+    Assert-Success "Reading DEFACE_IMAGE"
 
     if (Test-Path $InstallerPath) { Remove-Item $InstallerPath -Recurse -Force }
 
@@ -114,7 +118,7 @@ function Build-Installer {
         $iscc = $isccCmd.Source
     }
 
-    & $iscc (Join-Path $PSScriptRoot "fmri_local_process_installer.iss") "/DMyAppVersion=$version" "/DCpacImage=$cpacImage"
+    & $iscc (Join-Path $PSScriptRoot "fmri_local_process_installer.iss") "/DMyAppVersion=$version" "/DCpacImage=$cpacImage" "/DDefaceImage=$defaceImage"
     Assert-Success "ISCC.exe"
 }
 

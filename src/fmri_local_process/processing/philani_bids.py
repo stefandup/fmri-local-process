@@ -43,7 +43,8 @@ log = logging.getLogger(__name__)
 ConvertFn = Callable[[Path, Path, str], None]
 """(dicom series folder, output folder, file stem) -> writes <stem>.nii.gz + <stem>.json"""
 
-DEFACE_NOTE = "The T1w image was defaced using FreeSurfer mri_deface"
+# Followed by the tool's name. Older sidecars say "... using FreeSurfer mri_deface".
+DEFACE_NOTE = "The T1w image was defaced using"
 DATE_FORMAT = "%Y%m%d"  # date at the start of each DICOM session folder name
 SKIP_SESSION_ABOVE_BYTES = 1024**3  # an existing ses-* folder over 1 GB counts as done
 IGNORED_FOLDERS = {"trash"}
@@ -408,8 +409,8 @@ def convert_series(
 
     if rule.suffix == "T1w" and deface is not None and not is_defaced(sidecar):
         log.info("Defacing %s", nifti.name)
-        deface(nifti)
-        update_json(sidecar, Notes=DEFACE_NOTE)
+        tool = deface(nifti)
+        update_json(sidecar, Notes=f"{DEFACE_NOTE} {tool}")
 
     if rule.task_name:
         update_json(sidecar, TaskName=rule.task_name)

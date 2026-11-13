@@ -22,7 +22,6 @@ from PySide6.QtGui import QCloseEvent, QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -74,6 +73,8 @@ from fmri_local_process.processing.cpac_docker import (
     bids_subjects,
     bids_tasks,
     bold_sessions,
+    clear_subject_results,
+    docker_desktop,
     docker_memory_gb,
     explain_failure,
     find_docker,
@@ -82,6 +83,7 @@ from fmri_local_process.processing.cpac_docker import (
     image_present,
     is_preprocessed,
     memory_problem,
+    missing_outputs,
     preprocess_subject,
     preprocessed_bolds,
     run_cpac,
@@ -93,6 +95,8 @@ log = logging.getLogger(__name__)
 SETTINGS_APP = "FmriPreprocess"
 ALL_TASKS = "All tasks"
 LOG_TAIL_LINES = 400
+MAX_MISSING_SHOWN = 12
+DOCKER_RECHECK_MS = 30_000
 STATUS_ICON = {
     "done": ("✓", OK_COLOR),
     "failed": ("✗", ERROR_COLOR),
@@ -101,11 +105,18 @@ STATUS_ICON = {
 }
 SPINNER = "◐◓◑◒"
 STATUS_LEGEND = (
-    "✓ every session has a preprocessed BOLD (of the chosen task)\n"
-    "✗ C-PAC ran (a log exists) but no complete output\n"
+    "✓ every session has a preprocessed BOLD (of the chosen task) and every output C-PAC "
+    "expected\n"
+    "✗ C-PAC ran (a log exists) but its output is incomplete\n"
     "▶ running now\n"
     "○ not run yet"
 )
+# Run mode -> dropdown label. Every mode reuses C-PAC's working folder except "scratch".
+RUN_MODES = {
+    "skip": "Skip done, resume the rest",
+    "resume": "Resume all (reuse finished steps)",
+    "scratch": "Rerun from scratch (delete previous results)",
+}
 
 
 @dataclass
@@ -114,9 +125,9 @@ class RunSettings:
     output_root: Path
     subjects: list[str]
     task: str | None
-    rerun: bool
     n_cpus: int
     mem_gb: float
+    mode: str = "skip"  # a RUN_MODES key
     image: str = CPAC_IMAGE
 
 
@@ -170,10 +181,16 @@ class PreprocessThread(QThread):
                 break
             self.subject_started.emit(index, len(run.subjects), subject)
             sessions = bold_sessions(run.bids_root, subject, run.task)
-            if not run.rerun and is_preprocessed(run.output_root, subject, sessions, run.task):
+            if run.mode == "skip" and is_preprocessed(run.output_root, subject, sessions, run.task):
                 summary.skipped.append(subject)
                 self.subject_finished.emit(subject, 0, False)
                 continue
+            if run.mode == "scratch":
+                removed = clear_subject_results(run.output_root, subject)
+                self.message.emit(
+                    f"sub-{subject}: deleted {len(removed)} previous working/output folder(s)",
+                    False,
+                )
             steps_done = 0
 
             def on_line(line: str, subject: str = subject) -> None:
@@ -208,6 +225,19 @@ class PreprocessThread(QThread):
         text = line.strip()
         if text.endswith("Pull complete") or text.startswith(("Digest:", "Status:")):
             self.message.emit(f"docker pull: {text}", False)
+
+
+class DockerControlThread(QThread):
+    """Starts / restarts Docker Desktop off the GUI thread (takes up to a minute or two)."""
+
+    done = Signal(str, str)  # action, error ("" when it worked)
+
+    def __init__(self, action: str) -> None:
+        super().__init__()
+        self.action = action
+
+    def run(self) -> None:
+        self.done.emit(self.action, docker_desktop(self.action) or "")
 
 
 class MemoryProbeThread(QThread):
@@ -251,6 +281,7 @@ class PreprocessWindow(QMainWindow):
         self.docker_gb: float | None = None
         self.docker_error = ""
         self.memory_probed = False
+        self.docker_control: DockerControlThread | None = None
         # Untick-list rather than tick-list, so newly found subjects start ticked.
         self.unticked: set[str] = set()
         self.subject_started_at = 0.0
@@ -383,15 +414,45 @@ class PreprocessWindow(QMainWindow):
         style_secondary_label(self.memory_label)
         layout.addWidget(self.memory_label)
 
-        self.skip_checkbox = QCheckBox("Skip already-preprocessed subjects")
-        self.skip_checkbox.setChecked(True)
-        self.skip_checkbox.setToolTip(
+        docker_row = QHBoxLayout()
+        self.docker_label = QLabel("Checking Docker...")
+        self.docker_label.setWordWrap(True)
+        style_secondary_label(self.docker_label)
+        docker_row.addWidget(self.docker_label, 1)
+        self.docker_start_button = QPushButton("Start Docker")
+        self.docker_start_button.setToolTip("Runs 'docker desktop start'.")
+        self.docker_start_button.clicked.connect(partial(self._on_docker_action, "start"))
+        docker_row.addWidget(self.docker_start_button)
+        self.docker_restart_button = QPushButton("Restart Docker")
+        self.docker_restart_button.setToolTip(
             wrap_tooltip(
-                "Skips a subject when every session already has a preprocessed BOLD (of "
-                "the chosen task). Uncheck to redo them, e.g. after a pipeline change."
+                "Runs 'docker desktop restart'. Clears Docker's file sharing when C-PAC fails "
+                "with 'Input/output error'. Stops any running container."
             )
         )
-        layout.addWidget(self.skip_checkbox)
+        self.docker_restart_button.clicked.connect(partial(self._on_docker_action, "restart"))
+        docker_row.addWidget(self.docker_restart_button)
+        layout.addLayout(docker_row)
+        # Re-check now and then, so the warning clears (or appears) without a restart.
+        self.docker_timer = QTimer(self)
+        self.docker_timer.setInterval(DOCKER_RECHECK_MS)
+        self.docker_timer.timeout.connect(self._probe_docker)
+
+        mode_form = QFormLayout()
+        self.mode_combo = QComboBox()
+        for mode, label in RUN_MODES.items():
+            self.mode_combo.addItem(label, mode)
+        self.mode_combo.setToolTip(
+            wrap_tooltip(
+                "Skip done: subjects with every expected output are skipped; incomplete ones "
+                "(e.g. a crashed run) pick up where they stopped. Resume all: runs every "
+                "ticked subject, reusing finished steps. Rerun from scratch: deletes the "
+                "subject's working and output folders first, e.g. after a pipeline change. "
+                "Keep CPUs the same when resuming, or C-PAC may redo the BOLD steps."
+            )
+        )
+        mode_form.addRow("Run mode:", self.mode_combo)
+        layout.addLayout(mode_form)
 
         run_row = QHBoxLayout()
         self.process_button = QPushButton("Preprocess")
@@ -503,9 +564,14 @@ class PreprocessWindow(QMainWindow):
     def _restore_settings(self) -> None:
         self.cpus_spin.setValue(int(str(self.settings.value("n_cpus", 1))))
         self.mem_spin.setValue(max(MIN_MEM_GB, float(str(self.settings.value("mem_gb", 0)))))
+        # A deleting mode is never restored as the default for the next session.
+        saved_mode = str(self.settings.value("run_mode", "skip"))
+        if saved_mode != "scratch" and (index := self.mode_combo.findData(saved_mode)) >= 0:
+            self.mode_combo.setCurrentIndex(index)
         self.memory_probe = MemoryProbeThread()
         self.memory_probe.done.connect(self._on_memory_probed)
         self.memory_probe.start()
+        self.docker_timer.start()
         bids = str(self.settings.value("bids", "") or "")
         output = str(self.settings.value("output", "") or "")
         if output and Path(output).is_dir():
@@ -665,6 +731,47 @@ class PreprocessWindow(QMainWindow):
         self.docker_error = docker_error
         self.memory_probed = True
         self._update_memory_label()
+        self._update_docker_label()
+
+    def _probe_docker(self) -> None:
+        """Re-ask Docker whether it runs (and its memory), unless a check or start is busy."""
+        if self.memory_probe.isRunning() or self.docker_control is not None:
+            return
+        self.memory_probe.start()
+
+    def _update_docker_label(self) -> None:
+        if self.docker_control is not None:
+            text = f"Docker: '{self.docker_control.action}' in progress (up to a few minutes)..."
+            color = RUNNING_COLOR
+        elif self.docker_error:
+            text, color = f"⚠ Docker isn't running: {self.docker_error}", ERROR_COLOR
+        else:
+            text, color = "✓ Docker is running.", OK_COLOR
+        self.docker_label.setText(text)
+        self.docker_label.setStyleSheet(f"color: {color};")
+        busy = self.docker_control is not None
+        self.docker_start_button.setEnabled(not busy and bool(self.docker_error))
+        self.docker_restart_button.setEnabled(not busy)
+
+    def _on_docker_action(self, action: str) -> None:
+        if self.docker_control is not None:
+            return
+        self._log_activity(f"Docker: running 'docker desktop {action}'...")
+        self.docker_control = DockerControlThread(action)
+        self.docker_control.done.connect(self._on_docker_action_done)
+        self._update_docker_label()
+        self.docker_control.start()
+
+    def _on_docker_action_done(self, action: str, error: str) -> None:
+        if self.docker_control is not None:
+            self.docker_control.wait()
+        self.docker_control = None
+        if error:
+            self._log_activity(f"Docker {action} failed: {error}", True)
+        else:
+            self._log_activity(f"Docker {action}: done.")
+        self._update_docker_label()
+        self._probe_docker()
 
     def _update_memory_label(self) -> None:
         if not self.memory_probed:
@@ -673,8 +780,6 @@ class PreprocessWindow(QMainWindow):
         host = f"{self.host_gb:.1f} GB" if self.host_gb is not None else "unknown"
         if problem is not None:
             text, color = f"⚠ {problem}", ERROR_COLOR
-        elif self.docker_error:
-            text, color = f"This computer: {host} RAM. {self.docker_error}", WARNING_COLOR
         elif self.docker_gb is None:
             text, color = f"This computer: {host} RAM. Docker's limit couldn't be read.", None
         else:
@@ -744,6 +849,12 @@ class PreprocessWindow(QMainWindow):
         self.outputs_layout.addWidget(title)
         if self.statuses.get(subject) == "failed":
             self.outputs_layout.addWidget(self._failure_group(subject, self.output_folder))
+        if self.bids_folder is not None and self.statuses.get(subject) != "running":
+            task = self._task()
+            sessions = bold_sessions(self.bids_folder, subject, task)
+            gaps = missing_outputs(self.output_folder, subject, sessions, task)
+            if any(gaps.values()):
+                self.outputs_layout.addWidget(self._missing_group(gaps))
         bolds = preprocessed_bolds(self.output_folder, subject)
         group = QGroupBox(f"Preprocessed BOLD ({len(bolds)})")
         grid = QGridLayout(group)
@@ -772,6 +883,28 @@ class PreprocessWindow(QMainWindow):
         layout.addWidget(label)
         return group
 
+    def _missing_group(self, gaps: dict[str, list[str]]) -> QGroupBox:
+        """The outputs C-PAC said it would write (expectedOutputs.yml) but didn't, per session."""
+        n_missing = sum(map(len, gaps.values()))
+        group = QGroupBox(f"Not complete: {n_missing} expected output(s) missing")
+        group.setStyleSheet(accent_group_box_stylesheet(WARNING_COLOR))
+        layout = QVBoxLayout(group)
+        hint = QLabel(
+            "Run it again with Run mode 'Skip done, resume the rest' (same CPUs): finished "
+            "steps are reused, so only what's missing is redone."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        lines = [f"ses-{session}  {name}" for session, names in gaps.items() for name in names]
+        if len(lines) > MAX_MISSING_SHOWN:
+            hidden = len(lines) - MAX_MISSING_SHOWN
+            lines = [*lines[:MAX_MISSING_SHOWN], f"... and {hidden} more"]
+        listing = QLabel("\n".join(lines))
+        listing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        listing.setStyleSheet(f"color: {WARNING_COLOR};")
+        layout.addWidget(listing)
+        return group
+
     def _show_log(self, subject: str) -> None:
         if self.output_folder is None:
             return
@@ -795,16 +928,36 @@ class PreprocessWindow(QMainWindow):
         if not subjects:
             QMessageBox.information(self, "No subjects", "Tick at least one subject first.")
             return
+        if self.docker_error:
+            QMessageBox.warning(
+                self,
+                "Docker isn't running",
+                f"{self.docker_error}\n\nClick 'Start Docker' (or start Docker Desktop), wait "
+                "for the green 'Docker is running', then try again.",
+            )
+            self._probe_docker()
+            return
+        mode = str(self.mode_combo.currentData())
+        if mode == "scratch":
+            answer = QMessageBox.question(
+                self,
+                "Rerun from scratch?",
+                f"This deletes the C-PAC working and output folders of {len(subjects)} "
+                "subject(s) before running them again (logs are kept). Continue?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         self.settings.setValue("n_cpus", self.cpus_spin.value())
         self.settings.setValue("mem_gb", self.mem_spin.value())
+        self.settings.setValue("run_mode", mode)
         run = RunSettings(
             bids_root=self.bids_folder,
             output_root=self.output_folder,
             subjects=subjects,
             task=self._task(),
-            rerun=not self.skip_checkbox.isChecked(),
             n_cpus=self.cpus_spin.value(),
             mem_gb=self.mem_spin.value(),
+            mode=mode,
         )
         self.output_folder.mkdir(parents=True, exist_ok=True)
         self.worker = PreprocessThread(run)
@@ -957,7 +1110,10 @@ class PreprocessWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 -- Qt override
         if self.worker is None:
+            self.docker_timer.stop()
             self.memory_probe.wait()  # seconds at most; a running QThread can't be destroyed
+            if self.docker_control is not None:
+                self.docker_control.wait()
             event.accept()
             return
         answer = QMessageBox.question(

@@ -45,6 +45,39 @@ def test_memory_minimum_and_label(window: preprocess_gui.PreprocessWindow) -> No
     assert window.memory_label.text().startswith("✓ Docker may use 16.0 GB")
 
 
+def test_docker_status_and_controls(
+    window: preprocess_gui.PreprocessWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window._on_memory_probed(None, "Docker isn't running (test).")
+    assert window.docker_label.text().startswith("⚠ Docker isn't running")
+    assert window.docker_start_button.isEnabled()
+
+    # Preprocess warns instead of starting a batch that can only fail.
+    warned: list[str] = []
+    monkeypatch.setattr(
+        preprocess_gui.QMessageBox, "warning", lambda _parent, title, _text: warned.append(title)
+    )
+    window.bids_folder = window.output_folder = Path("unused")
+    window.subjects = ["P01"]
+    window._on_process()
+    assert warned == ["Docker isn't running"] and window.worker is None
+
+    actions: list[str] = []
+    monkeypatch.setattr(preprocess_gui, "docker_desktop", lambda action: actions.append(action))
+    window._on_docker_action("start")
+    assert not window.docker_restart_button.isEnabled()  # busy while it runs
+    assert window.docker_control is not None
+    window.docker_control.wait()
+    QApplication.processEvents()  # deliver the thread's done signal
+    window.memory_probe.wait()
+    assert actions == ["start"] and window.docker_control is None
+
+    window._on_memory_probed(16.0, "")
+    assert window.docker_label.text() == "✓ Docker is running."
+    assert not window.docker_start_button.isEnabled()
+    assert window.docker_restart_button.isEnabled()
+
+
 def make_bids(root: Path) -> Path:
     (root).mkdir(parents=True)
     (root / "dataset_description.json").write_text("{}")

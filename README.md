@@ -6,7 +6,7 @@
 ## 0. DICOM → BIDS conversion (built)
 
 ```powershell
-fmri_convert_to_bids <DICOM_ROOT> <BIDS_ROOT> --behav-logs <BEHAV_LOGS> [--no-deface] [--reset]
+fmri_convert_to_bids <DICOM_ROOT> <BIDS_ROOT> --behav-logs <BEHAV_LOGS> [--no-deface | --freesurfer DIR] [--reset]
 fmri_behav_events <log file | folder> <out dir> [--subject_id P001] [--rerun] [--compare]
 ```
 

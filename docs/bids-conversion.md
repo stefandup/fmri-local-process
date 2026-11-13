@@ -9,8 +9,25 @@ Two commands, both thin wrappers around `src/fmri_local_process/processing/`:
 
 This is a Python port of `philani_scripts/philaniToBIDS.sh` and the behavioural Rmds in
 `philani_scripts/behavioural_processing_r_scripts/`. Neither command needs R, `jq` or bash.
-Defacing still needs FreeSurfer (`mri_deface`), which runs on Linux/macOS only. On Windows,
-pass `--no-deface`.
+## Defacing
+
+T1w images are defaced with the first of these that is available:
+
+1. `--freesurfer <folder>`: a FreeSurfer home, or a folder holding `mri_deface`,
+   `talairach_mixed_with_skull.gca` and `face.gca`;
+2. `$FREESURFER_HOME`, if it holds those files;
+3. the `philani_fmri_process:latest` Docker image the installer builds on top of C-PAC, with
+   the defacer picked during install: FreeSurfer `mri_deface` (copied out of the official
+   FreeSurfer image, about 5 GB extra to download once), your own `mri_deface` files, or
+   pydeface.
+
+`mri_deface` is a Linux program, so on Windows options 1 and 2 run inside the C-PAC
+container with the folder mounted. FreeSurfer has taken the standalone `mri_deface` download
+offline, which is why the installer gets it from the FreeSurfer Docker image. To change the
+defacer later, re-run the installer, or run
+`powershell -ExecutionPolicy Bypass -File <install dir>\docker\setup_docker_image.ps1 -Defacer <freesurfer|local|pydeface|none>`
+(`local` also needs `-DefaceFiles <folder>`). `--no-deface` skips defacing. The sidecar's
+`Notes` names the tool that was used.
 
 ## Input
 
@@ -148,7 +165,7 @@ $env:PHILANI_RMD_DIR = "C:\Users\stefan\philani_scripts\behavioural_processing_r
 fmri_behav_events <BEHAV_LOGS> results\behav --subject_id P001 --rerun --compare
 # expect: "R agrees" in the summary, or one DIFF line per mismatching cell (exit code 1)
 
-# 5. Full conversion on a small DICOM folder (Windows: no FreeSurfer, so --no-deface)
+# 5. Full conversion on a small DICOM folder (--no-deface: skip the Docker defacer here)
 fmri_convert_to_bids <DICOM_ROOT> results\bids --behav-logs <BEHAV_LOGS> --no-deface -y
 # expect: a summary table (converted / staged / skipped / failed), and
 #         results\bids\sub-*\ses-*\{anat,func}; anything ambiguous in crosscheck_pending\

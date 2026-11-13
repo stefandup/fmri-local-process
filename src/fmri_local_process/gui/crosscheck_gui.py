@@ -52,7 +52,7 @@ from fmri_local_process.processing.dcm2niix import (
     find_dcm2niix,
     run_dcm2niix,
 )
-from fmri_local_process.processing.deface import DefaceUnavailableError, make_mri_deface
+from fmri_local_process.processing.deface import DefaceUnavailableError, make_deface
 from fmri_local_process.processing.philani_bids import ConversionReport, convert_dicom_root
 
 log = logging.getLogger(__name__)
@@ -98,7 +98,7 @@ class ConvertThread(QThread):
     def run(self) -> None:
         try:
             exe = find_dcm2niix()
-            deface = make_mri_deface() if self.deface else None
+            deface = make_deface() if self.deface else None
             report = convert_dicom_root(
                 self.dicom_root, self.bids_root, partial(run_dcm2niix, exe), deface, self.behav_root
             )
@@ -181,7 +181,11 @@ class CrosscheckWindow(QMainWindow):
         rescan.clicked.connect(self.rescan)
         actions.addWidget(rescan)
         actions.addStretch(1)
-        self.deface_box = QCheckBox("Deface T1w (needs FreeSurfer)")
+        self.deface_box = QCheckBox("Deface T1w")
+        self.deface_box.setToolTip(
+            "Uses mri_deface from $FREESURFER_HOME, else the defacer the installer set up in "
+            "Docker (FreeSurfer mri_deface or pydeface)."
+        )
         actions.addWidget(self.deface_box)
         self.convert_button = QPushButton("Convert / update BIDS")
         self.convert_button.setToolTip(

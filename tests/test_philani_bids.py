@@ -44,10 +44,11 @@ class FakeDeface:
         self.calls: list[Path] = []
         self.fail = fail
 
-    def __call__(self, t1w: Path) -> None:
+    def __call__(self, t1w: Path) -> str:
         self.calls.append(t1w)
         if self.fail:
             raise OSError("mri_deface crashed")
+        return "FreeSurfer mri_deface"
 
 
 def read_json(path: Path) -> dict:
@@ -175,7 +176,8 @@ def test_t1w_defaced_once_and_noted(tmp_path: Path) -> None:
 
     t1w_json = bids / "sub-P001" / "ses-1" / "anat" / "sub-P001_ses-1_T1w.json"
     assert len(deface.calls) == 1
-    assert read_json(t1w_json)["Notes"] == pb.DEFACE_NOTE
+    # Same wording as sidecars written before the defacer became selectable.
+    assert read_json(t1w_json)["Notes"] == "The T1w image was defaced using FreeSurfer mri_deface"
 
 
 def test_failed_deface_is_reported_and_not_noted(tmp_path: Path) -> None:
