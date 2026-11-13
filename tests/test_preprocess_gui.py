@@ -1,0 +1,144 @@
+"""Offscreen smoke test of the preprocess GUI on a synthetic BIDS tree (no Docker needed)."""
+
+import os
+from collections.abc import Iterator
+from pathlib import Path
+from typing import cast
+
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QSettings, Qt  # noqa: E402 -- needs QT_QPA_PLATFORM set first
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+from fmri_local_process.gui import preprocess_gui  # noqa: E402
+
+
+def no_docker() -> Path:
+    raise preprocess_gui.DockerUnavailableError("Docker isn't running (test).")
+
+
+@pytest.fixture
+def window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[preprocess_gui.PreprocessWindow]:
+    _app = QApplication.instance() or QApplication([])
+    ini = tmp_path / "settings.ini"
+    # Keep the test's remembered folders out of the user's real settings.
+    monkeypatch.setattr(
+        preprocess_gui, "QSettings", lambda *_: QSettings(str(ini), QSettings.Format.IniFormat)
+    )
+    monkeypatch.setattr(preprocess_gui, "find_docker", no_docker)  # never call real Docker
+    window = preprocess_gui.PreprocessWindow()
+    yield window
+    window.memory_probe.wait()
+
+
+def test_memory_minimum_and_label(window: preprocess_gui.PreprocessWindow) -> None:
+    assert window.mem_spin.minimum() == preprocess_gui.MIN_MEM_GB
+    assert window.mem_spin.value() >= preprocess_gui.MIN_MEM_GB
+    window._on_memory_probed(4.0, "")  # Docker limited to 4 GB
+    assert window.memory_label.text().startswith("⚠ Docker may only use 4.0 GB")
+    window.host_gb = 32.0
+    window._on_memory_probed(16.0, "")
+    assert window.memory_label.text().startswith("✓ Docker may use 16.0 GB")
+
+
+def make_bids(root: Path) -> Path:
+    (root).mkdir(parents=True)
+    (root / "dataset_description.json").write_text("{}")
+    for rel in [
+        "sub-P01/ses-1/func/sub-P01_ses-1_task-Rest_bold.nii.gz",
+        "sub-P01/ses-2/func/sub-P01_ses-2_task-Matching_bold.nii.gz",
+        "sub-P02/ses-1/func/sub-P02_ses-1_task-Rest_bold.nii.gz",
+    ]:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).touch()
+    return root
+
+
+def test_roster_statuses_and_task_filter(
+    window: preprocess_gui.PreprocessWindow, tmp_path: Path
+) -> None:
+    bids = make_bids(tmp_path / "bids")
+    out = tmp_path / "out"
+    func = out / "output" / "pipeline_cpac_preproc" / "sub-P01" / "ses-1" / "func"
+    func.mkdir(parents=True)
+    (func / "sub-P01_ses-1_task-Rest_space-template_desc-preproc_bold.nii.gz").touch()
+    (out / "log").mkdir()
+    (out / "log" / "fmri_preprocess_sub-P02.txt").write_text("crashed\n")
+
+    window._set_bids_folder(bids)
+    window._set_output_folder(out)
+    window._refresh_roster()
+    assert window.subjects == ["P01", "P02"]
+    assert window.statuses == {"P01": "not run", "P02": "failed"}  # P01 lacks ses-2
+    assert window.process_button.isEnabled()
+
+    window.task_combo.setCurrentText("Rest")
+    assert window.statuses == {"P01": "done", "P02": "failed"}
+
+    window.subject_table.selectRow(1)
+    assert window._selected_subjects() == ["P02"]
+    assert "crashed" in window.log_text.toPlainText()
+
+
+def test_read_log_tail_keeps_the_end(tmp_path: Path) -> None:
+    log_file = tmp_path / "log.txt"
+    log_file.write_text("\n".join(f"line {i}" for i in range(1000)))
+    tail = preprocess_gui.read_log_tail(log_file, 10)
+    assert tail.splitlines()[0].startswith("... 990 earlier lines")
+    assert tail.splitlines()[-1] == "line 999"
+
+
+def test_live_line_stays_one_line(window: preprocess_gui.PreprocessWindow) -> None:
+    window._log_activity("Preprocessing 1 subject(s)...")
+    window._on_subject_started(0, 1, "P01")
+    for step in range(1, 50):
+        window._on_step("P01", f"node_{step}", step)
+    window._log_activity("note while busy")
+    lines = window.activity_text.toPlainText().splitlines()
+    assert len(lines) == 3
+    assert lines[-1].startswith(("◐", "◓", "◑", "◒")) and "BUSY sub-P01: step 49" in lines[-1]
+    assert lines[-1].endswith("node_49")
+
+    window._log_activity("sub-P01: preprocessed (49 steps)")
+    window._on_subject_finished("P01", 49, True)
+    lines = window.activity_text.toPlainText().splitlines()
+    assert "BUSY" not in window.activity_text.toPlainText()
+    assert lines[-1].endswith("sub-P01: preprocessed (49 steps)")
+    assert window.settings.value("steps_per_subject/all") in (49, "49")
+
+
+def test_ticks_choose_what_runs_not_selection(
+    window: preprocess_gui.PreprocessWindow, tmp_path: Path
+) -> None:
+    window._set_bids_folder(make_bids(tmp_path / "bids"))
+    window._set_output_folder(tmp_path / "out")
+    window._refresh_roster()
+    assert window._ticked_subjects() == ["P01", "P02"]  # new subjects start ticked
+    assert window.process_button.text() == "Preprocess 2 ticked subject(s)"
+
+    first = window.subject_table.item(0, 0)
+    assert first is not None
+    first.setCheckState(Qt.CheckState.Unchecked)
+    window.subject_table.selectRow(0)  # viewing P01 doesn't make it run
+    assert window._ticked_subjects() == ["P02"]
+    window._refresh_roster()  # ticks survive a rescan
+    assert window._ticked_subjects() == ["P02"]
+
+    window._tick_all(False)
+    assert not window.process_button.isEnabled()
+    window._tick_all(True)
+    assert window._ticked_subjects() == ["P01", "P02"]
+
+    # Pretend a run is going: ticks lock, rows stay clickable.
+    window.worker = cast(preprocess_gui.PreprocessThread, object())
+    window._update_buttons()
+    item = window.subject_table.item(0, 0)
+    assert item is not None
+    flags = item.flags()
+    assert not flags & Qt.ItemFlag.ItemIsUserCheckable
+    assert flags & Qt.ItemFlag.ItemIsSelectable
+    window.worker = None

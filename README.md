@@ -47,6 +47,9 @@ fmri_preprocess <BIDS_ROOT> <OUTPUT> [--subject_id P001] [--task Rest] [--rerun]
   never used as input.
 - Output goes to `OUTPUT/output/pipeline_cpac_preproc/` and logs to `OUTPUT/log/`. A subject
   is skipped when every session already has a `desc-preproc_bold`, unless `--rerun` is passed.
+- `fmri_preprocess_gui` does the same from a window (vr_lab_toolbox process-results
+  layout): pick the BIDS and output folders, task, CPUs and memory, then click "Preprocess".
+  It shows each subject's status, its preprocessed BOLD files, and the end of its C-PAC log.
 
 ## The idea
 

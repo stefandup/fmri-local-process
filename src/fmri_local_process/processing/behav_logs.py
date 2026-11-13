@@ -19,6 +19,8 @@ _regressors.Rmd (Lior Abramson / Marlie Miles). Deliberate differences from the 
 import csv
 import logging
 import math
+import os
+import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,8 +42,36 @@ class EventTable:
     modulator_values: list[str | float | None]
 
 
+def pin_cloud_file(path: Path) -> None:
+    """Ask OneDrive to keep `path` on disk ("Always keep on this device").
+
+    Online-only OneDrive placeholders can fail to read with [Errno 22] when on-demand
+    download doesn't kick in. `attrib +P -U` pins the file and clears the online-only flag.
+    resolve() follows repo symlinks (e.g. philani_behav_files) to the real OneDrive path.
+    Windows only; a no-op elsewhere.
+    """
+    if os.name != "nt":
+        return
+    result = subprocess.run(
+        ["attrib", "+P", "-U", str(path.resolve())], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        log.warning("Could not pin %s: %s", path, (result.stdout + result.stderr).strip())
+
+
 def read_log_lines(log_file: Path) -> list[str]:
-    return log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    """Read a log, pinning it and retrying once if the first read fails (OneDrive placeholder)."""
+    try:
+        text = log_file.read_text(encoding="utf-8", errors="replace")
+    except OSError as first:
+        log.warning("Reading %s failed (%s); pinning it to disk and retrying", log_file, first)
+        pin_cloud_file(log_file)
+        try:
+            text = log_file.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            # Errors raised mid-read carry no filename; add it so the report says which file.
+            raise OSError(e.errno, e.strerror, str(log_file)) from e
+    return text.splitlines()
 
 
 def _parse_rows(lines: Sequence[str], header_idx: int, start: int, stop: int) -> list[Row]:

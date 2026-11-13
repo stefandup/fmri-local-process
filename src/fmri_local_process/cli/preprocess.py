@@ -11,18 +11,32 @@ from pathlib import Path
 import click
 from rich.console import Console
 from rich.logging import RichHandler
-from rich.progress import Progress
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskID,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.table import Table
 
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
+    MIN_MEM_GB,
     DockerUnavailableError,
     bids_subjects,
     bold_sessions,
-    build_cpac_command,
+    docker_memory_gb,
     find_docker,
+    finished_node,
+    host_memory_gb,
+    image_present,
     is_preprocessed,
-    run_cpac,
+    memory_problem,
+    preprocess_subject,
+    pull_image,
 )
 
 log = logging.getLogger(__name__)
@@ -80,9 +94,11 @@ def print_summary(summary: PreprocSummary, output_root: Path) -> None:
 @click.option("--n-cpus", default=1, show_default=True, help="CPU cores C-PAC may use per subject.")
 @click.option(
     "--mem-gb",
-    default=3.0,
+    default=MIN_MEM_GB,
+    type=click.FloatRange(min=MIN_MEM_GB),
     show_default=True,
-    help="RAM (GB) C-PAC may use per subject. Docker Desktop's own limit must allow it.",
+    help="RAM (GB) C-PAC may use per subject (C-PAC won't start below "
+    f"{MIN_MEM_GB:g}). Docker Desktop's own limit must allow it.",
 )
 @click.option("--image", default=CPAC_IMAGE, show_default=True, help="C-PAC Docker image to run.")
 @click.option("--verbose", "-v", is_flag=True, help="Debug logging.")
@@ -124,6 +140,9 @@ def main(
         docker = find_docker()
     except DockerUnavailableError as e:
         raise click.ClickException(str(e)) from e
+    problem = memory_problem(mem_gb, docker_memory_gb(docker), host_memory_gb())
+    if problem is not None:
+        raise click.ClickException(problem)
     if not (bids_root / "dataset_description.json").is_file():
         raise click.UsageError(f"{bids_root} has no dataset_description.json; not a BIDS root.")
 
@@ -134,26 +153,46 @@ def main(
         what = f"task-{task} BOLD runs" if task else "BOLD runs"
         raise click.UsageError(f"No subjects with {what} found in {bids_root}")
 
+    if not image_present(docker, image):
+        console.print(
+            f"[yellow]C-PAC image {image} is not downloaded yet: pulling it now "
+            "(~15 GB, one-time; can take 30+ min). Docker's layer progress follows.[/yellow]"
+        )
+        if pull_image(docker, image) != 0:
+            raise click.ClickException(f"docker pull {image} failed; see the output above.")
+
     summary = PreprocSummary()
     output_folder.mkdir(parents=True, exist_ok=True)
-    with Progress(console=console) as progress:
-        bar = progress.add_task("Preprocessing", total=len(subjects))
+    columns = (
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+    )
+    with Progress(*columns, console=console) as progress:
+        bar = progress.add_task("Subjects", total=len(subjects))
         for subject in subjects:
-            progress.update(bar, description=f"C-PAC sub-{subject}")
             sessions = bold_sessions(bids_root, subject, task)
             if not rerun and is_preprocessed(output_folder, subject, sessions, task):
                 summary.skipped.append(subject)
                 progress.advance(bar)
                 continue
-            cmd = build_cpac_command(
-                docker, bids_root, output_folder, subject, image, n_cpus, mem_gb, task
+            # C-PAC never states how many steps a run has, so: steps done + last step, no %.
+            steps = progress.add_task(f"  sub-{subject}: starting container", total=None)
+
+            def show_step(line: str, subject: str = subject, steps: TaskID = steps) -> None:
+                node = finished_node(line)
+                if node is not None:
+                    progress.advance(steps)
+                    progress.update(steps, description=f"  sub-{subject}: {node}")
+
+            failure = preprocess_subject(
+                docker, bids_root, output_folder, subject, image, n_cpus, mem_gb, task, show_step
             )
-            console_log = output_folder / "log" / f"fmri_preprocess_sub-{subject}.txt"
-            returncode = run_cpac(cmd, console_log)
-            if returncode != 0:
-                summary.failed.append((subject, f"C-PAC exit {returncode}, see {console_log}"))
-            elif not is_preprocessed(output_folder, subject, sessions, task):
-                summary.failed.append((subject, f"no preprocessed BOLD written, see {console_log}"))
+            progress.remove_task(steps)
+            if failure is not None:
+                summary.failed.append((subject, failure))
             else:
                 summary.done.append(subject)
             progress.advance(bar)

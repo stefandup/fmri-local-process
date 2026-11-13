@@ -1,14 +1,40 @@
 """Tests for processing/cpac_docker.py on a synthetic BIDS tree (no Docker needed)."""
 
+import sys
 from pathlib import Path
 
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
     bids_subjects,
+    bids_tasks,
     bold_sessions,
     build_cpac_command,
+    explain_failure,
+    finished_node,
+    host_memory_gb,
     is_preprocessed,
+    memory_problem,
+    preprocess_subject,
+    preprocessed_bolds,
+    run_cpac,
+    subject_console_log,
 )
+
+
+def test_finished_node_parses_nipype_lines() -> None:
+    line = '\t [Node] Finished "resample_o", elapsed time 0.871706s.\n'
+    assert finished_node(line) == "resample_o"
+    assert finished_node('\t [Node] Setting-up "resample_o" in "/tmp/x".\n') is None
+
+
+def test_run_cpac_streams_lines_and_logs(tmp_path: Path) -> None:
+    script = "print('[Node] Finished \"a\"'); print('noise'); print('[Node] Finished \"b\"')"
+    console_log = tmp_path / "log" / "out.txt"
+    seen: list[str] = []
+    returncode = run_cpac([sys.executable, "-c", script], console_log, seen.append)
+    assert returncode == 0
+    assert [finished_node(line) for line in seen] == ["a", None, "b"]
+    assert console_log.read_text(encoding="utf-8").count("Finished") == 2
 
 
 def make_bids(root: Path) -> Path:
@@ -81,3 +107,74 @@ def test_command_mounts_only_the_subject(tmp_path: Path) -> None:
     assert tail[tail.index("--preconfig") + 1] == "preproc"
     assert tail[tail.index("--participant_label") + 1] == "P01"
     assert tail[tail.index("--n_cpus") + 1] == "4"
+
+
+def test_bids_tasks_and_preprocessed_bolds(tmp_path: Path) -> None:
+    bids = make_bids(tmp_path / "bids")
+    (bids / "sub-P01/ses-2/func/sub-P01_ses-2_task-Matching_run-2_bold.nii.gz").touch()
+    assert bids_tasks(bids) == ["Matching", "rest"]  # crosscheck_pending/ is not a subject
+
+    out = tmp_path / "out"
+    func = out / "output" / "pipeline_cpac_preproc" / "sub-P01" / "ses-1" / "func"
+    func.mkdir(parents=True)
+    wanted = func / "sub-P01_ses-1_task-rest_space-template_desc-preproc_bold.nii.gz"
+    wanted.touch()
+    (func / "sub-P011_ses-1_task-rest_space-template_desc-preproc_bold.nii.gz").touch()
+    assert preprocessed_bolds(out, "P01") == [wanted]
+
+
+def test_preprocess_subject_reports_a_failed_run(tmp_path: Path) -> None:
+    bids = make_bids(tmp_path / "bids")
+    out = tmp_path / "out"
+    # Python stands in for docker: 'python run --rm ...' exits non-zero straight away.
+    failure = preprocess_subject(Path(sys.executable), bids, out, "P01", CPAC_IMAGE, 1, 3.0)
+    assert failure is not None and failure.startswith("C-PAC exit")
+    assert subject_console_log(out, "P01").is_file()
+
+
+def test_explain_failure_memory(tmp_path: Path) -> None:
+    console_log = tmp_path / "log.txt"
+    console_log.write_text(
+        "RuntimeError: Insufficient resources available for job:\n"
+        "\tanat_reorient_0: 6.175 GB\n\tcheck_transforms: 7 GB\n"
+    )
+    cause = explain_failure(console_log, tmp_path)
+    assert cause is not None and "7.0 GB" in cause and "at least 8 GB" in cause
+
+
+def test_explain_failure_quotes_the_tool_error(tmp_path: Path) -> None:
+    crash = tmp_path / "log" / "crash-x-nuisance_regression.a0.txt"
+    crash.parent.mkdir()
+    crash.write_text(
+        "Stderr:\n\t** ERROR:\x1b[0m total number of fixed regressors (34) is too many for 33 "
+        "retained time points!\n\t** FATAL ERROR: Cannot continue\n"
+        "FileNotFoundError: No such file or directory 'residuals.nii.gz'\n"
+    )
+    console_log = tmp_path / "log.txt"
+    console_log.write_text(
+        "\t Node nuisance_regression.a0 failed to run on host abc.\n"
+        f"\t Saving crash info to /outputs/log/{crash.name}\n"
+        "\t Node nuisance_regression.a0 failed to run on host abc.\n"
+    )
+    cause = explain_failure(console_log, tmp_path)
+    assert cause is not None
+    assert cause.startswith("Step 'nuisance_regression.a0' failed: total number of fixed")
+    assert "only 33 usable volumes" in cause
+    assert "more failed" not in cause  # the same node twice is one failure
+
+
+def test_explain_failure_unknown(tmp_path: Path) -> None:
+    console_log = tmp_path / "log.txt"
+    console_log.write_text("all good\n")
+    assert explain_failure(console_log, tmp_path) is None
+    assert explain_failure(tmp_path / "missing.txt", tmp_path) is None
+
+
+def test_memory_problem() -> None:
+    assert memory_problem(8.0, 15.5, 31.7) is None
+    assert memory_problem(8.0, None, None) is None  # unknown: don't block
+    too_small_docker = memory_problem(10.0, 7.7, 16.0)
+    assert too_small_docker is not None and "only use 7.7 GB" in too_small_docker
+    small_host = memory_problem(8.0, 3.8, 4.0)
+    assert small_host is not None and "can't run here" in small_host
+    assert host_memory_gb() is not None  # readable on the test machine

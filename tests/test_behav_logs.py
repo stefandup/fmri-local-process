@@ -237,3 +237,54 @@ def test_find_logs_is_recursive_and_task_comes_from_path_below_root(tmp_path: Pa
 
     assert sorted(groups) == [("P001", "Reappraisal"), ("P002", "Matching")]
     assert unknown == [root / "misc" / "P003-x.log"]
+
+
+def _flaky_read_text(fail_times: int):
+    """A Path.read_text stand-in that raises Errno 22 (no filename, like a mid-read failure)
+    for the first `fail_times` calls, then returns two lines."""
+    calls = {"n": 0}
+
+    def fake(self: Path, *args: object, **kwargs: object) -> str:
+        calls["n"] += 1
+        if calls["n"] <= fail_times:
+            raise OSError(22, "Invalid argument")
+        return "a\nb\n"
+
+    return fake
+
+
+def test_read_log_lines_pins_and_retries_after_failed_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pinned: list[Path] = []
+    monkeypatch.setattr(Path, "read_text", _flaky_read_text(fail_times=1))
+    monkeypatch.setattr(bl, "pin_cloud_file", pinned.append)
+    log_file = tmp_path / "sub.log"
+
+    assert bl.read_log_lines(log_file) == ["a", "b"]
+    assert pinned == [log_file]
+
+
+def test_read_log_lines_names_the_file_when_retry_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "read_text", _flaky_read_text(fail_times=2))
+    monkeypatch.setattr(bl, "pin_cloud_file", lambda path: None)
+    log_file = tmp_path / "sub.log"
+
+    with pytest.raises(OSError) as excinfo:
+        bl.read_log_lines(log_file)
+    assert excinfo.value.errno == 22
+    assert excinfo.value.filename == str(log_file)
+
+
+def test_read_log_lines_does_not_pin_a_readable_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pinned: list[Path] = []
+    monkeypatch.setattr(bl, "pin_cloud_file", pinned.append)
+    log_file = tmp_path / "sub.log"
+    log_file.write_text("x\n", encoding="utf-8")
+
+    assert bl.read_log_lines(log_file) == ["x"]
+    assert pinned == []
