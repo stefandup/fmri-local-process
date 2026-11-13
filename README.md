@@ -50,6 +50,8 @@ fmri_preprocess <BIDS_ROOT> <OUTPUT> [--subject_id P001] [--task Rest] [--rerun]
 - `fmri_preprocess_gui` does the same from a window (vr_lab_toolbox process-results
   layout): pick the BIDS and output folders, task, CPUs and memory, then click "Preprocess".
   It shows each subject's status, its preprocessed BOLD files, and the end of its C-PAC log.
+  Clicking a subject also previews what C-PAC already generated for it: the QC figures
+  (framewise displacement, motion, BOLD SNR; zoomable) and the per-run motion summary table.
 
 ## The idea
 

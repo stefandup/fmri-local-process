@@ -18,7 +18,7 @@ from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QColor, QFont, QTextCursor
+from PySide6.QtGui import QCloseEvent, QColor, QFont, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fmri_local_process.gui.image_view import ZoomableImageView
 from fmri_local_process.gui.qt_common import (
     ERROR_COLOR,
     HOME_BASE_ACCENT_COLOR,
@@ -88,6 +89,13 @@ from fmri_local_process.processing.cpac_docker import (
     preprocessed_bolds,
     run_cpac,
     subject_console_log,
+)
+from fmri_local_process.processing.cpac_outputs import (
+    QcFigure,
+    bids_entities,
+    motion_summaries,
+    qc_figures,
+    read_tsv,
 )
 
 log = logging.getLogger(__name__)
@@ -321,7 +329,7 @@ class PreprocessWindow(QMainWindow):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.addWidget(
-            QLabel("Tick the subjects to preprocess; click a row to see its outputs and log.")
+            QLabel("Tick the subjects to preprocess; click a row to preview its outputs and log.")
         )
         tick_row = QHBoxLayout()
         self.tick_all_button = QPushButton("Tick all")
@@ -354,6 +362,14 @@ class PreprocessWindow(QMainWindow):
         self.outputs_widget = QWidget()
         self.outputs_layout = QVBoxLayout(self.outputs_widget)
         self.detail_tabs.addTab(self.outputs_widget, "Outputs")
+        self.detail_tabs.addTab(self._build_figures_tab(), "QC Figures")
+        self.motion_table = QTableWidget(0, 0)
+        self.motion_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.motion_table.verticalHeader().setVisible(False)
+        self.motion_table.setToolTip(
+            wrap_tooltip("C-PAC's per-run motion summary (desc-summary_motion.tsv).")
+        )
+        self.detail_tabs.addTab(self.motion_table, "Motion")
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setFont(QFont("Courier New"))
@@ -362,6 +378,31 @@ class PreprocessWindow(QMainWindow):
         splitter.addWidget(self.detail_tabs)
         splitter.setSizes([380, 920])
         root_layout.addWidget(splitter, 1)
+
+    def _build_figures_tab(self) -> QWidget:
+        """Picker over the selected subject's C-PAC QC figures, above a zoomable preview."""
+        tab = QWidget()
+        self.figures_tab = tab
+        layout = QVBoxLayout(tab)
+        row = QHBoxLayout()
+        self.figure_combo = QComboBox()
+        self.figure_combo.setToolTip("QC figures C-PAC drew for this subject (of the chosen task).")
+        self.figure_combo.currentIndexChanged.connect(self._show_figure)
+        row.addWidget(self.figure_combo, 1)
+        self.figure_prev_button = QPushButton("◀ Prev")
+        self.figure_prev_button.clicked.connect(partial(self._step_figure, -1))
+        row.addWidget(self.figure_prev_button)
+        self.figure_next_button = QPushButton("Next ▶")
+        self.figure_next_button.clicked.connect(partial(self._step_figure, 1))
+        row.addWidget(self.figure_next_button)
+        self.figure_reveal_button = QPushButton("Reveal")
+        self.figure_reveal_button.clicked.connect(self._reveal_figure)
+        row.addWidget(self.figure_reveal_button)
+        layout.addLayout(row)
+        self.figure_view = ZoomableImageView()
+        layout.addWidget(self.figure_view, 1)
+        self.figures: list[QcFigure] = []
+        return tab
 
     def _build_bids_group(self) -> QGroupBox:
         group = QGroupBox("BIDS Folder")
@@ -843,8 +884,10 @@ class PreprocessWindow(QMainWindow):
             self.outputs_layout.addWidget(QLabel(hint))
             self.outputs_layout.addStretch(1)
             self.log_text.setPlainText("")
+            self._show_previews(None)
             return
         subject = selected[0]
+        self._show_previews(subject)
         title = QLabel(f"<h2>sub-{subject}</h2>")
         self.outputs_layout.addWidget(title)
         if self.statuses.get(subject) == "failed":
@@ -904,6 +947,77 @@ class PreprocessWindow(QMainWindow):
         listing.setStyleSheet(f"color: {WARNING_COLOR};")
         layout.addWidget(listing)
         return group
+
+    def _show_previews(self, subject: str | None) -> None:
+        """Refill the QC Figures and Motion tabs for subject (None clears them)."""
+        figures: list[QcFigure] = []
+        tables: list[Path] = []
+        if subject is not None and self.output_folder is not None:
+            figures = qc_figures(self.output_folder, subject, self._task())
+            tables = motion_summaries(self.output_folder, subject, self._task())
+        self._fill_figures(figures)
+        self._fill_motion(tables)
+        figures_tab = self.detail_tabs.indexOf(self.figures_tab)
+        self.detail_tabs.setTabText(figures_tab, f"QC Figures ({len(figures)})")
+
+    def _fill_figures(self, figures: list[QcFigure]) -> None:
+        # Stay on the same kind of figure when switching subjects, e.g. FD plot to FD plot.
+        previous = self.figure_combo.currentText()
+        self.figures = figures
+        self.figure_combo.blockSignals(True)
+        self.figure_combo.clear()
+        self.figure_combo.addItems([figure.label for figure in figures])
+        self.figure_combo.setCurrentIndex(max(self.figure_combo.findText(previous), 0))
+        self.figure_combo.blockSignals(False)
+        for button in (self.figure_prev_button, self.figure_next_button, self.figure_reveal_button):
+            button.setEnabled(bool(figures))
+        self._show_figure()
+
+    def _show_figure(self) -> None:
+        index = self.figure_combo.currentIndex()
+        if not 0 <= index < len(self.figures):
+            self.figure_view.set_pixmap(QPixmap(), "No QC figures for this subject yet.")
+            return
+        path = self.figures[index].path
+        pixmap = QPixmap(str(path))
+        self.figure_view.set_pixmap(pixmap, f"Couldn't load {path.name}.")
+        self.figure_combo.setToolTip(str(path))
+
+    def _step_figure(self, step: int) -> None:
+        if self.figures:
+            index = (self.figure_combo.currentIndex() + step) % len(self.figures)
+            self.figure_combo.setCurrentIndex(index)
+
+    def _reveal_figure(self) -> None:
+        index = self.figure_combo.currentIndex()
+        if 0 <= index < len(self.figures):
+            reveal(self.figures[index].path.parent)
+
+    def _fill_motion(self, tables: list[Path]) -> None:
+        """One row per run (session/task), with the TSV's own columns."""
+        columns: list[str] = []
+        rows: list[tuple[str, dict[str, str]]] = []
+        for tsv in tables:
+            entities = bids_entities(tsv.name)
+            run = f"ses-{entities.get('ses', '?')} {entities.get('task', '')}".strip()
+            try:
+                header, values = read_tsv(tsv)
+            except (OSError, UnicodeDecodeError) as e:
+                header, values = ["Error"], [[f"Couldn't read {tsv.name}: {e}"]]
+            columns += [name for name in header if name not in columns]
+            rows += [(run, dict(zip(header, row, strict=False))) for row in values]
+        self.motion_table.clear()
+        self.motion_table.setColumnCount(len(columns) + 1)
+        self.motion_table.setHorizontalHeaderLabels(["Run", *columns])
+        self.motion_table.setRowCount(len(rows))
+        for row_index, (run, values) in enumerate(rows):
+            self.motion_table.setItem(row_index, 0, QTableWidgetItem(run))
+            for column_index, name in enumerate(columns, start=1):
+                item = QTableWidgetItem(values.get(name, ""))
+                self.motion_table.setItem(row_index, column_index, item)
+        self.motion_table.resizeColumnsToContents()
+        motion_tab = self.detail_tabs.indexOf(self.motion_table)
+        self.detail_tabs.setTabText(motion_tab, f"Motion ({len(rows)})")
 
     def _show_log(self, subject: str) -> None:
         if self.output_folder is None:

@@ -10,6 +10,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings, Qt  # noqa: E402 -- needs QT_QPA_PLATFORM set first
+from PySide6.QtGui import QImage  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 from fmri_local_process.gui import preprocess_gui  # noqa: E402
@@ -117,6 +118,38 @@ def test_roster_statuses_and_task_filter(
     assert "crashed" in window.log_text.toPlainText()
     texts = [label.text() for label in window.outputs_widget.findChildren(QLabel)]
     assert any(text.startswith("No known cause recognised") for text in texts)
+
+
+def test_preview_tabs_show_qc_figures_and_motion(
+    window: preprocess_gui.PreprocessWindow, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    func = out / "output" / "pipeline_cpac_preproc" / "sub-P01" / "ses-1" / "func"
+    func.mkdir(parents=True)
+    image = QImage(40, 20, QImage.Format.Format_RGB32)
+    image.fill(0)
+    for desc in ("movementParametersRot", "movementParametersTrans"):
+        assert image.save(str(func / f"sub-P01_ses-1_task-Rest_desc-{desc}_quality.png"))
+    (func / "sub-P01_ses-1_task-Rest_desc-summary_motion.tsv").write_text("MeanFD\n0.1\n")
+
+    window._set_bids_folder(make_bids(tmp_path / "bids"))
+    window._set_output_folder(out)
+    window._refresh_roster()
+    window.subject_table.selectRow(0)
+    assert window.figure_combo.count() == 2
+    assert window.figure_combo.currentText() == "ses-1 Rest: Motion: rotation"
+    assert not window.figure_view.pixmap.isNull()
+    window._step_figure(1)
+    assert window.figure_combo.currentText() == "ses-1 Rest: Motion: translation"
+    window._step_figure(1)  # wraps around
+    assert window.figure_combo.currentIndex() == 0
+    assert window.motion_table.rowCount() == 1
+    cells = [window.motion_table.item(0, column) for column in range(2)]
+    assert [cell.text() for cell in cells if cell] == ["ses-1 Rest", "0.1"]
+
+    window.subject_table.selectRow(1)  # P02 has nothing yet
+    assert window.figure_combo.count() == 0 and window.motion_table.rowCount() == 0
+    assert window.figure_view.image_label.text() == "No QC figures for this subject yet."
 
 
 def test_read_log_tail_keeps_the_end(tmp_path: Path) -> None:
