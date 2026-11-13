@@ -18,12 +18,14 @@ from fmri_local_process.processing.cpac_docker import (
     finished_node,
     host_memory_gb,
     is_preprocessed,
+    is_subject_done,
     memory_problem,
     missing_outputs,
     preprocess_subject,
     preprocessed_bolds,
     run_cpac,
     subject_console_log,
+    subject_tasks,
 )
 
 
@@ -83,6 +85,26 @@ def test_task_filter(tmp_path: Path) -> None:
     assert not is_preprocessed(out, "P01", ["2"], "Matching")
     (func / "sub-P01_ses-2_task-Matching_run-2_space-template_desc-preproc_bold.nii.gz").touch()
     assert is_preprocessed(out, "P01", ["2"], "Matching")
+
+
+def test_all_tasks_is_done_only_when_every_task_is(tmp_path: Path) -> None:
+    """An earlier single-task run must not make 'all tasks' skip the subject."""
+    bids = make_bids(tmp_path / "bids")  # P01: task-rest in ses-1 and ses-2
+    (bids / "sub-P01/ses-1/func/sub-P01_ses-1_task-Matching_bold.nii.gz").touch()
+    assert subject_tasks(bids, "P01") == ["Matching", "rest"]
+    out = tmp_path / "out"
+    func = out / "output" / "pipeline_cpac_preproc" / "sub-P01" / "ses-1" / "func"
+    func.mkdir(parents=True)
+    (func / "sub-P01_ses-1_task-Matching_desc-preproc_bold.nii.gz").touch()
+    assert is_subject_done(bids, out, "P01", "Matching")
+    assert not is_subject_done(bids, out, "P01", None)  # rest not run yet
+
+    for ses in ("1", "2"):
+        rest = func.parent.parent / f"ses-{ses}" / "func"
+        rest.mkdir(parents=True, exist_ok=True)
+        (rest / f"sub-P01_ses-{ses}_task-rest_desc-preproc_bold.nii.gz").touch()
+    assert is_subject_done(bids, out, "P01", None)
+    assert not is_subject_done(bids, out, "P02", None)  # no BOLD at all
 
     cmd = build_cpac_command(Path("docker"), bids, out, "P01", CPAC_IMAGE, 1, 3.0, "Matching")
     assert cmd[-2:] == ["--bold_label", "task-Matching"]

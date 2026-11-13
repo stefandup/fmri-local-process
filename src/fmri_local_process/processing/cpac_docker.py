@@ -185,6 +185,31 @@ def is_preprocessed(
     return has_bold and not any(missing_outputs(output_root, subject, sessions, task).values())
 
 
+def subject_tasks(bids_root: Path, subject: str) -> list[str]:
+    """Task labels of this subject's BOLD runs."""
+    return sorted(
+        {
+            match.group(1)
+            for bold in (bids_root / f"sub-{subject}").glob("**/func/*_bold.nii.gz")
+            if (match := TASK_LABEL.search(bold.name))
+        }
+    )
+
+
+def is_subject_done(bids_root: Path, output_root: Path, subject: str, task: str | None) -> bool:
+    """is_preprocessed for task, or, for all tasks, for each of the subject's tasks.
+
+    Checked task by task because 'all tasks' must not count a subject as done when only
+    some tasks were run (e.g. an earlier task-Matching-only run): any one task's
+    preprocessed BOLD would otherwise satisfy every session.
+    """
+    tasks = [task] if task else subject_tasks(bids_root, subject)
+    return bool(tasks) and all(
+        is_preprocessed(output_root, subject, bold_sessions(bids_root, subject, label), label)
+        for label in tasks
+    )
+
+
 UNKNOWN_EXPECTED_OUTPUTS = "unknown: the last C-PAC run stopped before listing its outputs"
 
 
@@ -466,7 +491,7 @@ def preprocess_subject(
     cmd = build_cpac_command(docker, bids_root, output_root, subject, image, n_cpus, mem_gb, task)
     console_log = subject_console_log(output_root, subject)
     returncode = run_cpac(cmd, console_log, on_line)
-    if returncode == 0 and is_preprocessed(output_root, subject, sessions, task):
+    if returncode == 0 and is_subject_done(bids_root, output_root, subject, task):
         return None
     cause = explain_failure(console_log, output_root)
     if cause is None:

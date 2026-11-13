@@ -27,13 +27,12 @@ from fmri_local_process.processing.cpac_docker import (
     MIN_MEM_GB,
     DockerUnavailableError,
     bids_subjects,
-    bold_sessions,
     docker_memory_gb,
     find_docker,
     finished_node,
     host_memory_gb,
     image_present,
-    is_preprocessed,
+    is_subject_done,
     memory_problem,
     preprocess_subject,
     pull_image,
@@ -173,8 +172,7 @@ def main(
     with Progress(*columns, console=console) as progress:
         bar = progress.add_task("Subjects", total=len(subjects))
         for subject in subjects:
-            sessions = bold_sessions(bids_root, subject, task)
-            if not rerun and is_preprocessed(output_folder, subject, sessions, task):
+            if not rerun and is_subject_done(bids_root, output_folder, subject, task):
                 summary.skipped.append(subject)
                 progress.advance(bar)
                 continue

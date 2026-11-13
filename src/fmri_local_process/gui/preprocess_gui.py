@@ -91,13 +91,14 @@ from fmri_local_process.processing.cpac_docker import (
     finished_node,
     host_memory_gb,
     image_present,
-    is_preprocessed,
+    is_subject_done,
     memory_problem,
     missing_outputs,
     preprocess_subject,
     preprocessed_bolds,
     run_cpac,
     subject_console_log,
+    subject_tasks,
 )
 from fmri_local_process.processing.cpac_outputs import (
     QcFigure,
@@ -117,6 +118,7 @@ DOCKER_RECHECK_MS = 30_000
 SLICE_CACHE_SIZE = 40  # rendered slice previews kept (~3 MB each)
 STATUS_ICON = {
     "done": ("✓", OK_COLOR),
+    "partial": ("◐", WARNING_COLOR),
     "failed": ("✗", ERROR_COLOR),
     "running": ("▶", RUNNING_COLOR),
     "not run": ("○", UNKNOWN_COLOR),
@@ -125,6 +127,7 @@ SPINNER = "◐◓◑◒"
 STATUS_LEGEND = (
     "✓ every session has a preprocessed BOLD (of the chosen task) and every output C-PAC "
     "expected\n"
+    "◐ (All tasks) some tasks are preprocessed, others not yet\n"
     "✗ C-PAC ran (a log exists) but its output is incomplete\n"
     "▶ running now\n"
     "○ not run yet"
@@ -198,8 +201,8 @@ class PreprocessThread(QThread):
                 summary.stopped = True
                 break
             self.subject_started.emit(index, len(run.subjects), subject)
-            sessions = bold_sessions(run.bids_root, subject, run.task)
-            if run.mode == "skip" and is_preprocessed(run.output_root, subject, sessions, run.task):
+            done = is_subject_done(run.bids_root, run.output_root, subject, run.task)
+            if run.mode == "skip" and done:
                 summary.skipped.append(subject)
                 self.subject_finished.emit(subject, 0, False)
                 continue
@@ -715,12 +718,23 @@ class PreprocessWindow(QMainWindow):
         if self.bids_folder is None or self.output_folder is None:
             return "not run"
         task = self._task()
-        sessions = bold_sessions(self.bids_folder, subject, task)
-        if is_preprocessed(self.output_folder, subject, sessions, task):
+        if is_subject_done(self.bids_folder, self.output_folder, subject, task):
             return "done"
+        if task is None and self._tasks_to_do(subject) != subject_tasks(self.bids_folder, subject):
+            return "partial"  # all tasks chosen, some already preprocessed on their own
         if subject_console_log(self.output_folder, subject).is_file():
             return "failed"
         return "not run"
+
+    def _tasks_to_do(self, subject: str) -> list[str]:
+        """This subject's tasks that aren't fully preprocessed yet."""
+        if self.bids_folder is None or self.output_folder is None:
+            return []
+        return [
+            label
+            for label in subject_tasks(self.bids_folder, subject)
+            if not is_subject_done(self.bids_folder, self.output_folder, subject, label)
+        ]
 
     def _refresh_roster(self) -> None:
         selected = set(self._selected_subjects())
@@ -905,6 +919,8 @@ class PreprocessWindow(QMainWindow):
         self.outputs_layout.addWidget(title)
         if self.statuses.get(subject) == "failed":
             self.outputs_layout.addWidget(self._failure_group(subject, self.output_folder))
+        if self.statuses.get(subject) == "partial":
+            self.outputs_layout.addWidget(self._partial_group(self._tasks_to_do(subject)))
         if self.bids_folder is not None and self.statuses.get(subject) != "running":
             task = self._task()
             sessions = bold_sessions(self.bids_folder, subject, task)
@@ -925,6 +941,21 @@ class PreprocessWindow(QMainWindow):
         self.outputs_layout.addWidget(group)
         self.outputs_layout.addStretch(1)
         self._show_log(subject)
+
+    def _partial_group(self, tasks_to_do: list[str]) -> QGroupBox:
+        """Which tasks an 'All tasks' run would still preprocess for this subject."""
+        group = QGroupBox("Not all tasks preprocessed")
+        group.setStyleSheet(accent_group_box_stylesheet(WARNING_COLOR))
+        layout = QVBoxLayout(group)
+        names = ", ".join(f"task-{label}" for label in tasks_to_do)
+        label = QLabel(
+            f"Still to do: {names}. Run with Task 'All tasks' and Run mode 'Skip done, "
+            "resume the rest': finished steps are reused."
+        )
+        label.setWordWrap(True)
+        label.setStyleSheet(f"color: {WARNING_COLOR};")
+        layout.addWidget(label)
+        return group
 
     def _failure_group(self, subject: str, output_folder: Path) -> QGroupBox:
         """Why this subject's last C-PAC run failed, read back from its saved log."""

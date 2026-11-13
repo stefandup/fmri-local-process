@@ -109,7 +109,11 @@ def test_roster_statuses_and_task_filter(
     window._set_output_folder(out)
     window._refresh_roster()
     assert window.subjects == ["P01", "P02"]
-    assert window.statuses == {"P01": "not run", "P02": "failed"}  # P01 lacks ses-2
+    # All tasks: P01's Rest is done but its Matching (ses-2) isn't, so it isn't skipped.
+    assert window.statuses == {"P01": "partial", "P02": "failed"}
+    window.subject_table.selectRow(0)
+    texts = [label.text() for label in window.outputs_widget.findChildren(QLabel)]
+    assert any(text.startswith("Still to do: task-Matching.") for text in texts)
     assert window.process_button.isEnabled()
 
     window.task_combo.setCurrentText("Rest")
