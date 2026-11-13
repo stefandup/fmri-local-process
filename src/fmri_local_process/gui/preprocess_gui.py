@@ -47,7 +47,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from fmri_local_process.gui.image_view import PreviewPicker, figure_to_pixmap, load_figure
+from fmri_local_process.gui.image_view import (
+    HelpToggle,
+    PreviewPicker,
+    figure_to_pixmap,
+    load_figure,
+)
+from fmri_local_process.gui.output_help import MOTION_HELP, qc_figure_help, slice_help
 from fmri_local_process.gui.qt_common import (
     ERROR_COLOR,
     HOME_BASE_ACCENT_COLOR,
@@ -368,6 +374,7 @@ class PreprocessWindow(QMainWindow):
         self.detail_tabs.addTab(self.outputs_widget, "Outputs")
         self.figure_picker = PreviewPicker(
             load_figure,
+            lambda figure: qc_figure_help(figure.desc, figure.reg),
             "No QC figures for this subject yet.",
             "QC figures C-PAC drew for this subject (of the chosen task).",
         )
@@ -375,6 +382,7 @@ class PreprocessWindow(QMainWindow):
         self.slice_cache: dict[tuple[SlicePreview, float], QPixmap] = {}
         self.slice_picker = PreviewPicker(
             self._load_slices,
+            lambda preview: slice_help(preview.kind),
             "No brain images for this subject yet.",
             wrap_tooltip(
                 "Slices through C-PAC's T1w and BOLD outputs with mask outlines: check "
@@ -389,7 +397,17 @@ class PreprocessWindow(QMainWindow):
         self.motion_table.setToolTip(
             wrap_tooltip("C-PAC's per-run motion summary (desc-summary_motion.tsv).")
         )
-        self.detail_tabs.addTab(self.motion_table, "Motion")
+        self.motion_tab = QWidget()
+        motion_layout = QVBoxLayout(self.motion_tab)
+        self.motion_help = HelpToggle()
+        self.motion_help.set_text(MOTION_HELP)
+        help_row = QHBoxLayout()
+        help_row.addStretch(1)
+        help_row.addWidget(self.motion_help.button)
+        motion_layout.addLayout(help_row)
+        motion_layout.addWidget(self.motion_help.box)
+        motion_layout.addWidget(self.motion_table, 1)
+        self.detail_tabs.addTab(self.motion_tab, "Motion")
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setFont(QFont("Courier New"))
@@ -997,7 +1015,7 @@ class PreprocessWindow(QMainWindow):
                 item = QTableWidgetItem(values.get(name, ""))
                 self.motion_table.setItem(row_index, column_index, item)
         self.motion_table.resizeColumnsToContents()
-        motion_tab = self.detail_tabs.indexOf(self.motion_table)
+        motion_tab = self.detail_tabs.indexOf(self.motion_tab)
         self.detail_tabs.setTabText(motion_tab, f"Motion ({len(rows)})")
 
     def _show_log(self, subject: str) -> None:

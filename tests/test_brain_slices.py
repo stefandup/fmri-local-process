@@ -60,6 +60,7 @@ def test_slice_previews_pair_masks_and_follow_task(tmp_path: Path) -> None:
     rest_bold = previews["ses-1 Rest: Mean BOLD + BOLD mask"]
     [(mask, name)] = rest_bold.overlays
     assert mask.name == "sub-P01_ses-1_task-Rest_desc-brain_mask.nii.gz" and name == "BOLD mask"
+    assert rest_bold.kind == "Mean BOLD + BOLD mask"
     tissue = previews["ses-1: T1w + tissue masks"]
     assert [name for _path, name in tissue.overlays] == ["GM"]  # WM/CSF absent: skipped
 

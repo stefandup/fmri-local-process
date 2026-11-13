@@ -156,8 +156,15 @@ def test_preview_tabs_show_qc_figures_and_motion(
     cells = [window.motion_table.item(0, column) for column in range(2)]
     assert [cell.text() for cell in cells if cell] == ["ses-1 Rest", "0.1"]
 
+    assert not picker.help.box.isVisible()
+    picker.help.button.click()  # '?' opens notes on the figure shown
+    assert picker.help.box.isVisible() and "rotation" in picker.help.box.text()
+    picker.step(1)
+    assert "translation" in picker.help.box.text()
+
     slices = window.slice_picker
     assert slices.combo.currentText() == "ses-1 Rest: Mean BOLD + BOLD mask"
+    assert "functional brain mask" in slices.help.box.text()
     window.detail_tabs.setCurrentWidget(slices)
     assert not slices.view.pixmap.isNull() and len(window.slice_cache) == 1
 

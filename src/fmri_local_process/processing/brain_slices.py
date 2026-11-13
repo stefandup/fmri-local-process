@@ -86,6 +86,7 @@ class SlicePreview:
     label: str
     path: Path
     overlays: tuple[tuple[Path, str], ...] = field(default=())  # (mask file, legend name)
+    kind: str = ""  # the SliceSpec title, e.g. 'T1w + brain mask'
 
 
 def output_kind(name: str) -> str:
@@ -129,7 +130,8 @@ def slice_previews(output_root: Path, subject: str, task: str | None = None) -> 
                 if spec.needs_overlay and not overlays:
                     continue  # would only repeat the plain volume shown by another preview
                 where = f"ses-{session} {base_task}" if base_task else f"ses-{session}"
-                previews.append(SlicePreview(f"{where}: {spec.title}", base, overlays))
+                label = f"{where}: {spec.title}"
+                previews.append(SlicePreview(label, base, overlays, spec.title))
     return previews
 
 

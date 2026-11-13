@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from fmri_local_process.gui.qt_common import reveal
+from fmri_local_process.gui.qt_common import HOME_BASE_ACCENT_COLOR, reveal
 
 ZOOM_STEP = 1.25
 MIN_SCALE = 0.1
@@ -130,6 +130,28 @@ class Previewable(Protocol):
     def path(self) -> Path: ...
 
 
+class HelpToggle:
+    """A checkable '?' button and the help box it opens; the box text is set by the owner."""
+
+    def __init__(self) -> None:
+        self.button = QPushButton("?")
+        self.button.setCheckable(True)
+        self.button.setFixedWidth(28)
+        self.button.setToolTip("Help: what this output shows and what to look for.")
+        self.box = QLabel()
+        self.box.setWordWrap(True)
+        self.box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.box.setStyleSheet(
+            f"QLabel {{ border: 2px solid {HOME_BASE_ACCENT_COLOR}; border-radius: 4px; "
+            "padding: 6px; }"
+        )
+        self.box.setVisible(False)
+        self.button.toggled.connect(self.box.setVisible)
+
+    def set_text(self, text: str) -> None:
+        self.box.setText(text)
+
+
 def load_figure(item: Previewable) -> QPixmap:
     """A preview that is already an image file (e.g. a C-PAC QC PNG)."""
     return QPixmap(str(item.path))
@@ -138,13 +160,22 @@ def load_figure(item: Previewable) -> QPixmap:
 class PreviewPicker(QWidget):
     """Dropdown + Prev/Next/Reveal over a list of previews, above a ZoomableImageView.
 
-    load(item) gives the image, or a message saying why there is none. Loading waits
-    until the picker is on screen, so a slow loader costs nothing while its tab is hidden.
+    load(item) gives the image, or a message saying why there is none; help_text(item) the
+    '?' box's notes on it. Loading waits until the picker is on screen, so a slow loader
+    costs nothing while its tab is hidden.
     """
 
-    def __init__(self, load: Callable[[Any], QPixmap | str], empty_text: str, tooltip: str) -> None:
+    def __init__(
+        self,
+        load: Callable[[Any], QPixmap | str],
+        help_text: Callable[[Any], str],
+        empty_text: str,
+        tooltip: str,
+    ) -> None:
         super().__init__()
         self.load = load
+        self.help_text = help_text
+        self.help = HelpToggle()
         self.empty_text = empty_text
         self.items: list[Previewable] = []
         self.stale = False  # the current item changed while hidden
@@ -164,7 +195,9 @@ class PreviewPicker(QWidget):
             button.clicked.connect(slot)
             row.addWidget(button)
             self.buttons.append(button)
+        row.addWidget(self.help.button)
         layout.addLayout(row)
+        layout.addWidget(self.help.box)
         self.view = ZoomableImageView()
         layout.addWidget(self.view, 1)
 
@@ -189,8 +222,10 @@ class PreviewPicker(QWidget):
         item = self.current()
         if item is None:
             self.view.set_pixmap(QPixmap(), self.empty_text)
+            self.help.set_text("Select a subject with outputs to see notes on each one.")
             return
         self.combo.setToolTip(str(item.path))
+        self.help.set_text(self.help_text(item))
         if not self.isVisible():
             self.stale = True
             return
