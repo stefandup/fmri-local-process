@@ -10,7 +10,12 @@ import pytest
 from fmri_local_process.processing import behav_logs as bl
 from fmri_local_process.processing import philani_bids as pb
 from fmri_local_process.processing.behav_logs import BehavTask, EventTable
-from fmri_local_process.processing.dcm2niix import Dcm2niixNotFoundError, find_dcm2niix
+from fmri_local_process.processing.dcm2niix import (
+    Dcm2niixFailedError,
+    Dcm2niixNotFoundError,
+    failure_summary,
+    find_dcm2niix,
+)
 
 
 def make_series(root: Path, session: str, *series: str) -> Path:
@@ -55,6 +60,50 @@ def test_parse_session_folder() -> None:
     assert (session.date, session.subject_id) == (date(2024, 1, 31), "P001")
     assert pb.parse_session_folder(Path("notasession")) is None
     assert pb.parse_session_folder(Path("20241331_ABC_P001")) is None  # month 13
+
+
+def test_subject_id_made_bids_legal() -> None:
+    session = pb.parse_session_folder(Path("20240131_1522_AB^CD_PILOT_"))
+    assert session is not None
+    assert session.subject_id == "ABCD"
+    assert pb.parse_session_folder(Path("20240131_1522_^^_x")) is None
+
+
+def test_subject_flag_converts_root_as_one_session(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "pilot scan", tmp_path / "bids"
+    bids.mkdir()
+    make_series(tmp_path, "pilot scan", "5_rest_AP", "6_Checkerboard_task_AP")
+
+    fake = FakeDcm2niix()
+    report = pb.convert_dicom_root(dicoms, bids, fake, deface=None, subject_id="PILOT-01")
+
+    assert sorted(fake.calls) == [
+        "sub-PILOT01_ses-1_task-Checkerboard_bold",
+        "sub-PILOT01_ses-1_task-Rest_bold",
+    ]
+    assert not report.pending and not report.failures
+    with pytest.raises(ValueError, match="no letters or digits"):
+        pb.convert_dicom_root(dicoms, bids, fake, deface=None, subject_id="^_^")
+
+
+def test_copied_series_converted_once_real_repeats_still_staged(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    session = make_series(dicoms, "20240101_X_P001", "5_rest_AP", "7_Cog_reappraisal_task_AP")
+    copy = session / "Untitled"
+    copy.mkdir()
+    for series in (session / "scans").iterdir():
+        target = copy / series.name
+        target.mkdir()
+        (target / "img0001.dcm").write_bytes(b"re-exported")  # same name, other size
+    # A same-named series with different files is a real repeat, not a copy.
+    (copy / "7_Cog_reappraisal_task_AP" / "img0002.dcm").write_bytes(b"more")
+
+    fake = FakeDcm2niix()
+    report = pb.convert_dicom_root(dicoms, bids, fake, deface=None)
+
+    assert report.converted == ["sub-P001_ses-1_task-Rest_bold"]
+    assert report.pending == [f"sub-P001_ses-1_task-Reappraisal_run-{n}_bold" for n in (1, 2)]
 
 
 @pytest.mark.parametrize(
@@ -240,6 +289,92 @@ def test_reset_removes_subjects_pending_and_crosscheck_files(tmp_path: Path) -> 
     pb.reset_bids_root(tmp_path)
 
     assert sorted(p.name for p in tmp_path.iterdir()) == ["dataset_description.json"]
+
+
+class FakeDcm2niixRejectingShortFiles(FakeDcm2niix):
+    """Fails like real dcm2niix when a file is shorter than the others; records inputs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.inputs: list[list[str]] = []
+
+    def __call__(self, dicom_dir: Path, out_dir: Path, stem: str) -> None:
+        files = sorted(dicom_dir.iterdir())
+        self.inputs.append([f.name for f in files])
+        if len({f.stat().st_size for f in files}) > 1:
+            output = "Warning: File not large enough to store image data: x.dcm\n"
+            raise Dcm2niixFailedError(1, ["dcm2niix"], output)
+        super().__call__(dicom_dir, out_dir, stem)
+
+
+def test_truncated_files_left_out_and_reported(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    session = make_series(dicoms, "20240101_X_P001", "5_rest_AP")
+    series = session / "scans" / "5_rest_AP"
+    (series / "img0001.dcm").write_bytes(b"x" * 100)
+    (series / "img0002.dcm").write_bytes(b"x" * 100)
+    (series / "img0003.dcm").write_bytes(b"x" * 40)  # cut off mid-copy
+
+    fake = FakeDcm2niixRejectingShortFiles()
+    report = pb.convert_dicom_root(dicoms, bids, fake, deface=None)
+
+    assert fake.inputs[-1] == ["img0001.dcm", "img0002.dcm"]
+    assert report.converted == ["sub-P001_ses-1_task-Rest_bold"]
+    assert [what for what, _ in report.flagged] == ["sub-P001_ses-1_task-Rest_bold"]
+    assert "1 of 3 DICOM files" in report.flagged[0][1]
+    assert (series / "img0003.dcm").stat().st_size == 40  # raw data untouched
+    assert sorted(p.name for p in bids.iterdir()) == [
+        ".bidsignore",
+        "dataset_description.json",
+        "sub-P001",
+    ]  # nothing about it written into the BIDS folder
+
+
+def test_other_dcm2niix_failures_still_fail(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20240101_X_P001", "5_rest_AP")
+
+    def broken(dicom_dir: Path, out_dir: Path, stem: str) -> None:
+        raise Dcm2niixFailedError(1, ["dcm2niix"], "Error: unsupported transfer syntax\n")
+
+    report = pb.convert_dicom_root(dicoms, bids, broken, deface=None)
+    assert [what for what, _ in report.failures] == ["sub-P001_ses-1_task-Rest_bold"]
+
+
+def test_deleted_scan_reconverted_in_big_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20240101_X_P001", "5_rest_AP", "6_Checkerboard_task_AP")
+    monkeypatch.setattr(pb, "SKIP_SESSION_ABOVE_BYTES", 0)  # every session counts as big
+    pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), deface=None)
+
+    rest = bids / "sub-P001" / "ses-1" / "func" / "sub-P001_ses-1_task-Rest_bold.nii.gz"
+    rest.unlink()  # deleted at crosscheck, e.g. because it was short
+    fake = FakeDcm2niix()
+    pb.convert_dicom_root(dicoms, bids, fake, deface=None)
+    assert fake.calls == ["sub-P001_ses-1_task-Rest_bold"]
+
+    fake.calls.clear()
+    report = pb.convert_dicom_root(dicoms, bids, fake, deface=None)
+    assert fake.calls == [] and report.skipped == ["sub-P001_ses-1"]
+
+
+def test_dcm2niix_failure_message_carries_its_reason() -> None:
+    output = (
+        "Found 495 DICOM file(s)\n"
+        "FileSize < (ImageSize+HeaderSize): 524288 < (1036800+171264)\n"
+        "Warning: File not large enough to store image data: x.dcm\n"
+    )
+    error = Dcm2niixFailedError(1, ["dcm2niix"], output)
+    assert str(error) == (
+        "dcm2niix exit status 1: Warning: File not large enough to store image data: x.dcm"
+    )
+    assert failure_summary("a\nlast line\n") == "last line"
+    assert failure_summary("") == "no output"
 
 
 def test_find_dcm2niix_explicit_and_missing(

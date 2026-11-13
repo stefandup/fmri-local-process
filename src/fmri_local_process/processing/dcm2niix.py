@@ -21,6 +21,21 @@ class Dcm2niixNotFoundError(FileNotFoundError):
     pass
 
 
+class Dcm2niixFailedError(subprocess.CalledProcessError):
+    """A failed dcm2niix run whose message carries dcm2niix's own explanation."""
+
+    def __str__(self) -> str:
+        return f"dcm2niix exit status {self.returncode}: {failure_summary(self.output or '')}"
+
+
+def failure_summary(output: str, max_lines: int = 3) -> str:
+    """The Error/Warning lines of dcm2niix output (else its last line), deduplicated."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    flagged = [line for line in lines if line.lower().startswith(("error", "warning"))]
+    picked = list(dict.fromkeys(flagged or lines[-1:]))
+    return " | ".join(picked[:max_lines]) or "no output"
+
+
 def _bundled_exe() -> Path | None:
     """The copy PyInstaller bundles next to the frozen app (see build.ps1)."""
     bundle_dir = getattr(sys, "_MEIPASS", None)
@@ -57,4 +72,6 @@ def run_dcm2niix(exe: Path, dicom_dir: Path, out_dir: Path, stem: str) -> None:
     cmd = [str(exe), "-b", "y", "-z", "y", "-x", "n", "-s", "y"]
     cmd += ["-o", str(out_dir), "-f", stem, str(dicom_dir)]
     log.debug("Running %s", " ".join(cmd))
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise Dcm2niixFailedError(result.returncode, cmd, result.stdout + result.stderr)

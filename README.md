@@ -25,15 +25,28 @@ Full details and a step-by-step "test it yourself" plan:
 1. **Check the port against R on real logs.** Run `fmri_behav_events --compare` on a few
    complete and aborted logs of both tasks. Then drop the `--compare` flag and
    `processing/behav_compare.py`.
-2. **Port the crosscheck tool.** `philani_scripts/philaniBIDSspreadsheet.py` (Streamlit)
-   doesn't know about `ses-<n>/` or `crosscheck_pending/` yet. It needs to promote the chosen
-   run or log into the main tree, move the rest to `trash/`, and record the choice in
-   `selected_runs.json`.
+2. **Try the crosscheck tool** (`fmri_crosscheck`) on a full BIDS folder. It replaces
+   `philaniBIDSspreadsheet.py`. Non-chosen runs are deleted (they can be recreated from
+   raw) rather than moved to `trash/`, and no `selected_runs.json` is written.
 3. **Check the dummy-scan assumption.** Events onsets assume the first logged pulse is the
    first volume saved in the BOLD file.
 4. **Packaging.** Add `fmri_behav_events` to the PyInstaller and installer builds if it
    should ship. It is only on PATH via `pip install -e .` for now.
 5. **Linux build.** Run `./build.sh` and `packaging/install.sh` on Ubuntu.
+
+## 1a. Preprocessing via C-PAC in Docker (built, not yet run on real data)
+
+```powershell
+fmri_preprocess <BIDS_ROOT> <OUTPUT> [--subject_id P001] [--task Rest] [--rerun] [--n-cpus 4] [--mem-gb 8]
+```
+
+- Runs C-PAC's standard `preproc` preset (`fcpindi/c-pac:release-v1.8.7`), one container
+  per subject. This answers the "Windows-native vs container" question below for now:
+  FSL/AFNI/ANTs run inside the container.
+- Only `sub-<id>/` and `dataset_description.json` are mounted, so `crosscheck_pending/` is
+  never used as input.
+- Output goes to `OUTPUT/output/pipeline_cpac_preproc/` and logs to `OUTPUT/log/`. A subject
+  is skipped when every session already has a `desc-preproc_bold`, unless `--rerun` is passed.
 
 ## The idea
 

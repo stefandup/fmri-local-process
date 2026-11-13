@@ -10,6 +10,10 @@
 ; Matches $AppName in build.ps1.
 #define MyAppExeName "fmri_convert_to_bids.exe"
 #define MyAppId "05C45EB1-8EDF-41EA-A79E-BC1A8E0645B3"
+; Passed by build.ps1 from processing/cpac_docker.py's CPAC_IMAGE, so both pull the same tag.
+#ifndef CpacImage
+  #define CpacImage "fcpindi/c-pac:release-v1.8.7"
+#endif
 
 [Setup]
 ; Three "{" here, not two: the preprocessor substitutes {#MyAppId} before Inno's own "{{"
@@ -42,6 +46,7 @@ Source: "build_output\payload\*"; DestDir: "{app}"; Flags: ignoreversion recurse
 
 [Tasks]
 Name: desktopicon; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"
+Name: pullcpac; Description: "Download the C-PAC Docker image now (10+ GB, needs Docker Desktop running)"; GroupDescription: "fmri_preprocess:"
 
 [Icons]
 Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
@@ -146,6 +151,42 @@ begin
     ewWaitUntilTerminated, ResultCode);
 end;
 
+function DockerAnswers(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := Exec(ExpandConstant('{cmd}'), '/c docker info >nul 2>&1', '', SW_HIDE,
+    ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+// Optional: fmri_preprocess would otherwise pull the image on its first run. Every step can
+// be skipped, and a failure here never fails the install. Silent installs skip it
+// (SuppressibleMsgBox returns the given default).
+procedure PullCpacImage();
+var
+  ResultCode: Integer;
+begin
+  if SuppressibleMsgBox('fmri_preprocess runs C-PAC inside Docker. Downloading its image'#13#10
+    + '{#CpacImage}'#13#10'needs 10+ GB of disk space and can take an hour or more.'#13#10#13#10
+    + 'Download it now? Choose No to skip: it then downloads on the first fmri_preprocess run.',
+    mbConfirmation, MB_YESNO, IDNO) <> IDYES then
+    exit;
+
+  while not DockerAnswers() do
+    if SuppressibleMsgBox('Docker Desktop is not installed or not running.'#13#10#13#10
+      + 'Install it from https://www.docker.com/products/docker-desktop/ or start it, wait '
+      + 'until it says "Engine running", then choose Retry. Choose Cancel to skip the download.',
+      mbError, MB_RETRYCANCEL, IDCANCEL) <> IDRETRY then
+      exit;
+
+  // Visible console window, so docker's own download progress shows.
+  if not Exec(ExpandConstant('{cmd}'), '/c docker pull {#CpacImage}', '', SW_SHOW,
+    ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+    SuppressibleMsgBox('Downloading the C-PAC image failed (exit code ' + IntToStr(ResultCode)
+      + '). The install itself is complete; the image downloads on the first fmri_preprocess '
+      + 'run instead, or run:  docker pull {#CpacImage}', mbError, MB_OK, IDOK);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
@@ -157,6 +198,8 @@ begin
   begin
     EnvAddPath(ExpandConstant('{app}'));
     EnvBroadcastChange();
+    if WizardIsTaskSelected('pullcpac') then
+      PullCpacImage();
   end;
 end;
 

@@ -9,13 +9,19 @@ to resolve at crosscheck, instead of the converter guessing:
 
 * a scan with several series in one session -> every series as ``run-<n>``
 * behavioural logs, unless there is exactly one log and exactly one session with that task
+
+A series with truncated DICOM files (an incomplete copy) is converted from its intact files
+and listed in the report; nothing is written about it into the BIDS folder; the crosscheck
+GUI spots the short scan itself. Delete that output and re-run once the raw data is complete.
 """
 
 import json
 import logging
 import shutil
 import subprocess
-from collections.abc import Callable
+import tempfile
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from fnmatch import fnmatchcase
@@ -43,6 +49,10 @@ SKIP_SESSION_ABOVE_BYTES = 1024**3  # an existing ses-* folder over 1 GB counts 
 IGNORED_FOLDERS = {"trash"}
 PENDING_DIR = "crosscheck_pending"
 RESET_FILES = ("crosscheck.json", "selected_runs.json")
+TRUNCATED_MESSAGE = "File not large enough"  # dcm2niix's complaint about a cut-off file
+# Files of one series hold one slice/volume each, so they are within a few bytes of each
+# other; one well below the largest was cut off mid-copy.
+TRUNCATED_FRACTION = 0.9
 
 DATASET_DESCRIPTION = {
     "BIDSVersion": "1.9.0",
@@ -74,6 +84,7 @@ SCAN_RULES = (
     ScanRule("*_labeling_task_AP", "func", "task-Matching", "bold"),
     ScanRule("*_rest_AP", "func", "task-Rest", "bold"),
     ScanRule("*_AP_Peer", "func", "task-Peer", "bold"),
+    ScanRule("*_Checkerboard_task_AP", "func", "task-Checkerboard", "bold"),
 )
 
 
@@ -106,6 +117,7 @@ class BidsSession:
 class ConversionReport:
     converted: list[str] = field(default_factory=list)
     pending: list[str] = field(default_factory=list)  # staged in crosscheck_pending/
+    flagged: list[tuple[str, str]] = field(default_factory=list)  # converted, but incomplete
     missing: list[str] = field(default_factory=list)  # expected behavioural logs not found
     skipped: list[str] = field(default_factory=list)
     failures: list[tuple[str, str]] = field(default_factory=list)  # (what, why)
@@ -121,16 +133,39 @@ def bids_stem(prefix: str, entities: str, suffix: str, run: int | None = None) -
     return "_".join(parts)
 
 
+def bids_label(text: str) -> str:
+    """BIDS labels are alphanumeric only: drop everything else (e.g. 'AB^CD' -> 'ABCD')."""
+    return "".join(c for c in text if c.isascii() and c.isalnum())
+
+
 def parse_session_folder(folder: Path) -> DicomSession | None:
     """<YYYYMMDD>_<x>_<subject id>[...] -> DicomSession; None if the name doesn't fit."""
     parts = folder.name.split("_")
-    if len(parts) < 3 or not parts[2]:
+    if len(parts) < 3:
         return None
+    subject_id = bids_label(parts[2])
+    if not subject_id:
+        return None
+    if subject_id != parts[2]:
+        log.warning("%s: subject id %r -> %r (BIDS-legal)", folder.name, parts[2], subject_id)
     try:
         scan_date = datetime.strptime(parts[0], DATE_FORMAT).date()
     except ValueError:
         return None
-    return DicomSession(folder=folder, date=scan_date, subject_id=parts[2])
+    return DicomSession(folder=folder, date=scan_date, subject_id=subject_id)
+
+
+def single_session(folder: Path, subject_id: str) -> DicomSession:
+    """Treat folder as one session of subject_id, whatever its name (--subject).
+
+    The date comes from the folder name when it has one; it only orders sessions, and a
+    single session is always ses-1.
+    """
+    label = bids_label(subject_id)
+    if not label:
+        raise ValueError(f"subject id {subject_id!r} has no letters or digits")
+    parsed = parse_session_folder(folder)
+    return DicomSession(folder, parsed.date if parsed else date.min, label)
 
 
 def find_sessions(dicom_root: Path) -> list[DicomSession]:
@@ -215,14 +250,81 @@ def is_defaced(json_path: Path) -> bool:
     return DEFACE_NOTE in sidecar.get("Notes", "")
 
 
+def file_listing(folder: Path) -> tuple[str, ...]:
+    """Names of the files directly in folder: identifies a copied series folder.
+
+    Sizes are ignored on purpose: a re-export (e.g. differently compressed) of the same
+    images keeps the instance-UID file names but not the byte sizes.
+    """
+    return tuple(sorted(f.name for f in folder.iterdir() if f.is_file()))
+
+
+def drop_copies(series: list[Path]) -> list[Path]:
+    """Keep one of each set of copied series folders (same folder name and file names).
+
+    Scanner exports often hold a second full copy (e.g. an 'Untitled/' subfolder). Those
+    are not repeated runs, so they shouldn't go to crosscheck. The shallowest copy is kept.
+    """
+    kept: dict[tuple[str, tuple[str, ...]], Path] = {}
+    for folder in sorted(series, key=lambda d: (len(d.parts), d.as_posix())):
+        key = (folder.name, file_listing(folder))
+        if key in kept:
+            log.info("Ignoring %s: copy of %s", folder, kept[key])
+        else:
+            kept[key] = folder
+    return sorted(kept.values())
+
+
 def match_series(session_folder: Path) -> dict[ScanRule, list[Path]]:
     """Series folders per scan rule (only rules with at least one match)."""
     session_dirs = sorted(d for d in session_folder.rglob("*") if d.is_dir())
     matches = {
-        rule: [d for d in session_dirs if fnmatchcase(d.as_posix(), rule.pattern)]
+        rule: drop_copies([d for d in session_dirs if fnmatchcase(d.as_posix(), rule.pattern)])
         for rule in SCAN_RULES
     }
     return {rule: series for rule, series in matches.items() if series}
+
+
+def truncated_dicoms(series_dir: Path) -> list[Path]:
+    """Files well below the largest in the series: cut off by an incomplete copy."""
+    sizes = {f: f.stat().st_size for f in series_dir.iterdir() if f.is_file()}
+    if not sizes:
+        return []
+    limit = TRUNCATED_FRACTION * max(sizes.values())
+    return sorted(f for f, size in sizes.items() if size < limit)
+
+
+@contextmanager
+def series_without(series_dir: Path, left_out: list[Path]) -> Iterator[Path]:
+    """A temporary copy of series_dir without left_out (the raw folder is never touched)."""
+    with tempfile.TemporaryDirectory(prefix="fmri_intact_series_") as tmp:
+        intact_dir = Path(tmp)
+        for f in series_dir.iterdir():
+            if f.is_file() and f not in left_out:
+                shutil.copy2(f, intact_dir / f.name)
+        yield intact_dir
+
+
+def convert_intact(series_dir: Path, out_dir: Path, stem: str, convert: ConvertFn) -> list[str]:
+    """Convert series_dir; if dcm2niix rejects truncated files, convert without them.
+
+    Returns the problems to flag for crosscheck (empty when the series was complete).
+    """
+    try:
+        convert(series_dir, out_dir, stem)
+        return []
+    except subprocess.CalledProcessError as e:
+        truncated = truncated_dicoms(series_dir)
+        if not truncated or TRUNCATED_MESSAGE not in str(e.output):
+            raise
+    total = sum(1 for f in series_dir.iterdir() if f.is_file())
+    log.warning("%s: %d of %d DICOM files truncated, left out", stem, len(truncated), total)
+    with series_without(series_dir, truncated) as intact_dir:
+        convert(intact_dir, out_dir, stem)
+    return [
+        f"Incomplete series: {len(truncated)} of {total} DICOM files in {series_dir.name} are "
+        "truncated (incomplete copy?) and were left out. Re-copy the raw data and convert again."
+    ]
 
 
 def convert_session(
@@ -234,7 +336,19 @@ def convert_session(
     report: ConversionReport,
 ) -> None:
     session_dir = bids_root / session.rel_dir
-    if session_dir.is_dir() and folder_size(session_dir) > SKIP_SESSION_ABOVE_BYTES:
+    # A scan deleted at crosscheck (e.g. a short one, to reconvert) must not be skipped.
+    expected = [
+        session_dir
+        / rule.datatype
+        / (bids_stem(session.prefix, rule.entities, rule.suffix) + ".nii.gz")
+        for rule, series in series_by_rule.items()
+        if len(series) == 1
+    ]
+    if (
+        session_dir.is_dir()
+        and all(p.exists() for p in expected)
+        and folder_size(session_dir) > SKIP_SESSION_ABOVE_BYTES
+    ):
         log.info("%s already converted (>1 GB), skipping", session.prefix)
         report.skipped.append(session.prefix)
         return
@@ -261,8 +375,9 @@ def convert_session(
             ]
         for series_dir, out_dir, stem, bucket in targets:
             try:
-                convert_series(series_dir, out_dir, stem, rule, convert, deface)
+                problems = convert_series(series_dir, out_dir, stem, rule, convert, deface)
                 bucket.append(stem)
+                report.flagged.extend((stem, problem) for problem in problems)
             except (subprocess.CalledProcessError, OSError, ValueError) as e:
                 log.error("%s failed: %s", stem, e)
                 report.failures.append((stem, str(e)))
@@ -275,16 +390,18 @@ def convert_series(
     rule: ScanRule,
     convert: ConvertFn,
     deface: DefaceFn | None,
-) -> None:
+) -> list[str]:
+    """Convert one series; returns problems for the report (e.g. truncated files left out)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     nifti = out_dir / f"{stem}.nii.gz"
     sidecar = out_dir / f"{stem}.json"
 
+    problems = []
     if nifti.exists() and sidecar.exists():
         log.info("%s exists, not reconverting", stem)
     else:
         log.info("Converting %s -> %s", series_dir.name, stem)
-        convert(series_dir, out_dir, stem)
+        problems = convert_intact(series_dir, out_dir, stem, convert)
         strip_duplicate_suffix(out_dir)
         if not (nifti.exists() and sidecar.exists()):
             raise FileNotFoundError(f"dcm2niix produced no {nifti.name} / {sidecar.name}")
@@ -296,6 +413,7 @@ def convert_series(
 
     if rule.task_name:
         update_json(sidecar, TaskName=rule.task_name)
+    return problems
 
 
 def convert_behaviour(
@@ -372,12 +490,22 @@ def convert_dicom_root(
     convert: ConvertFn,
     deface: DefaceFn | None,
     behav_root: Path | None = None,
+    subject_id: str | None = None,
 ) -> ConversionReport:
+    """Convert every session folder in dicom_root.
+
+    With subject_id, dicom_root is itself one session of that subject, whatever its name.
+    """
     report = ConversionReport()
     write_dataset_description(bids_root)
     ensure_bidsignore(bids_root)
     log_groups = find_behav_logs(behav_root) if behav_root is not None else {}
-    subjects = number_sessions(find_sessions(dicom_root))
+    found = (
+        [single_session(dicom_root, subject_id)]
+        if subject_id is not None
+        else find_sessions(dicom_root)
+    )
+    subjects = number_sessions(found)
     for subject_id, sessions in subjects.items():
         series = {s: match_series(s.dicom.folder) for s in sessions}
         for session in sessions:

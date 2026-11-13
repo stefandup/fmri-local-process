@@ -18,7 +18,13 @@ $PayloadPath = Join-Path $BuildOutput "payload"
 # because installer filenames carry the version, so stale ones would otherwise pile up.
 $InstallerPath = Join-Path $BuildOutput "installer"
 
-$EntryScript = Join-Path $PSScriptRoot "src\fmri_local_process\cli\convert_to_bids.py"
+# One PyInstaller onedir build per CLI; build-Installer merges them into one payload folder
+# (their _internal\ runtimes come from the same .venv, so they overlap harmlessly).
+$CliDir = Join-Path $PSScriptRoot "src\fmri_local_process\cli"
+$Apps = [ordered]@{
+    "fmri_convert_to_bids" = Join-Path $CliDir "convert_to_bids.py"
+    "fmri_preprocess"      = Join-Path $CliDir "preprocess.py"
+}
 $AppName = "fmri_convert_to_bids"
 $PackageName = "fmri-local-process"
 # dcm2niix.exe + its MSVC runtime DLLs, fetched by tools\fetch_dcm2niix.ps1. Bundled into the
@@ -46,10 +52,10 @@ Usage: .\build.ps1 -Full | -Exe | -Inno
   -Full   Build the exe with PyInstaller, assemble build_output/payload/,
           then compile the installer.
 
-  -Exe    Only build the exe into build_output/dist/$AppName/.
+  -Exe    Only build the exes into build_output/dist/<app>/ ($($Apps.Keys -join ', ')).
           No Inno Setup needed.
 
-  -Inno   Skip the PyInstaller build. Reuses build_output/dist/$AppName/
+  -Inno   Skip the PyInstaller build. Reuses build_output/dist/<app>/
           from a previous build and (re)compiles the installer.
 
 No option given: prints this help and exits without building anything.
@@ -66,11 +72,15 @@ function Build-Exes {
 
     & $Python -m pip install -e . --no-deps
     Assert-Success "pip install -e ."
-    # --noconfirm: skip PyInstaller's interactive "will be REMOVED! Continue?" prompt.
-    & $Python -m PyInstaller --noconfirm --workpath $WorkPath --distpath $DistPath `
-        --specpath $WorkPath --name $AppName --onedir --console `
-        --copy-metadata $PackageName @bundleArgs $EntryScript
-    Assert-Success "PyInstaller build"
+    foreach ($app in $Apps.Keys) {
+        # Only the converter needs dcm2niix; fmri_preprocess shells out to docker instead.
+        $appBundleArgs = if ($app -eq $AppName) { $bundleArgs } else { @() }
+        # --noconfirm: skip PyInstaller's interactive "will be REMOVED! Continue?" prompt.
+        & $Python -m PyInstaller --noconfirm --workpath $WorkPath --distpath $DistPath `
+            --specpath $WorkPath --name $app --onedir --console `
+            --copy-metadata $PackageName @appBundleArgs $Apps[$app]
+        Assert-Success "PyInstaller build of $app"
+    }
 }
 
 function Build-Installer {
@@ -78,14 +88,20 @@ function Build-Installer {
     $version = "v" + (& $Python -c "from importlib.metadata import version; print(version('$PackageName'))").Trim()
     Assert-Success "Reading package version"
 
-    $bundleDir = Join-Path $DistPath $AppName
-    if (-not (Test-Path $bundleDir)) {
-        throw "$bundleDir not found -- run '.\build.ps1 -Full' or '-Exe' first."
-    }
-
     if (Test-Path $PayloadPath) { Remove-Item $PayloadPath -Recurse -Force }
     New-Item -ItemType Directory -Path $PayloadPath | Out-Null
-    Copy-Item (Join-Path $bundleDir "*") $PayloadPath -Recurse
+    foreach ($app in $Apps.Keys) {
+        $bundleDir = Join-Path $DistPath $app
+        if (-not (Test-Path $bundleDir)) {
+            throw "$bundleDir not found -- run '.\build.ps1 -Full' or '-Exe' first."
+        }
+        # robocopy merges the shared _internal\ folders; exit codes below 8 mean success.
+        robocopy $bundleDir $PayloadPath /E /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "Copying $app into the payload failed ($LASTEXITCODE)" }
+    }
+    # The installer's optional "download C-PAC image" step pulls the tag fmri_preprocess runs.
+    $cpacImage = (& $Python -c "from fmri_local_process.processing.cpac_docker import CPAC_IMAGE; print(CPAC_IMAGE)").Trim()
+    Assert-Success "Reading CPAC_IMAGE"
 
     if (Test-Path $InstallerPath) { Remove-Item $InstallerPath -Recurse -Force }
 
@@ -98,7 +114,7 @@ function Build-Installer {
         $iscc = $isccCmd.Source
     }
 
-    & $iscc (Join-Path $PSScriptRoot "fmri_local_process_installer.iss") "/DMyAppVersion=$version"
+    & $iscc (Join-Path $PSScriptRoot "fmri_local_process_installer.iss") "/DMyAppVersion=$version" "/DCpacImage=$cpacImage"
     Assert-Success "ISCC.exe"
 }
 

@@ -35,6 +35,10 @@ Examples:
 \b
   Rebuild an old flat-layout BIDS folder from scratch, without prompts:
   fmri_convert_to_bids D:\\philani D:\\philani_bids --behav-logs D:\\behav_logs --reset -y
+
+\b
+  Convert one session folder that doesn't follow the naming rules, as sub-PILOT01:
+  fmri_convert_to_bids D:\\scans\\20261020_1522_PILOT D:\\pilot_bids --subject PILOT01 --no-deface
 """
 
 
@@ -44,10 +48,13 @@ def print_report(report: ConversionReport) -> None:
     table.add_column("Count", justify="right")
     table.add_row("converted/updated", str(len(report.converted)))
     table.add_row(f"[yellow]staged in {PENDING_DIR}/", f"[yellow]{len(report.pending)}")
+    table.add_row("[yellow]converted from incomplete data", f"[yellow]{len(report.flagged)}")
     table.add_row("skipped sessions (>1 GB)", str(len(report.skipped)))
     table.add_row("[yellow]missing behavioural logs", f"[yellow]{len(report.missing)}")
     table.add_row("[red]failed", f"[red]{len(report.failures)}")
     console.print(table)
+    for what, why in report.flagged:
+        console.print(f"[yellow]INCOMPLETE[/yellow] {what}: {why}")
     for what in report.missing:
         console.print(f"[yellow]MISSING[/yellow] {what} log")
     for what, why in report.failures:
@@ -77,6 +84,12 @@ def print_report(report: ConversionReport) -> None:
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="dcm2niix executable to use instead of the bundled/fetched one.",
 )
+@click.option(
+    "--subject",
+    "subject_id",
+    help="Bypass the folder-name rules: DICOM_ROOT is itself ONE session, converted as "
+    "sub-<SUBJECT>/ses-1 (non-alphanumerics are dropped).",
+)
 @click.option("-y", "--yes", is_flag=True, help="Don't prompt (create BIDS_ROOT, confirm reset).")
 @click.option("-v", "--verbose", is_flag=True, help="Debug logging.")
 def main(
@@ -86,6 +99,7 @@ def main(
     reset: bool,
     behav_root: Path | None,
     dcm2niix_path: Path | None,
+    subject_id: str | None,
     yes: bool,
     verbose: bool,
 ) -> None:
@@ -131,9 +145,12 @@ def main(
             click.confirm(f"Delete all sub-* folders in {bids_root}?", abort=True)
         reset_bids_root(bids_root)
 
-    report = convert_dicom_root(
-        dicom_root, bids_root, partial(run_dcm2niix, exe), deface, behav_root
-    )
+    try:
+        report = convert_dicom_root(
+            dicom_root, bids_root, partial(run_dcm2niix, exe), deface, behav_root, subject_id
+        )
+    except ValueError as e:  # unusable --subject
+        raise click.ClickException(str(e)) from e
     print_report(report)
     if report.pending:
         console.print(f"[yellow]Resolve {bids_root / PENDING_DIR} at crosscheck.")

@@ -30,7 +30,15 @@ subject ID is the part of the file name before the first `-`. `BEHAV_LOGS` can b
 `DICOM_ROOT` itself if the logs live alongside the DICOMs.
 
 Folders that are empty or don't start with a valid `YYYYMMDD_` date are skipped with a
-warning.
+warning. Characters BIDS doesn't allow in a subject ID (anything not a letter or digit, e.g.
+`^`) are dropped, with a warning.
+
+To convert a single session folder that doesn't follow these naming rules, pass the folder
+itself as `DICOM_ROOT` with `--subject <id>`: it becomes `sub-<id>/ses-1`.
+
+A series folder that is a copy of another, meaning the same folder name with the same file
+names (e.g. a scanner export's extra `Untitled/` subfolder), is converted once rather than
+staged as a repeated run.
 
 ## Output
 
@@ -48,7 +56,7 @@ BIDS_ROOT/
   each subject's scan dates, and every subject gets `ses-1`, even with a single session. If an
   earlier session turns up later, the later ones are renumbered.
 - **Scans.** Each `ScanRule` in `philani_bids.py` maps a series folder pattern to a BIDS name:
-  T1w, Reappraisal, Matching, Rest and Peer.
+  T1w, Reappraisal, Matching, Rest, Peer and Checkerboard.
 - **Events** (BIDS conventions):
     - `onset` and `duration` are in **seconds**. Presentation logs time in units of 0.1 ms.
     - `onset` is measured from the **first scanner pulse** (the first volume). This assumes
@@ -68,6 +76,33 @@ The converter never guesses which of several candidates is the right one. It sta
 At crosscheck, put the chosen file into the main tree under its run-less name. Re-runs
 then leave that item alone and don't stage it again.
 
+### Incomplete DICOM series
+
+dcm2niix refuses a whole series if a single file is cut short, which happens when a copy
+didn't finish. When it does, the converter converts the files that are intact (any file well
+under the largest in the series is left out) and lists the series as **INCOMPLETE** in the
+summary. Nothing about this is written into the BIDS folder. The crosscheck tool finds the
+short scan from the data itself.
+
+To fix it, re-copy the raw session, delete the short scan in the crosscheck tool, and
+convert again.
+
+### Crosscheck tool: `fmri_crosscheck`
+
+A PySide6 window, modelled on the vr_lab_toolbox crosscheck tools. It reads only the BIDS
+folder. The only changes it makes there are the ones you click.
+
+| Icon | Meaning |
+|---|---|
+| ⚠ | Staged runs/logs in `crosscheck_pending/`: keep one run (the others are deleted), or assign each log to a session |
+| ❗ | Short: fewer volumes than the same scan in other sessions (bytes for a 3D image), or an `events.tsv` with no events |
+| ○ | Missing: a NIfTI without its sidecar, a task bold without its `events.tsv`, or a scan most other sessions have |
+
+Every file also shows its volume count and duration. A scan with no other session to compare
+against (e.g. a single pilot) can't be marked short automatically, so check those numbers by
+eye. **Convert / update BIDS** runs the converter from the window. Deleted files are recreated
+from the raw data.
+
 Every subject is expected to have both a Reappraisal log and a Matching log. A missing one is
 logged, listed as **MISSING** in the summary, and conversion carries on. It does not affect
 the exit code.
@@ -78,7 +113,8 @@ Re-running is safe:
 
 - Files that already exist are not converted again.
 - T1w images are defaced once; the deface note in the JSON sidecar marks them as done.
-- A session folder over 1 GB counts as done and is skipped.
+- A session folder over 1 GB counts as done and is skipped, unless one of its expected scans
+  is missing (e.g. deleted at crosscheck so it gets converted again).
 
 `--reset` deletes `sub-*`, `crosscheck_pending/`, `crosscheck.json` and `selected_runs.json`
 first.
