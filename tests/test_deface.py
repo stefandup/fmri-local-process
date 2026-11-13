@@ -84,7 +84,8 @@ def test_run_defacer_replaces_original_and_drops_log(tmp_path: Path) -> None:
     t1w = tmp_path / "t.nii.gz"
     t1w.write_bytes(b"face")
     defaced = df.defaced_path(t1w)
-    script = f"open(r'{defaced}', 'wb').write(b'no face'); open(r'{defaced}.log', 'w').write('log')"
+    log_file = tmp_path / "t_defaced.nii.log"  # where mri_deface writes its log
+    script = f"open(r'{defaced}', 'wb').write(b'no face'); open(r'{log_file}', 'w').write('log')"
     assert df.run_defacer([sys.executable, "-c", script], t1w, "tool") == "tool"
     assert t1w.read_bytes() == b"no face"
     assert list(tmp_path.iterdir()) == [t1w]

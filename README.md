@@ -51,7 +51,10 @@ fmri_preprocess <BIDS_ROOT> <OUTPUT> [--subject_id P001] [--task Rest] [--rerun]
   layout): pick the BIDS and output folders, task, CPUs and memory, then click "Preprocess".
   It shows each subject's status, its preprocessed BOLD files, and the end of its C-PAC log.
   Clicking a subject also previews what C-PAC already generated for it: the QC figures
-  (framewise displacement, motion, BOLD SNR; zoomable) and the per-run motion summary table.
+  (framewise displacement, motion, BOLD SNR; zoomable), brain slices (sagittal / coronal /
+  axial grids with mask outlines: T1w + brain and tissue masks, mean BOLD + BOLD mask,
+  BOLD on T1w for coregistration, T1w and BOLD in template space for normalisation;
+  neurological convention, left on the left) and the per-run motion summary table.
 
 ## The idea
 

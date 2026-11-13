@@ -31,7 +31,9 @@ param(
     [switch]$PauseOnError
 )
 
-$ErrorActionPreference = "Stop"
+# Not "Stop": Windows PowerShell 5.1 then aborts on any docker stderr line (its progress and
+# warnings go there). Every docker call checks $LASTEXITCODE; file copies use -ErrorAction Stop.
+$ErrorActionPreference = "Continue"
 $Activity = "Setting up Docker for fMRI Local Process"
 $Templates = @("talairach_mixed_with_skull.gca", "face.gca")
 
@@ -52,7 +54,7 @@ function Step([int]$Number, [int]$Total, [string]$What) {
 
 # Docker Hub downloads of 10+ GB sometimes drop ('unexpected EOF'); finished layers are
 # kept, so retrying resumes rather than restarts.
-function Pull-Image([string]$Name) {
+function Get-DockerImage([string]$Name) {
     if (docker image ls -q $Name) {
         Write-Host "$Name is already downloaded."
         return
@@ -79,7 +81,7 @@ if ($LASTEXITCODE -ne 0) { Fail "Docker Desktop is not running. Start it, wait f
 $total = if ($Defacer -eq "none") { 1 } elseif ($Defacer -eq "freesurfer") { 4 } else { 2 }
 
 Step 1 $total "Download C-PAC ($CpacImage, ~15 GB unpacked; can take an hour or more)"
-Pull-Image $CpacImage
+Get-DockerImage $CpacImage
 if ($Defacer -eq "none") {
     Write-Progress -Activity $Activity -Completed
     Write-Host "Done. No defacer image built: T1w images can only be defaced with --freesurfer, or not at all (--no-deface)." -ForegroundColor Green
@@ -89,22 +91,22 @@ if ($Defacer -eq "none") {
 $step = 2
 if ($Defacer -eq "freesurfer") {
     Step $step $total "Download FreeSurfer ($FreesurferImage, ~5 GB; only mri_deface is kept)"
-    Pull-Image $FreesurferImage
+    Get-DockerImage $FreesurferImage
     $step++
 }
 
 # A fresh build context: the Dockerfile, plus deface_files/ (empty unless -Defacer local).
 $context = Join-Path ([System.IO.Path]::GetTempPath()) ("philani_docker_" + [guid]::NewGuid().ToString("N"))
 $filesDir = Join-Path $context "deface_files"
-New-Item -ItemType Directory -Path $filesDir -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Dockerfile") -Destination $context
+New-Item -ItemType Directory -Path $filesDir -Force -ErrorAction Stop | Out-Null
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Dockerfile") -Destination $context -ErrorAction Stop
 if ($Defacer -eq "local") {
     if (-not $DefaceFiles -or -not (Test-Path -LiteralPath $DefaceFiles -PathType Container)) {
         Fail "-Defacer local needs -DefaceFiles <folder>; got '$DefaceFiles'."
     }
-    Copy-Item -LiteralPath (Find-DefaceFile $DefaceFiles "mri_deface" "bin") -Destination $filesDir
+    Copy-Item -LiteralPath (Find-DefaceFile $DefaceFiles "mri_deface" "bin") -Destination $filesDir -ErrorAction Stop
     foreach ($template in $Templates) {
-        Copy-Item -LiteralPath (Find-DefaceFile $DefaceFiles $template "average") -Destination $filesDir
+        Copy-Item -LiteralPath (Find-DefaceFile $DefaceFiles $template "average") -Destination $filesDir -ErrorAction Stop
     }
 }
 

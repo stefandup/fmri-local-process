@@ -96,7 +96,8 @@ def run_defacer(cmd: list[str], t1w: Path, tool: str) -> str:
         last = output[-1] if output else "no output"
         raise DefaceFailedError(f"{tool} failed (exit {result.returncode}): {last}")
     defaced.replace(t1w)
-    defaced.with_name(defaced.name + ".log").unlink(missing_ok=True)  # mri_deface's log
+    # mri_deface's log: <output minus .gz>.log, e.g. x_T1w_defaced.nii.log
+    defaced.with_name(defaced.name.removesuffix(".gz") + ".log").unlink(missing_ok=True)
     return tool
 
 

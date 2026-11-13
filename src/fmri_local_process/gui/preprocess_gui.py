@@ -12,11 +12,13 @@ import logging
 import os
 import sys
 import time
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
 from pathlib import Path
 
+from nibabel.filebasedimages import ImageFileError
 from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QColor, QFont, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
@@ -45,7 +47,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from fmri_local_process.gui.image_view import ZoomableImageView
+from fmri_local_process.gui.image_view import PreviewPicker, figure_to_pixmap, load_figure
 from fmri_local_process.gui.qt_common import (
     ERROR_COLOR,
     HOME_BASE_ACCENT_COLOR,
@@ -67,6 +69,7 @@ from fmri_local_process.gui.qt_common import (
     style_secondary_label,
     wrap_tooltip,
 )
+from fmri_local_process.processing.brain_slices import SlicePreview, render_slices, slice_previews
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
     MIN_MEM_GB,
@@ -105,6 +108,7 @@ ALL_TASKS = "All tasks"
 LOG_TAIL_LINES = 400
 MAX_MISSING_SHOWN = 12
 DOCKER_RECHECK_MS = 30_000
+SLICE_CACHE_SIZE = 40  # rendered slice previews kept (~3 MB each)
 STATUS_ICON = {
     "done": ("✓", OK_COLOR),
     "failed": ("✗", ERROR_COLOR),
@@ -362,7 +366,23 @@ class PreprocessWindow(QMainWindow):
         self.outputs_widget = QWidget()
         self.outputs_layout = QVBoxLayout(self.outputs_widget)
         self.detail_tabs.addTab(self.outputs_widget, "Outputs")
-        self.detail_tabs.addTab(self._build_figures_tab(), "QC Figures")
+        self.figure_picker = PreviewPicker(
+            load_figure,
+            "No QC figures for this subject yet.",
+            "QC figures C-PAC drew for this subject (of the chosen task).",
+        )
+        self.detail_tabs.addTab(self.figure_picker, "QC Figures")
+        self.slice_cache: dict[tuple[SlicePreview, float], QPixmap] = {}
+        self.slice_picker = PreviewPicker(
+            self._load_slices,
+            "No brain images for this subject yet.",
+            wrap_tooltip(
+                "Slices through C-PAC's T1w and BOLD outputs with mask outlines: check "
+                "skull stripping, tissue masks, BOLD-to-T1w coregistration and the "
+                "warp to the template."
+            ),
+        )
+        self.detail_tabs.addTab(self.slice_picker, "Brain Slices")
         self.motion_table = QTableWidget(0, 0)
         self.motion_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.motion_table.verticalHeader().setVisible(False)
@@ -378,31 +398,6 @@ class PreprocessWindow(QMainWindow):
         splitter.addWidget(self.detail_tabs)
         splitter.setSizes([380, 920])
         root_layout.addWidget(splitter, 1)
-
-    def _build_figures_tab(self) -> QWidget:
-        """Picker over the selected subject's C-PAC QC figures, above a zoomable preview."""
-        tab = QWidget()
-        self.figures_tab = tab
-        layout = QVBoxLayout(tab)
-        row = QHBoxLayout()
-        self.figure_combo = QComboBox()
-        self.figure_combo.setToolTip("QC figures C-PAC drew for this subject (of the chosen task).")
-        self.figure_combo.currentIndexChanged.connect(self._show_figure)
-        row.addWidget(self.figure_combo, 1)
-        self.figure_prev_button = QPushButton("◀ Prev")
-        self.figure_prev_button.clicked.connect(partial(self._step_figure, -1))
-        row.addWidget(self.figure_prev_button)
-        self.figure_next_button = QPushButton("Next ▶")
-        self.figure_next_button.clicked.connect(partial(self._step_figure, 1))
-        row.addWidget(self.figure_next_button)
-        self.figure_reveal_button = QPushButton("Reveal")
-        self.figure_reveal_button.clicked.connect(self._reveal_figure)
-        row.addWidget(self.figure_reveal_button)
-        layout.addLayout(row)
-        self.figure_view = ZoomableImageView()
-        layout.addWidget(self.figure_view, 1)
-        self.figures: list[QcFigure] = []
-        return tab
 
     def _build_bids_group(self) -> QGroupBox:
         group = QGroupBox("BIDS Folder")
@@ -949,49 +944,35 @@ class PreprocessWindow(QMainWindow):
         return group
 
     def _show_previews(self, subject: str | None) -> None:
-        """Refill the QC Figures and Motion tabs for subject (None clears them)."""
+        """Refill the QC Figures, Brain Slices and Motion tabs for subject (None clears them)."""
         figures: list[QcFigure] = []
+        slices: list[SlicePreview] = []
         tables: list[Path] = []
         if subject is not None and self.output_folder is not None:
             figures = qc_figures(self.output_folder, subject, self._task())
+            slices = slice_previews(self.output_folder, subject, self._task())
             tables = motion_summaries(self.output_folder, subject, self._task())
-        self._fill_figures(figures)
+        self.figure_picker.set_items(figures)
+        self.slice_picker.set_items(slices)
         self._fill_motion(tables)
-        figures_tab = self.detail_tabs.indexOf(self.figures_tab)
-        self.detail_tabs.setTabText(figures_tab, f"QC Figures ({len(figures)})")
+        for picker, name, count in (
+            (self.figure_picker, "QC Figures", len(figures)),
+            (self.slice_picker, "Brain Slices", len(slices)),
+        ):
+            self.detail_tabs.setTabText(self.detail_tabs.indexOf(picker), f"{name} ({count})")
 
-    def _fill_figures(self, figures: list[QcFigure]) -> None:
-        # Stay on the same kind of figure when switching subjects, e.g. FD plot to FD plot.
-        previous = self.figure_combo.currentText()
-        self.figures = figures
-        self.figure_combo.blockSignals(True)
-        self.figure_combo.clear()
-        self.figure_combo.addItems([figure.label for figure in figures])
-        self.figure_combo.setCurrentIndex(max(self.figure_combo.findText(previous), 0))
-        self.figure_combo.blockSignals(False)
-        for button in (self.figure_prev_button, self.figure_next_button, self.figure_reveal_button):
-            button.setEnabled(bool(figures))
-        self._show_figure()
-
-    def _show_figure(self) -> None:
-        index = self.figure_combo.currentIndex()
-        if not 0 <= index < len(self.figures):
-            self.figure_view.set_pixmap(QPixmap(), "No QC figures for this subject yet.")
-            return
-        path = self.figures[index].path
-        pixmap = QPixmap(str(path))
-        self.figure_view.set_pixmap(pixmap, f"Couldn't load {path.name}.")
-        self.figure_combo.setToolTip(str(path))
-
-    def _step_figure(self, step: int) -> None:
-        if self.figures:
-            index = (self.figure_combo.currentIndex() + step) % len(self.figures)
-            self.figure_combo.setCurrentIndex(index)
-
-    def _reveal_figure(self) -> None:
-        index = self.figure_combo.currentIndex()
-        if 0 <= index < len(self.figures):
-            reveal(self.figures[index].path.parent)
+    def _load_slices(self, preview: SlicePreview) -> QPixmap | str:
+        """Render (or reuse) one slice preview; re-rendered when C-PAC rewrites the file."""
+        try:
+            key = (preview, preview.path.stat().st_mtime)
+            if key not in self.slice_cache:
+                if len(self.slice_cache) >= SLICE_CACHE_SIZE:
+                    self.slice_cache.clear()
+                self.slice_cache[key] = figure_to_pixmap(render_slices(preview))
+        except (OSError, EOFError, ValueError, zlib.error, ImageFileError) as e:
+            log.warning("Couldn't render %s: %s", preview.path, e)
+            return f"Couldn't read {preview.path.name}:\n{e}"
+        return self.slice_cache[key]
 
     def _fill_motion(self, tables: list[Path]) -> None:
         """One row per run (session/task), with the TSV's own columns."""

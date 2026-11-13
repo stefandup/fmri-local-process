@@ -5,6 +5,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
 
+import nibabel as nib
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -132,24 +134,43 @@ def test_preview_tabs_show_qc_figures_and_motion(
         assert image.save(str(func / f"sub-P01_ses-1_task-Rest_desc-{desc}_quality.png"))
     (func / "sub-P01_ses-1_task-Rest_desc-summary_motion.tsv").write_text("MeanFD\n0.1\n")
 
+    write_nifti(func / "sub-P01_ses-1_task-Rest_desc-mean_bold.nii.gz")
+    write_nifti(func / "sub-P01_ses-1_task-Rest_desc-brain_mask.nii.gz", mask=True)
+
     window._set_bids_folder(make_bids(tmp_path / "bids"))
     window._set_output_folder(out)
     window._refresh_roster()
     window.subject_table.selectRow(0)
-    assert window.figure_combo.count() == 2
-    assert window.figure_combo.currentText() == "ses-1 Rest: Motion: rotation"
-    assert not window.figure_view.pixmap.isNull()
-    window._step_figure(1)
-    assert window.figure_combo.currentText() == "ses-1 Rest: Motion: translation"
-    window._step_figure(1)  # wraps around
-    assert window.figure_combo.currentIndex() == 0
+    picker = window.figure_picker
+    assert picker.combo.count() == 2
+    assert picker.combo.currentText() == "ses-1 Rest: Motion: rotation"
+    assert picker.view.pixmap.isNull()  # hidden tab: nothing loaded yet
+    window.show()
+    window.detail_tabs.setCurrentWidget(picker)
+    assert not picker.view.pixmap.isNull()
+    picker.step(1)
+    assert picker.combo.currentText() == "ses-1 Rest: Motion: translation"
+    picker.step(1)  # wraps around
+    assert picker.combo.currentIndex() == 0
     assert window.motion_table.rowCount() == 1
     cells = [window.motion_table.item(0, column) for column in range(2)]
     assert [cell.text() for cell in cells if cell] == ["ses-1 Rest", "0.1"]
 
+    slices = window.slice_picker
+    assert slices.combo.currentText() == "ses-1 Rest: Mean BOLD + BOLD mask"
+    window.detail_tabs.setCurrentWidget(slices)
+    assert not slices.view.pixmap.isNull() and len(window.slice_cache) == 1
+
     window.subject_table.selectRow(1)  # P02 has nothing yet
-    assert window.figure_combo.count() == 0 and window.motion_table.rowCount() == 0
-    assert window.figure_view.image_label.text() == "No QC figures for this subject yet."
+    assert picker.combo.count() == 0 and window.motion_table.rowCount() == 0
+    assert slices.view.image_label.text() == "No brain images for this subject yet."
+    window.close()
+
+
+def write_nifti(path: Path, mask: bool = False) -> None:
+    data = np.zeros((10, 12, 8), dtype=np.float32)
+    data[2:8, 3:9, 2:6] = 1 if mask else 100
+    nib.Nifti1Image(data, np.eye(4)).to_filename(path)
 
 
 def test_read_log_tail_keeps_the_end(tmp_path: Path) -> None:
