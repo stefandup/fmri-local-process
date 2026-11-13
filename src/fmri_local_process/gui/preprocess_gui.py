@@ -11,6 +11,7 @@ import html
 import logging
 import os
 import sys
+import threading
 import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +35,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -102,11 +105,12 @@ from fmri_local_process.processing.cpac_docker import (
     memory_problem,
     missing_outputs,
     parallel_warning,
+    pause_containers,
     preprocess_subject,
     preprocessed_bolds,
     run_cpac,
     subject_console_log,
-    subject_tasks,
+    subject_tasks_in,
     suggest_plan,
 )
 from fmri_local_process.processing.cpac_outputs import (
@@ -120,7 +124,7 @@ from fmri_local_process.processing.cpac_outputs import (
 log = logging.getLogger(__name__)
 
 SETTINGS_APP = "FmriPreprocess"
-ALL_TASKS = "All tasks"
+TASK_LIST_HEIGHT = 96  # ~4 rows; more tasks scroll
 LOG_TAIL_LINES = 400
 MAX_MISSING_SHOWN = 12
 DOCKER_RECHECK_MS = 30_000
@@ -134,9 +138,9 @@ STATUS_ICON = {
 }
 SPINNER = "◐◓◑◒"
 STATUS_LEGEND = (
-    "✓ every session has a preprocessed BOLD (of the chosen task) and every output C-PAC "
+    "✓ every session has a preprocessed BOLD (of each ticked task) and every output C-PAC "
     "expected\n"
-    "◐ (All tasks) some tasks are preprocessed, others not yet\n"
+    "◐ (several tasks ticked) some are preprocessed, others not yet\n"
     "✗ C-PAC ran (a log exists) but its output is incomplete\n"
     "▶ running now\n"
     "○ not run yet"
@@ -149,12 +153,17 @@ RUN_MODES = {
 }
 
 
+def task_names(tasks: list[str]) -> str:
+    """['Rest', 'Matching'] -> 'task-Rest, task-Matching'; [] -> 'all tasks'."""
+    return ", ".join(f"task-{label}" for label in tasks) or "all tasks"
+
+
 @dataclass
 class RunSettings:
     bids_root: Path
     output_root: Path
     subjects: list[str]
-    task: str | None
+    tasks: list[str]  # BOLD task labels to run; [] for all
     n_cpus: int  # per subject
     mem_gb: float  # per subject
     mode: str = "skip"  # a RUN_MODES key
@@ -191,6 +200,17 @@ class PreprocessThread(QThread):
         super().__init__()
         self.run_settings = run
         self.stop_requested = False
+        self.docker: Path | None = None
+        # Pause: no new subject starts (resume_event cleared) and running containers are
+        # frozen with `docker pause`. A container that starts while paused (it was already
+        # past the check) is frozen at its first console line.
+        self.paused = False
+        self.resume_event = threading.Event()
+        self.resume_event.set()
+        self.pause_lock = threading.Lock()
+        self.active: set[str] = set()  # subjects whose container is (about to be) running
+        self.frozen: set[str] = set()  # ... and of those, the ones docker paused
+        self.unpausable: set[str] = set()  # docker refused; not retried until resume
 
     def run(self) -> None:
         run = self.run_settings
@@ -199,6 +219,7 @@ class PreprocessThread(QThread):
         except DockerUnavailableError as e:
             self.batch_done.emit(str(e))
             return
+        self.docker = docker
         problem = memory_problem(run.mem_gb, docker_memory_gb(docker), host_memory_gb())
         if problem is not None:
             self.batch_done.emit(problem)
@@ -228,20 +249,26 @@ class PreprocessThread(QThread):
         if self.stop_requested:
             summary.stopped = True
             return
-        done = is_subject_done(run.bids_root, run.output_root, subject, run.task)
+        done = is_subject_done(run.bids_root, run.output_root, subject, run.tasks)
         if run.mode == "skip" and done:
             summary.skipped.append(subject)
             self.subject_finished.emit(subject, 0, False)
             return
+        self.resume_event.wait()
         gate.wait()
-        if self.stop_requested:  # pressed while waiting for a start slot
+        self.resume_event.wait()  # paused while waiting for a start slot
+        if self.stop_requested:  # pressed while waiting
             summary.stopped = True
             return
+        with self.pause_lock:
+            self.active.add(subject)
         self.subject_started.emit(index, len(run.subjects), subject)
         steps_done = 0
 
         def on_line(line: str) -> None:
             nonlocal steps_done
+            if self.paused and subject not in self.frozen | self.unpausable:
+                self.freeze(subject, retry=False)
             node = finished_node(line)
             if node is not None:
                 steps_done += 1
@@ -262,12 +289,15 @@ class PreprocessThread(QThread):
                 run.image,
                 run.n_cpus,
                 run.mem_gb,
-                run.task,
+                run.tasks,
                 on_line,
             )
         except Exception as e:  # noqa: BLE001 -- one subject's crash mustn't end the batch
             log.exception("sub-%s crashed", subject)
             failure = f"{type(e).__name__}: {e}"
+        with self.pause_lock:
+            self.active.discard(subject)
+            self.frozen.discard(subject)
         if failure is None:
             summary.done.append(subject)
             self.message.emit(f"sub-{subject}: preprocessed ({steps_done} steps)", False)
@@ -275,6 +305,42 @@ class PreprocessThread(QThread):
             summary.failed.append((subject, failure))
             self.message.emit(f"sub-{subject} FAILED: {failure}", True)
         self.subject_finished.emit(subject, steps_done, failure is None)
+
+    def freeze(self, subject: str, retry: bool) -> None:
+        """`docker pause` one subject's container. retry: a container that doesn't exist
+        yet (still starting) is tried again at its first console line, without a message."""
+        with self.pause_lock:
+            if not self.paused or self.docker is None or subject not in self.active:
+                return
+            error = pause_containers(self.docker, [subject], pause=True)
+            if error is None:
+                self.frozen.add(subject)
+                self.message.emit(f"sub-{subject}: paused", False)
+            elif not retry:
+                self.unpausable.add(subject)
+                self.message.emit(f"sub-{subject}: couldn't pause: {error}", True)
+
+    def pause(self) -> None:
+        """Start no new subjects and freeze the running ones (blocks on docker: call it
+        off the GUI thread)."""
+        self.paused = True
+        self.resume_event.clear()
+        with self.pause_lock:
+            running = sorted(self.active)
+        for subject in running:
+            self.freeze(subject, retry=True)
+
+    def resume(self) -> None:
+        """Unfreeze the paused containers and let new subjects start again (blocks on docker)."""
+        with self.pause_lock:
+            self.paused = False
+            if self.docker is not None and self.frozen:
+                error = pause_containers(self.docker, sorted(self.frozen), pause=False)
+                if error is not None:
+                    self.message.emit(f"Couldn't resume all containers: {error}", True)
+            self.frozen.clear()
+            self.unpausable.clear()
+        self.resume_event.set()
 
     def relay_pull_line(self, line: str) -> None:
         # Without a TTY docker prints one line per layer event; only completions matter.
@@ -342,6 +408,9 @@ class PreprocessWindow(QMainWindow):
         self.docker_control: DockerControlThread | None = None
         # Untick-list rather than tick-list, so newly found subjects start ticked.
         self.unticked: set[str] = set()
+        self.unticked_tasks: set[str] = set()
+        self.batch_paused = False
+        self.pause_pool = ThreadPoolExecutor(max_workers=1)  # docker pause / unpause calls
         self._build_ui()
         self._restore_settings()
 
@@ -479,10 +548,25 @@ class PreprocessWindow(QMainWindow):
         layout.addLayout(buttons)
 
         form = QFormLayout()
-        self.task_combo = QComboBox()
-        self.task_combo.setToolTip("Only preprocess this task's BOLD runs.")
-        self.task_combo.currentIndexChanged.connect(self._on_task_changed)
-        form.addRow("Task:", self.task_combo)
+        self.task_list = QListWidget()
+        self.task_list.setMaximumHeight(TASK_LIST_HEIGHT)
+        self.task_list.setToolTip(
+            wrap_tooltip(
+                "Tick the BOLD tasks to preprocess (scroll for more). All ticked: every BOLD "
+                "run. Each subject still runs once, with all its ticked tasks together."
+            )
+        )
+        self.task_list.itemChanged.connect(self._on_task_ticked)
+        task_buttons = QVBoxLayout()
+        for text, ticked in (("All", True), ("None", False)):
+            button = QPushButton(text)
+            button.clicked.connect(partial(self._tick_all_tasks, ticked))
+            task_buttons.addWidget(button)
+        task_buttons.addStretch(1)
+        task_row = QHBoxLayout()
+        task_row.addWidget(self.task_list, 1)
+        task_row.addLayout(task_buttons)
+        form.addRow("Tasks:", task_row)
         self.parallel_spin = QSpinBox()
         self.parallel_spin.setRange(1, max(1, (os.cpu_count() or 1) // 2))
         self.parallel_spin.setSuffix(" at once")
@@ -609,6 +693,18 @@ class PreprocessWindow(QMainWindow):
             "off cleanly."
         )
         self.stop_button.clicked.connect(self._on_stop)
+        self.pause_button = QPushButton("Pause")
+        self.pause_button.setToolTip(
+            wrap_tooltip(
+                "Pause: freezes the running C-PAC container(s) in place (docker pause) and "
+                "starts no new subjects; the CPUs are free again, but their memory stays in "
+                "use. Resume carries on exactly where they were. Don't restart Docker or the "
+                "PC while paused: that ends the frozen runs (rerunning them reuses finished "
+                "steps)."
+            )
+        )
+        self.pause_button.clicked.connect(self._on_pause)
+        head.addWidget(self.pause_button)
         head.addWidget(self.stop_button)
         layout.addLayout(head)
 
@@ -693,6 +789,8 @@ class PreprocessWindow(QMainWindow):
         self.memory_probe.done.connect(self._on_memory_probed)
         self.memory_probe.start()
         self.docker_timer.start()
+        unticked_tasks = str(self.settings.value("unticked_tasks", "") or "")
+        self.unticked_tasks = set(filter(None, unticked_tasks.split(",")))
         bids = str(self.settings.value("bids", "") or "")
         output = str(self.settings.value("output", "") or "")
         if output and Path(output).is_dir():
@@ -747,13 +845,14 @@ class PreprocessWindow(QMainWindow):
         set_path_display(self.bids_path_label, self.bids_name_label, folder)
         self.bids_reveal_button.setEnabled(True)
         self.settings.setValue("bids", str(folder))
-        saved_task = str(self.settings.value("task", "") or "")
-        self.task_combo.blockSignals(True)
-        self.task_combo.clear()
-        self.task_combo.addItems([ALL_TASKS, *bids_tasks(folder)])
-        index = self.task_combo.findText(saved_task)
-        self.task_combo.setCurrentIndex(max(index, 0))
-        self.task_combo.blockSignals(False)
+        self.task_list.blockSignals(True)
+        self.task_list.clear()
+        for label in bids_tasks(folder):
+            item = QListWidgetItem(label)
+            ticked = label not in self.unticked_tasks
+            item.setCheckState(Qt.CheckState.Checked if ticked else Qt.CheckState.Unchecked)
+            self.task_list.addItem(item)
+        self.task_list.blockSignals(False)
 
     def _set_output_folder(self, folder: Path) -> None:
         self.output_folder = folder
@@ -766,12 +865,43 @@ class PreprocessWindow(QMainWindow):
         if folder is not None and folder.is_dir():
             reveal(folder)
 
-    def _task(self) -> str | None:
-        text = self.task_combo.currentText()
-        return None if text in ("", ALL_TASKS) else text
+    def _all_task_labels(self) -> list[str]:
+        items = (self.task_list.item(row) for row in range(self.task_list.count()))
+        return [item.text() for item in items if item is not None]
 
-    def _on_task_changed(self) -> None:
-        self.settings.setValue("task", self._task() or "")
+    def _ticked_tasks(self) -> list[str]:
+        return [label for label in self._all_task_labels() if label not in self.unticked_tasks]
+
+    def _tasks(self) -> list[str]:
+        """The task filter for C-PAC and the roster: the ticked tasks, or [] (every task)
+        when all are ticked."""
+        ticked = self._ticked_tasks()
+        return [] if ticked == self._all_task_labels() else ticked
+
+    def _set_ticked_tasks(self, labels: list[str]) -> None:
+        self.task_list.blockSignals(True)
+        for row in range(self.task_list.count()):
+            item = self.task_list.item(row)
+            if item is not None:
+                state = Qt.CheckState.Checked if item.text() in labels else Qt.CheckState.Unchecked
+                item.setCheckState(state)
+        self.task_list.blockSignals(False)
+        self.unticked_tasks = set(self._all_task_labels()) - set(labels)
+        self._on_tasks_changed()
+
+    def _tick_all_tasks(self, ticked: bool) -> None:
+        self._set_ticked_tasks(self._all_task_labels() if ticked else [])
+
+    def _on_task_ticked(self, item: QListWidgetItem) -> None:
+        if item.checkState() == Qt.CheckState.Checked:
+            self.unticked_tasks.discard(item.text())
+        else:
+            self.unticked_tasks.add(item.text())
+        self._on_tasks_changed()
+
+    def _on_tasks_changed(self) -> None:
+        # Untick-list rather than tick-list, so new tasks start ticked.
+        self.settings.setValue("unticked_tasks", ",".join(sorted(self.unticked_tasks)))
         self._refresh_roster()
 
     # ---- roster ------------------------------------------------------------------------------
@@ -781,29 +911,32 @@ class PreprocessWindow(QMainWindow):
             return "running"
         if self.bids_folder is None or self.output_folder is None:
             return "not run"
-        task = self._task()
-        if is_subject_done(self.bids_folder, self.output_folder, subject, task):
+        tasks = self._tasks()
+        if is_subject_done(self.bids_folder, self.output_folder, subject, tasks):
             return "done"
-        if task is None and self._tasks_to_do(subject) != subject_tasks(self.bids_folder, subject):
-            return "partial"  # all tasks chosen, some already preprocessed on their own
+        if self._tasks_to_do(subject) != subject_tasks_in(self.bids_folder, subject, tasks):
+            return "partial"  # several tasks ticked, some already preprocessed on their own
         if subject_console_log(self.output_folder, subject).is_file():
             return "failed"
         return "not run"
 
     def _tasks_to_do(self, subject: str) -> list[str]:
-        """This subject's tasks that aren't fully preprocessed yet."""
+        """This subject's ticked tasks that aren't fully preprocessed yet."""
         if self.bids_folder is None or self.output_folder is None:
             return []
         return [
             label
-            for label in subject_tasks(self.bids_folder, subject)
+            for label in subject_tasks_in(self.bids_folder, subject, self._tasks())
             if not is_subject_done(self.bids_folder, self.output_folder, subject, label)
         ]
 
     def _refresh_roster(self) -> None:
         selected = set(self._selected_subjects())
-        task = self._task()
-        self.subjects = bids_subjects(self.bids_folder, task) if self.bids_folder else []
+        task = self._tasks()
+        ticked_any = bool(self._ticked_tasks())
+        self.subjects = (
+            bids_subjects(self.bids_folder, task) if self.bids_folder and ticked_any else []
+        )
         self.statuses = {subject: self._subject_status(subject) for subject in self.subjects}
         self.subject_table.blockSignals(True)
         self.subject_table.setRowCount(len(self.subjects))
@@ -840,7 +973,10 @@ class PreprocessWindow(QMainWindow):
         if self.bids_folder is None:
             self.summary_label.setText("Choose a BIDS folder and an output folder.")
             return
-        what = f"task-{self._task()} BOLD" if self._task() else "BOLD runs"
+        if not self._ticked_tasks():
+            self.summary_label.setText("No tasks ticked: tick at least one task.")
+            return
+        what = f"{task_names(self._tasks())} BOLD" if self._tasks() else "BOLD runs"
         counts = {status: list(self.statuses.values()).count(status) for status in STATUS_ICON}
         lines = [f"{len(self.subjects)} subject(s) with {what}"]
         lines += [
@@ -1021,7 +1157,7 @@ class PreprocessWindow(QMainWindow):
         if self.statuses.get(subject) == "partial":
             self.outputs_layout.addWidget(self._partial_group(self._tasks_to_do(subject)))
         if self.bids_folder is not None and self.statuses.get(subject) != "running":
-            task = self._task()
+            task = self._tasks()
             sessions = bold_sessions(self.bids_folder, subject, task)
             gaps = missing_outputs(self.output_folder, subject, sessions, task)
             if any(gaps.values()):
@@ -1048,7 +1184,7 @@ class PreprocessWindow(QMainWindow):
         layout = QVBoxLayout(group)
         names = ", ".join(f"task-{label}" for label in tasks_to_do)
         label = QLabel(
-            f"Still to do: {names}. Run with Task 'All tasks' and Run mode 'Skip done, "
+            f"Still to do: {names}. Run with these tasks ticked and Run mode 'Skip done, "
             "resume the rest': finished steps are reused."
         )
         label.setWordWrap(True)
@@ -1097,9 +1233,9 @@ class PreprocessWindow(QMainWindow):
         slices: list[SlicePreview] = []
         tables: list[Path] = []
         if subject is not None and self.output_folder is not None:
-            figures = qc_figures(self.output_folder, subject, self._task())
-            slices = slice_previews(self.output_folder, subject, self._task())
-            tables = motion_summaries(self.output_folder, subject, self._task())
+            figures = qc_figures(self.output_folder, subject, self._tasks())
+            slices = slice_previews(self.output_folder, subject, self._tasks())
+            tables = motion_summaries(self.output_folder, subject, self._tasks())
         self.figure_picker.set_items(figures)
         self.slice_picker.set_items(slices)
         self._fill_motion(tables)
@@ -1211,7 +1347,7 @@ class PreprocessWindow(QMainWindow):
             bids_root=self.bids_folder,
             output_root=self.output_folder,
             subjects=subjects,
-            task=self._task(),
+            tasks=self._tasks(),
             n_cpus=plan.n_cpus,
             mem_gb=plan.mem_gb,
             mode=mode,
@@ -1224,7 +1360,7 @@ class PreprocessWindow(QMainWindow):
         self.worker.step.connect(self._on_step)
         self.worker.subject_finished.connect(self._on_subject_finished)
         self.worker.batch_done.connect(self._on_batch_done)
-        what = f"task-{run.task}" if run.task else "all tasks"
+        what = task_names(run.tasks)
         at_once = f", {run.parallel} at once" if run.parallel > 1 else ""
         self._log_activity(
             f"Preprocessing {len(subjects)} subject(s), {what}{at_once}, "
@@ -1239,6 +1375,8 @@ class PreprocessWindow(QMainWindow):
         self.subject_bar.setValue(0)
         self.subject_bar.setFormat("Subjects: %v of %m done")
         self.stop_button.setEnabled(True)
+        self.batch_paused = False
+        self.pause_button.setText("Pause")
         self.run_group.setVisible(True)
         self.spinner_timer.start()
         self._update_run_title()
@@ -1246,7 +1384,7 @@ class PreprocessWindow(QMainWindow):
         self.worker.start()
 
     def _estimate_key(self) -> str:
-        return f"steps_per_subject/{self._task() or 'all'}"
+        return f"steps_per_subject/{'+'.join(self._tasks()) or 'all'}"
 
     def _step_count(self, steps: int) -> str:
         return f"step {steps} of ~{self.step_estimate}" if self.step_estimate else f"step {steps}"
@@ -1254,7 +1392,11 @@ class PreprocessWindow(QMainWindow):
     def _update_run_title(self) -> None:
         self.spinner_index = (self.spinner_index + 1) % len(SPINNER)
         spinner = SPINNER[self.spinner_index]
-        if not self.running:
+        if self.batch_paused:
+            spinner = "⏸"
+        if self.batch_paused and not self.running:
+            self.run_title.setText(f"{spinner}  Paused")
+        elif not self.running:
             self.run_title.setText(f"{spinner}  {self.run_stage}")
         elif len(self.running) == 1:
             subject, state = next(iter(self.running.items()))
@@ -1288,6 +1430,29 @@ class PreprocessWindow(QMainWindow):
             self.worker.stop_requested = True
             self.stop_button.setEnabled(False)
             self._log_activity("Stopping once the running subject(s) finish...")
+            if self.batch_paused:  # they can only finish when running
+                self._on_pause()
+
+    def _on_pause(self) -> None:
+        """Pause or resume the batch; docker is called on a helper thread, its messages
+        come back through the worker's message signal."""
+        worker = self.worker
+        if worker is None:
+            return
+        # One helper thread, so a quick pause-resume runs in the order clicked.
+        self.batch_paused = not self.batch_paused
+        if self.batch_paused:
+            self._log_activity(
+                "Pausing: running containers are frozen, no new subjects start. Click "
+                "Resume to carry on."
+            )
+            self.pause_pool.submit(worker.pause)
+        else:
+            self._log_activity("Resuming...")
+            self.pause_pool.submit(worker.resume)
+        self.pause_button.setText("Resume" if self.batch_paused else "Pause")
+        self._update_run_title()
+        self._update_live_line()
 
     def _on_subject_started(self, _index: int, _total: int, subject: str) -> None:
         if not self.running:  # re-read: the last subject may have just saved a new count
@@ -1326,6 +1491,7 @@ class PreprocessWindow(QMainWindow):
             self.worker.wait()
         self.worker = None
         self.running.clear()
+        self.batch_paused = False
         self._set_live_line(None)
         self.spinner_timer.stop()
         self.run_group.setVisible(False)
@@ -1380,10 +1546,8 @@ class PreprocessWindow(QMainWindow):
             if self.step_estimate:
                 percent = min(99, 100 * state.steps // self.step_estimate)
                 count += f" of ~{self.step_estimate} ({percent}%)"
-            text = (
-                f"{SPINNER[self.spinner_index]} BUSY sub-{subject}: {count}, "
-                f"{elapsed // 60}m{elapsed % 60:02d}s"
-            )
+            state_word = "⏸ PAUSED" if self.batch_paused else f"{SPINNER[self.spinner_index]} BUSY"
+            text = f"{state_word} sub-{subject}: {count}, {elapsed // 60}m{elapsed % 60:02d}s"
             lines.append(f"{text} - {state.last_step or 'starting container'}")
         self._set_live_line("\n".join(lines) or None)
 
@@ -1405,8 +1569,11 @@ class PreprocessWindow(QMainWindow):
             event.ignore()
             return
         # A QThread destroyed while running aborts the process with a crash dialog, and the
-        # worker is blocked on docker for possibly hours: save settings and leave at once.
+        # worker is blocked on docker for possibly hours: save settings and leave at once,
+        # after unfreezing paused containers (nothing would resume them later).
         self.settings.sync()
+        if self.batch_paused:
+            self.worker.resume()
         os._exit(0)
 
 

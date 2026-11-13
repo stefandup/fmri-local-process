@@ -14,7 +14,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -211,12 +211,23 @@ def docker_desktop(action: str, timeout_s: float = 300) -> str | None:
     return None
 
 
-def bold_glob(task: str | None) -> str:
-    """Glob for raw BOLD files, of one task (e.g. 'Rest') or of all tasks."""
-    return f"*_task-{task}_*bold.nii.gz" if task else "*_bold.nii.gz"
-
-
 TASK_LABEL = re.compile(r"_task-([a-zA-Z0-9]+)_")
+
+# Which BOLD tasks a call is about: one label ('Rest'), several, or None / empty for all.
+TaskFilter = str | Sequence[str] | None
+
+
+def as_tasks(tasks: TaskFilter) -> list[str]:
+    """The task labels of a TaskFilter; [] means every task."""
+    if isinstance(tasks, str):
+        return [tasks]
+    return list(tasks or [])
+
+
+def in_tasks(name: str, tasks: TaskFilter) -> bool:
+    """True when the file name belongs to one of the tasks (always, for all tasks)."""
+    labels = as_tasks(tasks)
+    return not labels or any(f"_task-{label}_" in name for label in labels)
 
 
 def bids_tasks(bids_root: Path) -> list[str]:
@@ -230,26 +241,27 @@ def bids_tasks(bids_root: Path) -> list[str]:
     )
 
 
-def bids_subjects(bids_root: Path, task: str | None = None) -> list[str]:
-    """Subject labels (without 'sub-') of every sub-*/ folder holding a BOLD run (of task)."""
+def bids_subjects(bids_root: Path, tasks: TaskFilter = None) -> list[str]:
+    """Subject labels (without 'sub-') of every sub-*/ folder holding a BOLD run (of tasks)."""
     return sorted(
         sub_dir.name.removeprefix("sub-")
         for sub_dir in bids_root.glob("sub-*")
-        if sub_dir.is_dir() and any(sub_dir.rglob(bold_glob(task)))
+        if sub_dir.is_dir()
+        and any(in_tasks(bold.name, tasks) for bold in sub_dir.rglob("*_bold.nii.gz"))
     )
 
 
-def bold_sessions(bids_root: Path, subject: str, task: str | None = None) -> list[str]:
-    """Session labels (without 'ses-') of this subject that hold a BOLD run (of task)."""
+def bold_sessions(bids_root: Path, subject: str, tasks: TaskFilter = None) -> list[str]:
+    """Session labels (without 'ses-') of this subject that hold a BOLD run (of tasks)."""
     return sorted(
         ses_dir.name.removeprefix("ses-")
         for ses_dir in (bids_root / f"sub-{subject}").glob("ses-*")
-        if any(ses_dir.glob(f"func/{bold_glob(task)}"))
+        if any(in_tasks(bold.name, tasks) for bold in ses_dir.glob("func/*_bold.nii.gz"))
     )
 
 
 def is_preprocessed(
-    output_root: Path, subject: str, sessions: list[str], task: str | None = None
+    output_root: Path, subject: str, sessions: list[str], task: TaskFilter = None
 ) -> bool:
     """True when C-PAC wrote a preprocessed BOLD (of task) for every session, and none of
     the outputs it said it would write (its expectedOutputs.yml) are missing.
@@ -261,7 +273,7 @@ def is_preprocessed(
     found = {
         nifti.name.removeprefix("sub-")
         for nifti in (output_root / "output").rglob("*desc-preproc*_bold.nii.gz")
-        if task is None or f"_task-{task}_" in nifti.name
+        if in_tasks(nifti.name, task)
     }
     has_bold = bool(sessions) and all(
         any(name.startswith(f"{subject}_ses-{ses}_") for name in found) for ses in sessions
@@ -280,17 +292,23 @@ def subject_tasks(bids_root: Path, subject: str) -> list[str]:
     )
 
 
-def is_subject_done(bids_root: Path, output_root: Path, subject: str, task: str | None) -> bool:
-    """is_preprocessed for task, or, for all tasks, for each of the subject's tasks.
+def subject_tasks_in(bids_root: Path, subject: str, tasks: TaskFilter) -> list[str]:
+    """This subject's task labels that tasks asks for (all of them for all tasks)."""
+    wanted = as_tasks(tasks)
+    return [label for label in subject_tasks(bids_root, subject) if not wanted or label in wanted]
 
-    Checked task by task because 'all tasks' must not count a subject as done when only
-    some tasks were run (e.g. an earlier task-Matching-only run): any one task's
-    preprocessed BOLD would otherwise satisfy every session.
+
+def is_subject_done(bids_root: Path, output_root: Path, subject: str, tasks: TaskFilter) -> bool:
+    """is_preprocessed for each of the asked-for tasks this subject has.
+
+    Checked task by task because several tasks must not count a subject as done when only
+    some were run (e.g. an earlier task-Matching-only run): any one task's preprocessed
+    BOLD would otherwise satisfy every session.
     """
-    tasks = [task] if task else subject_tasks(bids_root, subject)
-    return bool(tasks) and all(
+    labels = subject_tasks_in(bids_root, subject, tasks)
+    return bool(labels) and all(
         is_preprocessed(output_root, subject, bold_sessions(bids_root, subject, label), label)
-        for label in tasks
+        for label in labels
     )
 
 
@@ -343,7 +361,7 @@ def short_output_name(pattern: str) -> str:
 
 
 def missing_outputs(
-    output_root: Path, subject: str, sessions: list[str], task: str | None = None
+    output_root: Path, subject: str, sessions: list[str], task: TaskFilter = None
 ) -> dict[str, list[str]]:
     """Per session, the outputs C-PAC expected to write but didn't, as 'func: desc-x_bold'.
 
@@ -369,7 +387,7 @@ def missing_outputs(
                 file.name
                 for session_dir in session_dirs
                 for file in (session_dir / section).glob("*")
-                if section != "func" or task is None or f"_task-{task}_" in file.name
+                if section != "func" or in_tasks(file.name, task)
             ]
             gaps += [
                 f"{section}: {short_output_name(pattern)}"
@@ -397,9 +415,12 @@ def build_cpac_command(
     image: str,
     n_cpus: int,
     mem_gb: float,
-    task: str | None = None,
+    tasks: TaskFilter = None,
 ) -> list[str]:
-    """`docker run` for one subject's C-PAC 'preproc' pipeline (only task's BOLD, if given).
+    """`docker run` for one subject's C-PAC 'preproc' pipeline (only tasks' BOLD, if given).
+
+    The container is named after the subject (container_name), so it can be paused, and
+    Docker refuses to start a second run of a subject that is still running.
 
     Only sub-<subject>/ and dataset_description.json are mounted: C-PAC walks the whole
     BIDS folder, and crosscheck_pending/ must not be picked up as input.
@@ -414,15 +435,38 @@ def build_cpac_command(
         ),
         (output_root, OUTPUT_MOUNT, ""),
     ]
-    cmd = [str(docker), "run", "--rm"]
+    cmd = [str(docker), "run", "--rm", "--name", container_name(subject)]
     for host, container, mode in mounts:
         cmd += ["-v", f"{host.resolve()}:{container}{mode}"]
     cmd += [image, BIDS_MOUNT, OUTPUT_MOUNT, "participant"]
     cmd += ["--preconfig", CPAC_PRECONFIG, "--participant_label", subject]
     cmd += ["--n_cpus", str(n_cpus), "--mem_gb", str(mem_gb), "--tracking_opt-out"]
-    if task:
-        cmd += ["--bold_label", f"task-{task}"]
+    if labels := as_tasks(tasks):
+        cmd += ["--bold_label", *(f"task-{label}" for label in labels)]
     return cmd
+
+
+def container_name(subject: str) -> str:
+    """Docker container name of this subject's C-PAC run."""
+    return f"fmri_cpac_sub-{subject}"
+
+
+def pause_containers(docker: Path, subjects: Iterable[str], pause: bool) -> str | None:
+    """`docker pause` (or unpause) these subjects' containers: frozen in place, memory kept,
+    no CPU used. None when it worked, else docker's complaint."""
+    names = [container_name(subject) for subject in subjects]
+    if not names:
+        return None
+    action = "pause" if pause else "unpause"
+    try:
+        result = subprocess.run(
+            [str(docker), action, *names], capture_output=True, text=True, timeout=60
+        )
+    except subprocess.TimeoutExpired:
+        return f"'docker {action}' didn't answer within 60 s."
+    if result.returncode == 0:
+        return None
+    return (result.stderr or result.stdout).strip() or f"'docker {action}' failed"
 
 
 def image_present(docker: Path, image: str) -> bool:
@@ -489,6 +533,7 @@ TOOL_ERROR = re.compile(r"\*\* (?:FATAL )?ERROR:\s*(.+)")
 PYTHON_ERROR = re.compile(r"^\s*([\w.]*(?:Error|Exception)): (.+)")
 TOO_FEW_VOLUMES = re.compile(r"too many for (\d+) retained time points")
 OUTPUT_IO_ERROR = f"[Errno 5] Input/output error: '{OUTPUT_MOUNT}/"
+NAME_IN_USE = "is already in use by container"  # docker run --name clash
 ANSI_CODE = re.compile(r"\x1b\[[0-9;]*m")  # terminal colours AFNI writes into its errors
 
 
@@ -529,6 +574,12 @@ def explain_failure(console_log: Path, output_root: Path) -> str | None:
                 f"Not enough memory: C-PAC's largest step needs {biggest:.1f} GB. Raise Memory "
                 f"to at least {math.ceil(biggest) + 1} GB (Docker Desktop must allow it)."
             )
+    if any(NAME_IN_USE in line for line in lines):
+        return (
+            "This subject's C-PAC container is already running in Docker (maybe from an "
+            "earlier session, or paused). Let it finish, or stop it in Docker Desktop, then "
+            "run again."
+        )
     if any(OUTPUT_IO_ERROR in line for line in lines):
         return (
             "Docker lost access to the output folder mid-run ('Input/output error' writing to "
@@ -567,10 +618,11 @@ def preprocess_subject(
     image: str,
     n_cpus: int,
     mem_gb: float,
-    task: str | None = None,
+    task: TaskFilter = None,
     on_line: Callable[[str], None] | None = None,
 ) -> str | None:
-    """Run C-PAC for one subject: None when every session got a preprocessed BOLD, else why not."""
+    """Run C-PAC for one subject: None when every session got a preprocessed BOLD (of each
+    task), else why not."""
     sessions = bold_sessions(bids_root, subject, task)
     cmd = build_cpac_command(docker, bids_root, output_root, subject, image, n_cpus, mem_gb, task)
     console_log = subject_console_log(output_root, subject)

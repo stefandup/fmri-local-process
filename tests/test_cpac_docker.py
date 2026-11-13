@@ -116,6 +116,23 @@ def test_all_tasks_is_done_only_when_every_task_is(tmp_path: Path) -> None:
     assert "--bold_label" not in build_cpac_command(
         Path("docker"), bids, out, "P01", CPAC_IMAGE, 1, 3.0
     )
+    both = ["Matching", "rest"]
+    cmd = build_cpac_command(Path("docker"), bids, out, "P01", CPAC_IMAGE, 1, 3.0, both)
+    assert cmd[-3:] == ["--bold_label", "task-Matching", "task-rest"]
+
+
+def test_ticked_tasks_count_only_where_the_subject_has_them(tmp_path: Path) -> None:
+    bids = make_bids(tmp_path / "bids")  # P01: task-rest in ses-1 and ses-2
+    out = tmp_path / "out"
+    for ses in ("1", "2"):
+        func = out / "output" / "pipeline_cpac_preproc" / "sub-P01" / f"ses-{ses}" / "func"
+        func.mkdir(parents=True)
+        (func / f"sub-P01_ses-{ses}_task-rest_desc-preproc_bold.nii.gz").touch()
+    # P01 has no Matching run, so ticking Matching as well doesn't make it undone.
+    assert is_subject_done(bids, out, "P01", ["rest", "Matching"])
+    assert not is_subject_done(bids, out, "P01", ["Matching"])  # nothing to do = not done
+    assert bids_subjects(bids, ["Matching", "rest"]) == ["P01"]
+    assert bids_subjects(bids, ["Matching"]) == []
 
 
 def test_is_preprocessed_needs_every_session(tmp_path: Path) -> None:
@@ -209,6 +226,7 @@ def test_command_mounts_only_the_subject(tmp_path: Path) -> None:
         f"{description}:/bids_dataset/dataset_description.json:ro",
         f"{out.resolve()}:/outputs",
     ]
+    assert cmd[cmd.index("--name") + 1] == "fmri_cpac_sub-P01"  # so it can be paused
     tail = cmd[cmd.index(CPAC_IMAGE) :]
     assert tail[:4] == [CPAC_IMAGE, "/bids_dataset", "/outputs", "participant"]
     assert tail[tail.index("--preconfig") + 1] == "preproc"
@@ -314,3 +332,13 @@ def test_start_gate_spaces_starts() -> None:
     for _ in range(3):
         gate.wait()
     assert time.monotonic() - started >= 0.1  # 1st at once, then two gaps
+
+
+def test_explain_failure_container_already_running(tmp_path: Path) -> None:
+    console_log = tmp_path / "log.txt"
+    console_log.write_text(
+        'docker: Error response from daemon: Conflict. The container name "/fmri_cpac_sub-P01" '
+        'is already in use by container "abc123".\n'
+    )
+    cause = explain_failure(console_log, tmp_path)
+    assert cause is not None and "already running in Docker" in cause

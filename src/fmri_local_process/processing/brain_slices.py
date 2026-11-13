@@ -14,6 +14,7 @@ import numpy as np
 from matplotlib.figure import Figure
 from scipy.ndimage import map_coordinates
 
+from fmri_local_process.processing.cpac_docker import TaskFilter, as_tasks
 from fmri_local_process.processing.cpac_outputs import bids_entities, subject_files
 
 SLICES_PER_VIEW = 6
@@ -105,8 +106,9 @@ def find_in(folder: Path, pattern: str, task: str | None) -> list[Path]:
     ]
 
 
-def slice_previews(output_root: Path, subject: str, task: str | None = None) -> list[SlicePreview]:
-    """Every preview C-PAC's outputs allow for this subject, session by session."""
+def slice_previews(output_root: Path, subject: str, tasks: TaskFilter = None) -> list[SlicePreview]:
+    """Every preview C-PAC's outputs allow for this subject (func ones of tasks), per session."""
+    labels = as_tasks(tasks)
     previews = []
     session_dirs = sorted(
         {path.parent.parent for path in subject_files(output_root, subject, "*.nii.gz")}
@@ -116,7 +118,7 @@ def slice_previews(output_root: Path, subject: str, task: str | None = None) -> 
         for spec in SLICE_SPECS:
             for base in find_in(session_dir / spec.folder, spec.pattern, None):
                 base_task = bids_entities(base.name).get("task")
-                if task is not None and spec.folder == "func" and base_task != task:
+                if labels and spec.folder == "func" and base_task not in labels:
                     continue
                 overlays = tuple(
                     (matches[0], name)

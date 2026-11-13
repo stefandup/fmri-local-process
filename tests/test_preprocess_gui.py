@@ -2,6 +2,7 @@
 
 import os
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
@@ -110,14 +111,14 @@ def test_roster_statuses_and_task_filter(
     window._set_output_folder(out)
     window._refresh_roster()
     assert window.subjects == ["P01", "P02"]
-    # All tasks: P01's Rest is done but its Matching (ses-2) isn't, so it isn't skipped.
+    # All tasks ticked: P01's Rest is done but its Matching (ses-2) isn't, so not skipped.
     assert window.statuses == {"P01": "partial", "P02": "failed"}
     window.subject_table.selectRow(0)
     texts = [label.text() for label in window.outputs_widget.findChildren(QLabel)]
     assert any(text.startswith("Still to do: task-Matching.") for text in texts)
     assert window.process_button.isEnabled()
 
-    window.task_combo.setCurrentText("Rest")
+    window._set_ticked_tasks(["Rest"])
     assert window.statuses == {"P01": "done", "P02": "failed"}
 
     window.subject_table.selectRow(1)
@@ -305,3 +306,79 @@ def test_suggest_fills_in_the_plan(window: preprocess_gui.PreprocessWindow) -> N
     window.parallel_spin.setValue(2)
     window.mem_spin.setValue(40)
     assert window.memory_label.text().startswith("⚠ 2 subjects x 40 GB = 80 GB")
+
+
+def test_task_ticks_filter_and_partial(
+    window: preprocess_gui.PreprocessWindow, tmp_path: Path
+) -> None:
+    window._set_bids_folder(make_bids(tmp_path / "bids"))
+    window._set_output_folder(tmp_path / "out")
+    window._refresh_roster()
+    assert window._all_task_labels() == ["Matching", "Rest"]
+    assert window._tasks() == []  # all ticked = every task
+    window._set_ticked_tasks(["Matching"])
+    assert window._tasks() == ["Matching"] and window.subjects == ["P01"]
+    assert window.settings.value("unticked_tasks") == "Rest"
+    window._tick_all_tasks(False)
+    assert window.subjects == [] and not window.process_button.isEnabled()
+    assert window.summary_label.text().startswith("No tasks ticked")
+    item = window.task_list.item(1)
+    assert item is not None
+    item.setCheckState(Qt.CheckState.Checked)  # a click on Rest's box
+    assert window._tasks() == ["Rest"] and window.subjects == ["P01", "P02"]
+
+
+def test_pause_freezes_running_and_holds_new_subjects(
+    window: preprocess_gui.PreprocessWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window.memory_probe.wait()
+    QApplication.processEvents()
+    window.docker_error = ""
+    release = threading.Event()
+    started: list[str] = []
+    docker_calls: list[tuple[list[str], bool]] = []
+
+    def fake_preprocess(*args: object) -> str | None:
+        subject, on_line = args[3], args[-1]
+        assert isinstance(subject, str) and callable(on_line)
+        started.append(subject)
+        release.wait(10)
+        on_line('[Node] Finished "anat_preproc".')
+        return None
+
+    def fake_pause(_docker: Path, subjects: list[str], pause: bool) -> str | None:
+        docker_calls.append((list(subjects), pause))
+        return None
+
+    monkeypatch.setattr(preprocess_gui, "find_docker", lambda: Path("docker"))
+    monkeypatch.setattr(preprocess_gui, "docker_memory_gb", lambda _docker: 64.0)
+    monkeypatch.setattr(preprocess_gui, "image_present", lambda *_: True)
+    monkeypatch.setattr(preprocess_gui, "preprocess_subject", fake_preprocess)
+    monkeypatch.setattr(preprocess_gui, "pause_containers", fake_pause)
+    window._set_bids_folder(make_bids(tmp_path / "bids"))
+    window._set_output_folder(tmp_path / "out")
+    window._refresh_roster()
+    window.parallel_spin.setValue(1)
+    window._on_process()
+    worker = window.worker
+    assert worker is not None
+    deadline = time.monotonic() + 10
+    while not started and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert started == ["P01"]
+
+    window._on_pause()
+    window.pause_pool.submit(lambda: None).result(10)  # the docker call has run
+    assert docker_calls == [(["P01"], True)]
+    assert window.pause_button.text() == "Resume"
+    release.set()  # P01 ends (as if it had been unpaused and finished)
+    time.sleep(0.2)
+    assert started == ["P01"]  # P02 waits while paused
+
+    window._on_pause()  # resume
+    window.pause_pool.submit(lambda: None).result(10)
+    worker.wait(10_000)
+    QApplication.processEvents()
+    assert started == ["P01", "P02"]
+    assert window.worker is None and not window.batch_paused
+    assert "sub-P02: preprocessed" in window.activity_text.toPlainText()

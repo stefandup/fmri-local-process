@@ -37,7 +37,7 @@ Full details and a step-by-step "test it yourself" plan:
 ## 1a. Preprocessing via C-PAC in Docker (built, not yet run on real data)
 
 ```powershell
-fmri_preprocess <BIDS_ROOT> <OUTPUT> [--subject_id P001] [--task Rest] [--rerun] [--parallel 1] [--n-cpus 4] [--mem-gb 8]
+fmri_preprocess <BIDS_ROOT> <OUTPUT> [--subject_id P001] [--task Rest [--task Matching]] [--rerun] [--parallel 1] [--n-cpus 4] [--mem-gb 8]
 ```
 
 - Runs C-PAC's standard `preproc` preset (`fcpindi/c-pac:release-v1.8.7`), one container
@@ -52,6 +52,11 @@ fmri_preprocess <BIDS_ROOT> <OUTPUT> [--subject_id P001] [--task Rest] [--rerun]
   one core, so this finishes a batch sooner. When N x CPUs or N x memory is more than Docker
   allows, you get a warning and a suggestion that fits (about 10 GB and at least 2 CPUs
   per subject; the GUI's "Suggest" button fills it in). Container starts are spaced 10 s apart.
+- The GUI ticks BOLD tasks in a list (all ticked = every task); each subject still runs once,
+  with its ticked tasks together (`--bold_label task-A task-B`). While running, "Pause" freezes
+  the containers (`docker pause`: CPUs free, memory kept) and starts no new subjects;
+  "Resume" carries on where they were. Containers are named `fmri_cpac_sub-<id>`, so a
+  subject can't be started twice.
 - `fmri_preprocess_gui` does the same from a window (vr_lab_toolbox process-results
   layout): pick the BIDS and output folders, task, CPUs and memory, then click "Preprocess".
   It shows each subject's status, its preprocessed BOLD files, and the end of its C-PAC log.

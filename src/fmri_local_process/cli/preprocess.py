@@ -96,8 +96,10 @@ def print_summary(summary: PreprocSummary, output_root: Path) -> None:
 @click.option("--subject_id", default="", help="Only preprocess this subject (no 'sub-').")
 @click.option(
     "--task",
-    help="Only preprocess this task's BOLD runs (the BIDS task label, e.g. Rest, Matching, "
-    "Reappraisal). Default: every BOLD run.",
+    "tasks",
+    multiple=True,
+    help="Only preprocess this task's BOLD runs (the BIDS task label, e.g. Rest); repeat "
+    "for several: --task Rest --task Matching. Default: every BOLD run.",
 )
 @click.option("--rerun", is_flag=True, help="Redo subjects whose output already exists.")
 @click.option(
@@ -123,7 +125,7 @@ def main(
     bids_root: Path,
     output_folder: Path,
     subject_id: str,
-    task: str | None,
+    tasks: tuple[str, ...],
     rerun: bool,
     parallel: int,
     n_cpus: int,
@@ -146,7 +148,7 @@ def main(
     pipeline_cpac_preproc/, C-PAC logs in OUTPUT_FOLDER/log/, and the console output of
     each run in OUTPUT_FOLDER/log/fmri_preprocess_sub-<id>.txt.
 
-    A subject is skipped when every session already has a preprocessed BOLD (of --task,
+    A subject is skipped when every session already has a preprocessed BOLD (of each --task,
     if given) -- pass --rerun to redo it. Exit code 1 if any subject failed.
     """
     logging.basicConfig(
@@ -172,11 +174,12 @@ def main(
     if not (bids_root / "dataset_description.json").is_file():
         raise click.UsageError(f"{bids_root} has no dataset_description.json; not a BIDS root.")
 
+    task = list(tasks)
     subjects = bids_subjects(bids_root, task)
     if subject_id:
         subjects = [s for s in subjects if s == subject_id]
     if not subjects:
-        what = f"task-{task} BOLD runs" if task else "BOLD runs"
+        what = ", ".join(f"task-{label}" for label in task) + " BOLD runs" if task else "BOLD runs"
         raise click.UsageError(f"No subjects with {what} found in {bids_root}")
 
     if not image_present(docker, image):

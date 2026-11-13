@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from fmri_local_process.processing.cpac_docker import TaskFilter, in_tasks
+
 # Readable names for the figures C-PAC's preproc pipeline is known to write; any other
 # desc-*_quality.png still shows up, under its raw desc label.
 FIGURE_NAMES = {
@@ -54,15 +56,11 @@ def subject_files(output_root: Path, subject: str, pattern: str) -> list[Path]:
     return sorted((output_root / "output").glob(f"pipeline_*/sub-{subject}/ses-*/*/{pattern}"))
 
 
-def matches_task(path: Path, task: str | None) -> bool:
-    return task is None or f"_task-{task}_" in path.name
-
-
-def qc_figures(output_root: Path, subject: str, task: str | None = None) -> list[QcFigure]:
-    """The QC figures C-PAC drew for this subject (of task), in session/task/name order."""
+def qc_figures(output_root: Path, subject: str, tasks: TaskFilter = None) -> list[QcFigure]:
+    """The QC figures C-PAC drew for this subject (of tasks), in session/task/name order."""
     figures = []
     for png in subject_files(output_root, subject, "*_quality.png"):
-        if not matches_task(png, task):
+        if not in_tasks(png.name, tasks):
             continue
         entities = bids_entities(png.name)
         figures.append(
@@ -77,12 +75,12 @@ def qc_figures(output_root: Path, subject: str, task: str | None = None) -> list
     return figures
 
 
-def motion_summaries(output_root: Path, subject: str, task: str | None = None) -> list[Path]:
+def motion_summaries(output_root: Path, subject: str, tasks: TaskFilter = None) -> list[Path]:
     """C-PAC's per-run motion summary tables (mean FD, max motion, ...) for this subject."""
     return [
         tsv
         for tsv in subject_files(output_root, subject, "*_desc-summary_motion.tsv")
-        if matches_task(tsv, task)
+        if in_tasks(tsv.name, tasks)
     ]
 
 
