@@ -1,6 +1,7 @@
 """Offscreen smoke test of the preprocess GUI on a synthetic BIDS tree (no Docker needed)."""
 
 import os
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
@@ -41,17 +42,17 @@ def window(
 def test_memory_minimum_and_label(window: preprocess_gui.PreprocessWindow) -> None:
     assert window.mem_spin.minimum() == preprocess_gui.MIN_MEM_GB
     assert window.mem_spin.value() >= preprocess_gui.MIN_MEM_GB
-    window._on_memory_probed(4.0, "")  # Docker limited to 4 GB
+    window._on_memory_probed(4.0, None, "")  # Docker limited to 4 GB
     assert window.memory_label.text().startswith("⚠ Docker may only use 4.0 GB")
     window.host_gb = 32.0
-    window._on_memory_probed(16.0, "")
+    window._on_memory_probed(16.0, None, "")
     assert window.memory_label.text().startswith("✓ Docker may use 16.0 GB")
 
 
 def test_docker_status_and_controls(
     window: preprocess_gui.PreprocessWindow, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    window._on_memory_probed(None, "Docker isn't running (test).")
+    window._on_memory_probed(None, None, "Docker isn't running (test).")
     assert window.docker_label.text().startswith("⚠ Docker isn't running")
     assert window.docker_start_button.isEnabled()
 
@@ -75,7 +76,7 @@ def test_docker_status_and_controls(
     window.memory_probe.wait()
     assert actions == ["start"] and window.docker_control is None
 
-    window._on_memory_probed(16.0, "")
+    window._on_memory_probed(16.0, None, "")
     assert window.docker_label.text() == "✓ Docker is running."
     assert not window.docker_start_button.isEnabled()
     assert window.docker_restart_button.isEnabled()
@@ -242,3 +243,65 @@ def test_ticks_choose_what_runs_not_selection(
     assert not flags & Qt.ItemFlag.ItemIsUserCheckable
     assert flags & Qt.ItemFlag.ItemIsSelectable
     window.worker = None
+
+
+def test_subjects_run_side_by_side(
+    window: preprocess_gui.PreprocessWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window.memory_probe.wait()
+    QApplication.processEvents()  # the fixture's 'Docker isn't running' probe result
+    window.docker_error = ""
+    both_running = threading.Barrier(2, timeout=10)  # breaks unless 2 run at once
+
+    def fake_preprocess(*args: object) -> str | None:
+        on_line = args[-1]
+        assert callable(on_line)
+        both_running.wait()
+        on_line('[Node] Finished "anat_preproc".')
+        return None
+
+    monkeypatch.setattr(preprocess_gui, "find_docker", lambda: Path("docker"))
+    monkeypatch.setattr(preprocess_gui, "docker_memory_gb", lambda _docker: 64.0)
+    monkeypatch.setattr(preprocess_gui, "image_present", lambda *_: True)
+    monkeypatch.setattr(preprocess_gui, "preprocess_subject", fake_preprocess)
+    monkeypatch.setattr(preprocess_gui, "START_GAP_S", 0.0)
+    window._set_bids_folder(make_bids(tmp_path / "bids"))
+    window._set_output_folder(tmp_path / "out")
+    window._refresh_roster()
+    window.parallel_spin.setValue(2)
+    window.cpus_spin.setValue(1)
+    window._on_process()
+    worker = window.worker
+    assert worker is not None
+    worker.wait()
+    QApplication.processEvents()  # deliver the queued started / step / finished signals
+    log_text = window.activity_text.toPlainText()
+    assert "2 at once" in log_text
+    assert "sub-P01: preprocessed (1 steps)" in log_text
+    assert "sub-P02: preprocessed (1 steps)" in log_text
+    assert window.worker is None and not window.running
+    assert "BUSY" not in log_text
+
+
+def test_live_lines_one_per_running_subject(window: preprocess_gui.PreprocessWindow) -> None:
+    window._log_activity("Preprocessing 2 subject(s)...")
+    window._on_subject_started(0, 2, "P01")
+    window._on_subject_started(1, 2, "P02")
+    window._on_step("P02", "func_preproc", 3)
+    lines = window.activity_text.toPlainText().splitlines()
+    assert len(lines) == 3
+    assert "BUSY sub-P01: step 0" in lines[1] and lines[1].endswith("starting container")
+    assert "BUSY sub-P02: step 3" in lines[2] and lines[2].endswith("func_preproc")
+    assert "2 at once" in window.run_title.text()
+    window._on_subject_finished("P01", 10, False)
+    lines = window.activity_text.toPlainText().splitlines()
+    assert len(lines) == 2 and "sub-P02" in lines[1]
+
+
+def test_suggest_fills_in_the_plan(window: preprocess_gui.PreprocessWindow) -> None:
+    window._on_memory_probed(64.0, 32, "")
+    window._on_suggest()
+    assert window.parallel_spin.value() == min(6, window.parallel_spin.maximum())
+    window.parallel_spin.setValue(2)
+    window.mem_spin.setValue(40)
+    assert window.memory_label.text().startswith("⚠ 2 subjects x 40 GB = 80 GB")

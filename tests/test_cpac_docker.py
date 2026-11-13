@@ -1,6 +1,7 @@
 """Tests for processing/cpac_docker.py on a synthetic BIDS tree (no Docker needed)."""
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,8 @@ import pytest
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
     UNKNOWN_EXPECTED_OUTPUTS,
+    ParallelPlan,
+    StartGate,
     bids_subjects,
     bids_tasks,
     bold_sessions,
@@ -21,11 +24,13 @@ from fmri_local_process.processing.cpac_docker import (
     is_subject_done,
     memory_problem,
     missing_outputs,
+    parallel_warning,
     preprocess_subject,
     preprocessed_bolds,
     run_cpac,
     subject_console_log,
     subject_tasks,
+    suggest_plan,
 )
 
 
@@ -285,3 +290,27 @@ def test_memory_problem() -> None:
     small_host = memory_problem(8.0, 3.8, 4.0)
     assert small_host is not None and "can't run here" in small_host
     assert host_memory_gb() is not None  # readable on the test machine
+
+
+def test_suggest_plan_splits_docker_limits() -> None:
+    # VR-PC-like: 32 cores, 64 GB for Docker -> memory limits it to 6 at once.
+    assert suggest_plan(32, 64.0) == ParallelPlan(6, 5, 10.0)
+    assert suggest_plan(32, 64.0, n_subjects=2) == ParallelPlan(2, 16, 31.0)
+    # Laptop-like: 8 cores, 15.6 GB for Docker -> one subject, all of it.
+    assert suggest_plan(8, 15.6) == ParallelPlan(1, 8, 13.0)
+    assert suggest_plan(None, None) == ParallelPlan(1, 1, 8.0)  # unknown: the minimum
+
+
+def test_parallel_warning() -> None:
+    assert parallel_warning(ParallelPlan(3, 4, 10.0), 31.0, 12) is None
+    too_much = parallel_warning(ParallelPlan(4, 4, 10.0), 31.0, 12)
+    assert too_much is not None and "40 GB" in too_much and "16 CPUs" in too_much
+    assert parallel_warning(ParallelPlan(4, 4, 10.0), None, None) is None  # unknown
+
+
+def test_start_gate_spaces_starts() -> None:
+    gate = StartGate(0.05)
+    started = time.monotonic()
+    for _ in range(3):
+        gate.wait()
+    assert time.monotonic() - started >= 0.1  # 1st at once, then two gaps

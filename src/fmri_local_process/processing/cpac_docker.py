@@ -12,7 +12,10 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -64,13 +67,94 @@ def host_memory_gb() -> float | None:
 
 def docker_memory_gb(docker: Path) -> float | None:
     """RAM (GB) Docker lets containers use (Docker Desktop's limit), or None if unknown."""
+    return docker_resources(docker)[0]
+
+
+def docker_resources(docker: Path) -> tuple[float | None, int | None]:
+    """(RAM in GB, CPU cores) Docker lets containers use (Docker Desktop's limits); None
+    for whatever can't be read."""
     result = subprocess.run(
-        [str(docker), "info", "--format", "{{.MemTotal}}"], capture_output=True, text=True
+        [str(docker), "info", "--format", "{{.MemTotal}} {{.NCPU}}"],
+        capture_output=True,
+        text=True,
     )
+    parts = result.stdout.split()
     try:
-        return int(result.stdout.strip()) / 1024**3
-    except ValueError:
-        return None
+        mem_gb = int(parts[0]) / 1024**3
+    except (ValueError, IndexError):
+        mem_gb = None
+    try:
+        cpus = int(parts[1])
+    except (ValueError, IndexError):
+        cpus = None
+    return mem_gb, cpus
+
+
+# Running several subjects at once, each in its own container, is how the philani CHPC
+# jobs ran (cpacCreateJobs.py: N subjects per node, cores and RAM split evenly). Many
+# C-PAC steps use one core, so N subjects x few cores finishes a batch sooner than one
+# subject with all cores.
+SUGGESTED_MEM_GB = 10.0  # per subject: MIN_MEM_GB plus room for data-dependent steps
+MIN_CPUS_PER_SUBJECT = 2
+DOCKER_HEADROOM_GB = 2.0  # left for Docker's own VM and the containers' overhead
+START_GAP_S = 10.0  # between container starts, so they don't all hit the disk at once
+
+
+@dataclass(frozen=True)
+class ParallelPlan:
+    parallel: int  # subjects at once
+    n_cpus: int  # per subject
+    mem_gb: float  # per subject
+
+
+def suggest_plan(cpus: int | None, mem_gb: float | None, n_subjects: int = 0) -> ParallelPlan:
+    """How many subjects to run at once, and the CPUs / RAM each, to fit cpus cores and
+    mem_gb RAM (Docker's limits). n_subjects caps it, when known (0: no cap)."""
+    cpus = cpus or 1
+    usable_gb = (mem_gb or MIN_MEM_GB) - DOCKER_HEADROOM_GB
+    parallel = min(int(usable_gb // SUGGESTED_MEM_GB), cpus // MIN_CPUS_PER_SUBJECT)
+    if n_subjects:
+        parallel = min(parallel, n_subjects)
+    parallel = max(1, parallel)
+    mem_each = max(MIN_MEM_GB, math.floor(usable_gb / parallel))
+    return ParallelPlan(parallel, max(1, cpus // parallel), float(mem_each))
+
+
+def parallel_warning(
+    plan: ParallelPlan, docker_gb: float | None, docker_cpus: int | None
+) -> str | None:
+    """Why running plan.parallel subjects at once may go wrong here, or None if it fits."""
+    warnings = []
+    total_gb = plan.parallel * plan.mem_gb
+    if plan.parallel > 1 and docker_gb is not None and total_gb > docker_gb:
+        warnings.append(
+            f"{plan.parallel} subjects x {plan.mem_gb:g} GB = {total_gb:g} GB, more than the "
+            f"{docker_gb:.1f} GB Docker may use: a container can be killed mid-run when "
+            "they peak together."
+        )
+    total_cpus = plan.parallel * plan.n_cpus
+    if docker_cpus is not None and total_cpus > docker_cpus:
+        warnings.append(
+            f"{plan.parallel} subject(s) x {plan.n_cpus} CPUs = {total_cpus} CPUs, more than "
+            f"Docker's {docker_cpus}: they slow each other down (harmless, but no faster)."
+        )
+    return " ".join(warnings) or None
+
+
+class StartGate:
+    """Spaces out container starts by gap_s seconds, across threads."""
+
+    def __init__(self, gap_s: float = START_GAP_S) -> None:
+        self.gap_s = gap_s
+        self.lock = threading.Lock()
+        self.next_start = 0.0
+
+    def wait(self) -> None:
+        with self.lock:  # held while sleeping, so starts queue up one gap apart
+            delay = self.next_start - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            self.next_start = time.monotonic() + self.gap_s
 
 
 def memory_problem(mem_gb: float, docker_gb: float | None, host_gb: float | None) -> str | None:

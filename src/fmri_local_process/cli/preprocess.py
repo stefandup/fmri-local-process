@@ -5,6 +5,7 @@ filter, skip what's done unless --rerun, failures logged and skipped, summary at
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -25,17 +26,22 @@ from rich.table import Table
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
     MIN_MEM_GB,
+    START_GAP_S,
     DockerUnavailableError,
+    ParallelPlan,
+    StartGate,
     bids_subjects,
-    docker_memory_gb,
+    docker_resources,
     find_docker,
     finished_node,
     host_memory_gb,
     image_present,
     is_subject_done,
     memory_problem,
+    parallel_warning,
     preprocess_subject,
     pull_image,
+    suggest_plan,
 )
 
 log = logging.getLogger(__name__)
@@ -51,6 +57,10 @@ Examples:
 \b
   Quick test: one subject, only its resting-state runs:
   fmri_preprocess D:\\philani_bids D:\\philani_cpac --subject_id P001 --task Rest --n-cpus 4
+
+\b
+  Three subjects at a time, 4 cores and 10 GB each (Docker must allow 12 cores, 30 GB):
+  fmri_preprocess D:\\philani_bids D:\\philani_cpac --parallel 3 --n-cpus 4 --mem-gb 10
 
 \b
   One subject, redoing it even if output already exists:
@@ -90,6 +100,14 @@ def print_summary(summary: PreprocSummary, output_root: Path) -> None:
     "Reappraisal). Default: every BOLD run.",
 )
 @click.option("--rerun", is_flag=True, help="Redo subjects whose output already exists.")
+@click.option(
+    "--parallel",
+    default=1,
+    type=click.IntRange(min=1),
+    show_default=True,
+    help="Subjects to run at once, each in its own container with --n-cpus and --mem-gb "
+    "(totals must fit Docker's limits; a warning suggests values if they don't).",
+)
 @click.option("--n-cpus", default=1, show_default=True, help="CPU cores C-PAC may use per subject.")
 @click.option(
     "--mem-gb",
@@ -107,6 +125,7 @@ def main(
     subject_id: str,
     task: str | None,
     rerun: bool,
+    parallel: int,
     n_cpus: int,
     mem_gb: float,
     image: str,
@@ -139,9 +158,17 @@ def main(
         docker = find_docker()
     except DockerUnavailableError as e:
         raise click.ClickException(str(e)) from e
-    problem = memory_problem(mem_gb, docker_memory_gb(docker), host_memory_gb())
+    docker_gb, docker_cpus = docker_resources(docker)
+    problem = memory_problem(mem_gb, docker_gb, host_memory_gb())
     if problem is not None:
         raise click.ClickException(problem)
+    warning = parallel_warning(ParallelPlan(parallel, n_cpus, mem_gb), docker_gb, docker_cpus)
+    if warning is not None:
+        plan = suggest_plan(docker_cpus, docker_gb)
+        console.print(
+            f"[yellow]Warning: {warning}\nSuggested here: --parallel {plan.parallel} "
+            f"--n-cpus {plan.n_cpus} --mem-gb {plan.mem_gb:g}[/yellow]"
+        )
     if not (bids_root / "dataset_description.json").is_file():
         raise click.UsageError(f"{bids_root} has no dataset_description.json; not a BIDS root.")
 
@@ -169,31 +196,52 @@ def main(
         MofNCompleteColumn(),
         TimeElapsedColumn(),
     )
+    parallel = min(parallel, len(subjects))
+    gate = StartGate(START_GAP_S if parallel > 1 else 0.0)
     with Progress(*columns, console=console) as progress:
         bar = progress.add_task("Subjects", total=len(subjects))
-        for subject in subjects:
+
+        def run_one(subject: str) -> None:
             if not rerun and is_subject_done(bids_root, output_folder, subject, task):
                 summary.skipped.append(subject)
                 progress.advance(bar)
-                continue
+                return
+            gate.wait()
             # C-PAC never states how many steps a run has, so: steps done + last step, no %.
             steps = progress.add_task(f"  sub-{subject}: starting container", total=None)
 
-            def show_step(line: str, subject: str = subject, steps: TaskID = steps) -> None:
+            def show_step(line: str, steps: TaskID = steps) -> None:
                 node = finished_node(line)
                 if node is not None:
                     progress.advance(steps)
                     progress.update(steps, description=f"  sub-{subject}: {node}")
 
-            failure = preprocess_subject(
-                docker, bids_root, output_folder, subject, image, n_cpus, mem_gb, task, show_step
-            )
+            try:
+                failure = preprocess_subject(
+                    docker,
+                    bids_root,
+                    output_folder,
+                    subject,
+                    image,
+                    n_cpus,
+                    mem_gb,
+                    task,
+                    show_step,
+                )
+            except Exception as e:  # noqa: BLE001 -- one subject's crash mustn't end the batch
+                log.exception("sub-%s crashed", subject)
+                failure = f"{type(e).__name__}: {e}"
             progress.remove_task(steps)
             if failure is not None:
                 summary.failed.append((subject, failure))
             else:
                 summary.done.append(subject)
             progress.advance(bar)
+
+        # Each subject in its own container, `parallel` at a time (rich's Progress is
+        # thread-safe).
+        with ThreadPoolExecutor(max_workers=parallel) as pool:
+            list(pool.map(run_one, subjects))
 
     print_summary(summary, output_folder)
     if summary.failed:

@@ -13,6 +13,7 @@ import os
 import sys
 import time
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
@@ -78,14 +79,20 @@ from fmri_local_process.gui.qt_common import (
 from fmri_local_process.processing.brain_slices import SlicePreview, render_slices, slice_previews
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
+    MIN_CPUS_PER_SUBJECT,
     MIN_MEM_GB,
+    START_GAP_S,
+    SUGGESTED_MEM_GB,
     DockerUnavailableError,
+    ParallelPlan,
+    StartGate,
     bids_subjects,
     bids_tasks,
     bold_sessions,
     clear_subject_results,
     docker_desktop,
     docker_memory_gb,
+    docker_resources,
     explain_failure,
     find_docker,
     finished_node,
@@ -94,11 +101,13 @@ from fmri_local_process.processing.cpac_docker import (
     is_subject_done,
     memory_problem,
     missing_outputs,
+    parallel_warning,
     preprocess_subject,
     preprocessed_bolds,
     run_cpac,
     subject_console_log,
     subject_tasks,
+    suggest_plan,
 )
 from fmri_local_process.processing.cpac_outputs import (
     QcFigure,
@@ -146,10 +155,18 @@ class RunSettings:
     output_root: Path
     subjects: list[str]
     task: str | None
-    n_cpus: int
-    mem_gb: float
+    n_cpus: int  # per subject
+    mem_gb: float  # per subject
     mode: str = "skip"  # a RUN_MODES key
     image: str = CPAC_IMAGE
+    parallel: int = 1  # subjects at once, each in its own container
+
+
+@dataclass
+class RunningSubject:
+    started_at: float
+    steps: int = 0
+    last_step: str = ""
 
 
 @dataclass
@@ -161,7 +178,8 @@ class RunSummary:
 
 
 class PreprocessThread(QThread):
-    """Runs the batch: Docker check, one-time image pull, then one C-PAC container per subject."""
+    """Runs the batch: Docker check, one-time image pull, then one C-PAC container per
+    subject, run.parallel of them at a time."""
 
     message = Signal(str, bool)  # text, is_error
     subject_started = Signal(int, int, str)  # index, total, subject
@@ -196,31 +214,46 @@ class PreprocessThread(QThread):
                 return
 
         summary = RunSummary()
-        for index, subject in enumerate(run.subjects):
-            if self.stop_requested:
-                summary.stopped = True
-                break
-            self.subject_started.emit(index, len(run.subjects), subject)
-            done = is_subject_done(run.bids_root, run.output_root, subject, run.task)
-            if run.mode == "skip" and done:
-                summary.skipped.append(subject)
-                self.subject_finished.emit(subject, 0, False)
-                continue
+        gate = StartGate(START_GAP_S if run.parallel > 1 else 0.0)
+        # Each subject runs on a pool thread; Qt queues the signals to the GUI thread.
+        with ThreadPoolExecutor(max_workers=run.parallel) as pool:
+            for index, subject in enumerate(run.subjects):
+                pool.submit(self.run_subject, docker, index, subject, gate, summary)
+        self.batch_done.emit(summary)
+
+    def run_subject(
+        self, docker: Path, index: int, subject: str, gate: StartGate, summary: RunSummary
+    ) -> None:
+        run = self.run_settings
+        if self.stop_requested:
+            summary.stopped = True
+            return
+        done = is_subject_done(run.bids_root, run.output_root, subject, run.task)
+        if run.mode == "skip" and done:
+            summary.skipped.append(subject)
+            self.subject_finished.emit(subject, 0, False)
+            return
+        gate.wait()
+        if self.stop_requested:  # pressed while waiting for a start slot
+            summary.stopped = True
+            return
+        self.subject_started.emit(index, len(run.subjects), subject)
+        steps_done = 0
+
+        def on_line(line: str) -> None:
+            nonlocal steps_done
+            node = finished_node(line)
+            if node is not None:
+                steps_done += 1
+                self.step.emit(subject, node, steps_done)
+
+        try:
             if run.mode == "scratch":
                 removed = clear_subject_results(run.output_root, subject)
                 self.message.emit(
                     f"sub-{subject}: deleted {len(removed)} previous working/output folder(s)",
                     False,
                 )
-            steps_done = 0
-
-            def on_line(line: str, subject: str = subject) -> None:
-                nonlocal steps_done
-                node = finished_node(line)
-                if node is not None:
-                    steps_done += 1
-                    self.step.emit(subject, node, steps_done)
-
             failure = preprocess_subject(
                 docker,
                 run.bids_root,
@@ -232,14 +265,16 @@ class PreprocessThread(QThread):
                 run.task,
                 on_line,
             )
-            if failure is None:
-                summary.done.append(subject)
-                self.message.emit(f"sub-{subject}: preprocessed ({steps_done} steps)", False)
-            else:
-                summary.failed.append((subject, failure))
-                self.message.emit(f"sub-{subject} FAILED: {failure}", True)
-            self.subject_finished.emit(subject, steps_done, failure is None)
-        self.batch_done.emit(summary)
+        except Exception as e:  # noqa: BLE001 -- one subject's crash mustn't end the batch
+            log.exception("sub-%s crashed", subject)
+            failure = f"{type(e).__name__}: {e}"
+        if failure is None:
+            summary.done.append(subject)
+            self.message.emit(f"sub-{subject}: preprocessed ({steps_done} steps)", False)
+        else:
+            summary.failed.append((subject, failure))
+            self.message.emit(f"sub-{subject} FAILED: {failure}", True)
+        self.subject_finished.emit(subject, steps_done, failure is None)
 
     def relay_pull_line(self, line: str) -> None:
         # Without a TTY docker prints one line per layer event; only completions matter.
@@ -262,17 +297,18 @@ class DockerControlThread(QThread):
 
 
 class MemoryProbeThread(QThread):
-    """Asks Docker for its memory limit off the GUI thread (slow when Docker is starting)."""
+    """Asks Docker for its memory and CPU limits off the GUI thread (slow when Docker is
+    starting)."""
 
-    done = Signal(object, str)  # Docker's limit in GB or None, why it's unknown
+    done = Signal(object, object, str)  # Docker's GB or None, its CPUs or None, why unknown
 
     def run(self) -> None:
         try:
             docker = find_docker()
         except DockerUnavailableError as e:
-            self.done.emit(None, str(e))
+            self.done.emit(None, None, str(e))
             return
-        self.done.emit(docker_memory_gb(docker), "")
+        self.done.emit(*docker_resources(docker), "")
 
 
 def read_log_tail(path: Path, n_lines: int = LOG_TAIL_LINES) -> str:
@@ -295,17 +331,17 @@ class PreprocessWindow(QMainWindow):
         self.output_folder: Path | None = None
         self.subjects: list[str] = []
         self.statuses: dict[str, str] = {}
-        self.running_subject: str | None = None
+        self.running: dict[str, RunningSubject] = {}  # in start order
         self.worker: PreprocessThread | None = None
         self.live_line: str | None = None
         self.host_gb = host_memory_gb()
         self.docker_gb: float | None = None
+        self.docker_cpus: int | None = None
         self.docker_error = ""
         self.memory_probed = False
         self.docker_control: DockerControlThread | None = None
         # Untick-list rather than tick-list, so newly found subjects start ticked.
         self.unticked: set[str] = set()
-        self.subject_started_at = 0.0
         self._build_ui()
         self._restore_settings()
 
@@ -447,9 +483,36 @@ class PreprocessWindow(QMainWindow):
         self.task_combo.setToolTip("Only preprocess this task's BOLD runs.")
         self.task_combo.currentIndexChanged.connect(self._on_task_changed)
         form.addRow("Task:", self.task_combo)
+        self.parallel_spin = QSpinBox()
+        self.parallel_spin.setRange(1, max(1, (os.cpu_count() or 1) // 2))
+        self.parallel_spin.setSuffix(" at once")
+        self.parallel_spin.setToolTip(
+            wrap_tooltip(
+                "How many subjects run side by side, each in its own C-PAC container with "
+                "the CPUs and Memory below (as the philani CHPC jobs did). Many C-PAC steps "
+                "use one core, so several subjects with a few cores each finish a batch "
+                "sooner than one subject with all of them. The totals must fit Docker's "
+                "limits: 'Suggest' picks values that do."
+            )
+        )
+        self.parallel_spin.valueChanged.connect(self._update_memory_label)
+        parallel_row = QHBoxLayout()
+        parallel_row.addWidget(self.parallel_spin, 1)
+        self.suggest_button = QPushButton("Suggest")
+        self.suggest_button.setToolTip(
+            wrap_tooltip(
+                f"Fill in Subjects, CPUs and Memory from Docker's limits: about "
+                f"{SUGGESTED_MEM_GB:g} GB and at least {MIN_CPUS_PER_SUBJECT} CPUs per "
+                "subject, at most as many subjects as are ticked."
+            )
+        )
+        self.suggest_button.clicked.connect(self._on_suggest)
+        parallel_row.addWidget(self.suggest_button)
+        form.addRow("Subjects:", parallel_row)
         self.cpus_spin = QSpinBox()
         self.cpus_spin.setRange(1, os.cpu_count() or 1)
         self.cpus_spin.setToolTip("CPU cores C-PAC may use per subject.")
+        self.cpus_spin.valueChanged.connect(self._update_memory_label)
         form.addRow("CPUs:", self.cpus_spin)
         self.mem_spin = QDoubleSpinBox()
         self.mem_spin.setRange(MIN_MEM_GB, 512.0)
@@ -540,9 +603,10 @@ class PreprocessWindow(QMainWindow):
         style_name_label(self.run_title)
         self.run_title.setStyleSheet(f"color: {PROCESS_ACCENT_COLOR};")
         head.addWidget(self.run_title, 1)
-        self.stop_button = QPushButton("Stop after this subject")
+        self.stop_button = QPushButton("Stop after running subject(s)")
         self.stop_button.setToolTip(
-            "Lets the running subject finish, then stops; C-PAC can't be cut off cleanly."
+            "Lets the running subject(s) finish and starts no new ones; C-PAC can't be cut "
+            "off cleanly."
         )
         self.stop_button.clicked.connect(self._on_stop)
         head.addWidget(self.stop_button)
@@ -569,7 +633,6 @@ class PreprocessWindow(QMainWindow):
         self.spinner_timer = QTimer(self)
         self.spinner_timer.setInterval(150)
         self.spinner_timer.timeout.connect(self._update_run_title)
-        self.current_steps = 0
         self.step_estimate: int | None = None
         self.run_stage = ""
         group.setVisible(False)
@@ -619,6 +682,7 @@ class PreprocessWindow(QMainWindow):
     # ---- folders & settings ------------------------------------------------------------------
 
     def _restore_settings(self) -> None:
+        self.parallel_spin.setValue(int(str(self.settings.value("parallel", 1))))
         self.cpus_spin.setValue(int(str(self.settings.value("n_cpus", 1))))
         self.mem_spin.setValue(max(MIN_MEM_GB, float(str(self.settings.value("mem_gb", 0)))))
         # A deleting mode is never restored as the default for the next session.
@@ -713,7 +777,7 @@ class PreprocessWindow(QMainWindow):
     # ---- roster ------------------------------------------------------------------------------
 
     def _subject_status(self, subject: str) -> str:
-        if subject == self.running_subject:
+        if subject in self.running:
             return "running"
         if self.bids_folder is None or self.output_folder is None:
             return "not run"
@@ -793,9 +857,12 @@ class PreprocessWindow(QMainWindow):
         rows = sorted(index.row() for index in model.selectedRows()) if model else []
         return [self.subjects[row] for row in rows if row < len(self.subjects)]
 
-    def _on_memory_probed(self, docker_gb: float | None, docker_error: str) -> None:
+    def _on_memory_probed(
+        self, docker_gb: float | None, docker_cpus: int | None, docker_error: str
+    ) -> None:
         self.memory_probe.wait()
         self.docker_gb = docker_gb
+        self.docker_cpus = docker_cpus
         self.docker_error = docker_error
         self.memory_probed = True
         self._update_memory_label()
@@ -841,18 +908,49 @@ class PreprocessWindow(QMainWindow):
         self._update_docker_label()
         self._probe_docker()
 
+    def _plan(self) -> ParallelPlan:
+        return ParallelPlan(
+            self.parallel_spin.value(), self.cpus_spin.value(), self.mem_spin.value()
+        )
+
+    def _suggested_plan(self) -> ParallelPlan:
+        cpus = self.docker_cpus or os.cpu_count()
+        return suggest_plan(cpus, self.docker_gb, len(self._ticked_subjects()))
+
+    def _on_suggest(self) -> None:
+        plan = self._suggested_plan()
+        self.parallel_spin.setValue(plan.parallel)
+        self.cpus_spin.setValue(plan.n_cpus)
+        self.mem_spin.setValue(plan.mem_gb)
+
     def _update_memory_label(self) -> None:
         if not self.memory_probed:
             return
-        problem = memory_problem(self.mem_spin.value(), self.docker_gb, self.host_gb)
+        plan = self._plan()
+        problem = memory_problem(plan.mem_gb, self.docker_gb, self.host_gb)
+        warning = parallel_warning(plan, self.docker_gb, self.docker_cpus)
         host = f"{self.host_gb:.1f} GB" if self.host_gb is not None else "unknown"
+        cpus = f", {self.docker_cpus} CPUs" if self.docker_cpus else ""
         if problem is not None:
             text, color = f"⚠ {problem}", ERROR_COLOR
         elif self.docker_gb is None:
             text, color = f"This computer: {host} RAM. Docker's limit couldn't be read.", None
+        elif warning is not None:
+            text, color = f"⚠ {warning}", WARNING_COLOR
         else:
-            text = f"✓ Docker may use {self.docker_gb:.1f} GB of this computer's {host} RAM."
+            text = f"✓ Docker may use {self.docker_gb:.1f} GB of this computer's {host} RAM{cpus}."
             color = OK_COLOR
+        if plan.parallel > 1:
+            text += (
+                f"\nIn use at once: {plan.parallel * plan.n_cpus} CPUs, "
+                f"{plan.parallel * plan.mem_gb:g} GB."
+            )
+        suggested = self._suggested_plan()
+        if suggested != plan and self.docker_gb is not None:
+            text += (
+                f"\nSuggested here: {suggested.parallel} at once x {suggested.n_cpus} CPUs, "
+                f"{suggested.mem_gb:g} GB (click 'Suggest')."
+            )
         self.memory_label.setText(text)
         style = f"color: {color};" if color else f"color: {UNKNOWN_COLOR};"
         self.memory_label.setStyleSheet(style)
@@ -897,6 +995,7 @@ class PreprocessWindow(QMainWindow):
         n_ticked = len(self._ticked_subjects())
         self.process_button.setText(f"Preprocess {n_ticked} ticked subject(s)")
         self.process_button.setEnabled(idle and n_ticked > 0 and self.output_folder is not None)
+        self._update_memory_label()  # the suggestion depends on how many are ticked
 
     # ---- detail pane -------------------------------------------------------------------------
 
@@ -1091,17 +1190,32 @@ class PreprocessWindow(QMainWindow):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        self.settings.setValue("n_cpus", self.cpus_spin.value())
-        self.settings.setValue("mem_gb", self.mem_spin.value())
+        plan = self._plan()
+        warning = parallel_warning(plan, self.docker_gb, self.docker_cpus)
+        if warning is not None and plan.parallel > 1:
+            suggested = self._suggested_plan()
+            answer = QMessageBox.question(
+                self,
+                "More than Docker allows?",
+                f"{warning}\n\nSuggested for this computer: {suggested.parallel} at once x "
+                f"{suggested.n_cpus} CPUs, {suggested.mem_gb:g} GB ('Suggest' fills it in). "
+                "Run anyway?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.settings.setValue("parallel", plan.parallel)
+        self.settings.setValue("n_cpus", plan.n_cpus)
+        self.settings.setValue("mem_gb", plan.mem_gb)
         self.settings.setValue("run_mode", mode)
         run = RunSettings(
             bids_root=self.bids_folder,
             output_root=self.output_folder,
             subjects=subjects,
             task=self._task(),
-            n_cpus=self.cpus_spin.value(),
-            mem_gb=self.mem_spin.value(),
+            n_cpus=plan.n_cpus,
+            mem_gb=plan.mem_gb,
             mode=mode,
+            parallel=min(plan.parallel, len(subjects)),
         )
         self.output_folder.mkdir(parents=True, exist_ok=True)
         self.worker = PreprocessThread(run)
@@ -1111,13 +1225,14 @@ class PreprocessWindow(QMainWindow):
         self.worker.subject_finished.connect(self._on_subject_finished)
         self.worker.batch_done.connect(self._on_batch_done)
         what = f"task-{run.task}" if run.task else "all tasks"
+        at_once = f", {run.parallel} at once" if run.parallel > 1 else ""
         self._log_activity(
-            f"Preprocessing {len(subjects)} subject(s), {what}, "
+            f"Preprocessing {len(subjects)} subject(s), {what}{at_once}, "
             f"{run.n_cpus} CPU(s), {run.mem_gb:g} GB each..."
         )
         self.run_stage = "Checking Docker..."
-        self.current_steps = 0
-        self.step_estimate = None
+        self.running.clear()
+        self.step_estimate = int(str(self.settings.value(self._estimate_key(), 0))) or None
         self.step_bar.setRange(0, 0)
         self.last_step_label.setText("")
         self.subject_bar.setRange(0, len(subjects))
@@ -1133,60 +1248,76 @@ class PreprocessWindow(QMainWindow):
     def _estimate_key(self) -> str:
         return f"steps_per_subject/{self._task() or 'all'}"
 
+    def _step_count(self, steps: int) -> str:
+        return f"step {steps} of ~{self.step_estimate}" if self.step_estimate else f"step {steps}"
+
     def _update_run_title(self) -> None:
         self.spinner_index = (self.spinner_index + 1) % len(SPINNER)
         spinner = SPINNER[self.spinner_index]
-        if self.running_subject is None:
+        if not self.running:
             self.run_title.setText(f"{spinner}  {self.run_stage}")
+        elif len(self.running) == 1:
+            subject, state = next(iter(self.running.items()))
+            self.run_title.setText(f"{spinner}  sub-{subject}  -  {self._step_count(state.steps)}")
+        else:
+            names = ", ".join(f"sub-{subject}" for subject in self.running)
+            self.run_title.setText(f"{spinner}  {len(self.running)} at once: {names}")
+
+    def _update_step_bar(self) -> None:
+        """One subject: its steps; several: their average (against the last run's count)."""
+        if not self.running:
             return
-        count = f"step {self.current_steps}"
-        if self.step_estimate:
-            count += f" of ~{self.step_estimate}"
-        self.run_title.setText(f"{spinner}  sub-{self.running_subject}  -  {count}")
+        if not self.step_estimate:
+            self.step_bar.setRange(0, 0)  # first run: busy bar; the title shows steps
+        else:
+            mean = sum(state.steps for state in self.running.values()) // len(self.running)
+            self.step_bar.setRange(0, max(self.step_estimate, mean + 1))
+            self.step_bar.setValue(mean)
+            average = " on average" if len(self.running) > 1 else ""
+            self.step_bar.setFormat(f"%p%{average}  (estimated from the last complete run)")
+        self.last_step_label.setText(
+            "\n".join(
+                f"sub-{subject}: {self._step_count(state.steps)}"
+                f"{f' - last finished: {state.last_step}' if state.last_step else ''}"
+                for subject, state in self.running.items()
+            )
+        )
 
     def _on_stop(self) -> None:
         if self.worker is not None:
             self.worker.stop_requested = True
             self.stop_button.setEnabled(False)
-            self._log_activity("Stopping after the current subject...")
+            self._log_activity("Stopping once the running subject(s) finish...")
 
-    def _on_subject_started(self, index: int, total: int, subject: str) -> None:
-        self.subject_bar.setValue(index)
-        self.current_steps = 0
-        estimate = int(str(self.settings.value(self._estimate_key(), 0)))
-        self.step_estimate = estimate or None
-        if self.step_estimate:
-            # Known total from the last complete run: a real bar.
-            self.step_bar.setRange(0, self.step_estimate)
-            self.step_bar.setValue(0)
-            self.step_bar.setFormat("%p%  (estimated from the last complete run)")
-        else:
-            self.step_bar.setRange(0, 0)  # first run: busy bar; the big counter shows steps
-        self.last_step_label.setText("Starting container (or checking for existing output)...")
-        self.running_subject = subject
-        self.subject_started_at = time.monotonic()
+    def _on_subject_started(self, _index: int, _total: int, subject: str) -> None:
+        if not self.running:  # re-read: the last subject may have just saved a new count
+            self.step_estimate = int(str(self.settings.value(self._estimate_key(), 0))) or None
+        self.running[subject] = RunningSubject(time.monotonic())
         self._set_status(subject, "running")
+        self._update_step_bar()
         self._update_run_title()
-        self._update_live_line("starting container")
+        self._update_live_line()
 
     def _on_step(self, subject: str, node: str, steps_done: int) -> None:
-        self.current_steps = steps_done
-        if self.step_estimate:
-            if steps_done >= self.step_bar.maximum():  # more steps than last time
-                self.step_bar.setMaximum(steps_done + 1)
-            self.step_bar.setValue(steps_done)
-        self.last_step_label.setText(f"Last finished step: {node}")
+        state = self.running.get(subject)
+        if state is None:
+            return
+        state.steps, state.last_step = steps_done, node
+        self._update_step_bar()
         self._update_run_title()
-        self._update_live_line(node)
+        self._update_live_line()
 
     def _on_subject_finished(self, subject: str, steps_done: int, preprocessed: bool) -> None:
         if preprocessed and steps_done:
             self.settings.setValue(self._estimate_key(), steps_done)
-        self._set_live_line(None)  # the thread's result line replaces it
-        self.running_subject = None
-        self.run_stage = "Next subject..."
+        self.running.pop(subject, None)
+        self._update_live_line()  # the thread's result line replaces this subject's
+        if not self.running:
+            self.run_stage = "Next subject..."
         self._set_status(subject, self._subject_status(subject))
         self.subject_bar.setValue(self.subject_bar.value() + 1)
+        self._update_step_bar()
+        self._update_run_title()
         if self._selected_subjects() == [subject]:
             self._render_detail()
 
@@ -1194,7 +1325,7 @@ class PreprocessWindow(QMainWindow):
         if self.worker is not None:
             self.worker.wait()
         self.worker = None
-        self.running_subject = None
+        self.running.clear()
         self._set_live_line(None)
         self.spinner_timer.stop()
         self.run_group.setVisible(False)
@@ -1224,33 +1355,37 @@ class PreprocessWindow(QMainWindow):
         self._set_live_line(live)
 
     def _set_live_line(self, text: str | None) -> None:
-        """One 'BUSY' line at the bottom of the Activity Log, rewritten in place on each
-        C-PAC step so hundreds of steps don't flood the log; None removes it."""
+        """'BUSY' line(s) at the bottom of the Activity Log, one per running subject,
+        rewritten in place on each C-PAC step so hundreds of steps don't flood the log;
+        None removes them."""
         if self.live_line is not None:
             cursor = self.activity_text.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.End)
-            # Selects the last block including the separator before it, removing it whole.
+            # Selects the last block including the separator before it, removing it whole
+            # (the lines are <br>-joined, so they are one block).
             cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
             cursor.removeSelectedText()
         self.live_line = text
         if text is not None:
+            lines = "<br>".join(html.escape(line) for line in text.split("\n"))
             self.activity_text.append(
-                f'<span style="color:{RUNNING_COLOR}; font-weight:bold;">{html.escape(text)}</span>'
+                f'<span style="color:{RUNNING_COLOR}; font-weight:bold;">{lines}</span>'
             )
 
-    def _update_live_line(self, last_step: str = "") -> None:
-        if self.running_subject is None:
-            return
-        elapsed = int(time.monotonic() - self.subject_started_at)
-        count = f"step {self.current_steps}"
-        if self.step_estimate:
-            percent = min(99, 100 * self.current_steps // self.step_estimate)
-            count += f" of ~{self.step_estimate} ({percent}%)"
-        text = (
-            f"{SPINNER[self.spinner_index]} BUSY sub-{self.running_subject}: {count}, "
-            f"{elapsed // 60}m{elapsed % 60:02d}s"
-        )
-        self._set_live_line(f"{text} - {last_step}" if last_step else text)
+    def _update_live_line(self) -> None:
+        lines = []
+        for subject, state in self.running.items():
+            elapsed = int(time.monotonic() - state.started_at)
+            count = f"step {state.steps}"
+            if self.step_estimate:
+                percent = min(99, 100 * state.steps // self.step_estimate)
+                count += f" of ~{self.step_estimate} ({percent}%)"
+            text = (
+                f"{SPINNER[self.spinner_index]} BUSY sub-{subject}: {count}, "
+                f"{elapsed // 60}m{elapsed % 60:02d}s"
+            )
+            lines.append(f"{text} - {state.last_step or 'starting container'}")
+        self._set_live_line("\n".join(lines) or None)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 -- Qt override
         if self.worker is None:
@@ -1263,7 +1398,7 @@ class PreprocessWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "C-PAC is still running",
-            "Closing now leaves the current C-PAC container running in Docker Desktop "
+            "Closing now leaves the running C-PAC container(s) going in Docker Desktop "
             "(stop it there if needed) and the rest of the batch won't start. Close anyway?",
         )
         if answer != QMessageBox.StandardButton.Yes:

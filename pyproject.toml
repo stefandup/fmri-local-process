@@ -37,5 +37,6 @@ venvPath = "."
 venv = ".venv"
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]  # never walk into the (real-data) C-PAC output folders
 log_cli = true
 log_cli_level = "INFO"
