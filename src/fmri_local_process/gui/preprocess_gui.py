@@ -451,7 +451,11 @@ class PreprocessWindow(QMainWindow):
         self.setCentralWidget(central)
         root_layout = QVBoxLayout(central)
 
-        top_row = QHBoxLayout()
+        # Everything above the subjects and their outputs, in one widget so "Expand" can hide
+        # it and give the outputs the whole height.
+        self.top_panel = QWidget()
+        top_row = QHBoxLayout(self.top_panel)
+        top_row.setContentsMargins(0, 0, 0, 0)
         folders_grid = QGridLayout()
         folders_grid.setSpacing(8)
         folders_grid.addWidget(self._build_bids_group(), 0, 0)
@@ -469,7 +473,7 @@ class PreprocessWindow(QMainWindow):
         )
         activity_layout.addWidget(self.activity_text)
         top_row.addWidget(activity_group, 1)
-        root_layout.addLayout(top_row)
+        root_layout.addWidget(self.top_panel)
 
         root_layout.addWidget(self._build_run_group())
 
@@ -507,6 +511,11 @@ class PreprocessWindow(QMainWindow):
         splitter.addWidget(left)
 
         self.detail_tabs = QTabWidget()
+        self.expand_button = QPushButton()
+        self.expand_button.setCheckable(True)
+        self.expand_button.toggled.connect(self._set_expanded)
+        self.detail_tabs.setCornerWidget(self.expand_button, Qt.Corner.TopRightCorner)
+        self._set_expanded(False)
         self.outputs_widget = QWidget()
         self.outputs_layout = QVBoxLayout(self.outputs_widget)
         self.detail_tabs.addTab(self.outputs_widget, "Outputs")
@@ -554,6 +563,18 @@ class PreprocessWindow(QMainWindow):
         splitter.addWidget(self.detail_tabs)
         splitter.setSizes([380, 920])
         root_layout.addWidget(splitter, 1)
+
+    def _set_expanded(self, expanded: bool) -> None:
+        """Expand: hide the folder / settings / summary / activity panels so the subjects and
+        their outputs fill the tab; Restore brings them back. The run's progress stays."""
+        self.top_panel.setVisible(not expanded)
+        self.expand_button.setText("Restore ⤡" if expanded else "Expand ⤢")
+        self.expand_button.setToolTip(
+            "Show the folder, settings and activity panels again."
+            if expanded
+            else "Give the subjects and their outputs the whole height (hides the panels "
+            "above; the run's progress stays)."
+        )
 
     def _build_bids_group(self) -> QGroupBox:
         group = QGroupBox("BIDS Folder")
@@ -944,9 +965,13 @@ class PreprocessWindow(QMainWindow):
         self.bids_reveal_button.setEnabled(True)
         self.settings.setValue("bids", str(folder))
         self.folder_chosen.emit("bids", folder)
+        self._fill_task_list()
+
+    def _fill_task_list(self) -> None:
+        """The BIDS folder's tasks, ticked unless unticked before (new tasks start ticked)."""
         self.task_list.blockSignals(True)
         self.task_list.clear()
-        for label in bids_tasks(folder):
+        for label in bids_tasks(self.bids_folder) if self.bids_folder else []:
             item = QListWidgetItem(label)
             ticked = label not in self.unticked_tasks
             item.setCheckState(Qt.CheckState.Checked if ticked else Qt.CheckState.Unchecked)
@@ -971,6 +996,12 @@ class PreprocessWindow(QMainWindow):
             changed = True
         if changed:
             self._refresh_roster()
+
+    def reload_bids(self) -> None:
+        """Read the BIDS folder's tasks and subjects again: another tab changed its contents
+        (new conversions, renamed IDs, trimmed runs) without changing the folder itself."""
+        self._fill_task_list()
+        self._refresh_roster()
 
     def set_external_lock(self, reason: str) -> None:
         self.external_lock = reason
@@ -1285,6 +1316,7 @@ class PreprocessWindow(QMainWindow):
         while self.outputs_layout.count():
             item = self.outputs_layout.takeAt(0)
             if item is not None and (widget := item.widget()) is not None:
+                widget.hide()  # gone at once, not only when Qt gets round to deleting it
                 widget.deleteLater()
         selected = self._selected_subjects()
         if len(selected) != 1 or self.output_folder is None:

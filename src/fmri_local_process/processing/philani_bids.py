@@ -38,6 +38,7 @@ it back; the remaining sessions are renumbered.
 import csv
 import json
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -118,7 +119,18 @@ class ScanRule:
     def task_name(self) -> str | None:
         return self.entities.removeprefix("task-") if self.entities.startswith("task-") else None
 
+    @property
+    def scan(self) -> str:
+        """The BIDS scan it makes, as written in the rules editor: "T1w", "task-Rest_bold"."""
+        return "_".join(p for p in (self.entities, self.suffix) if p)
 
+    @property
+    def output(self) -> tuple[str, str, str]:
+        """Rules with the same output feed one scan (several matches: runs to pick from)."""
+        return (self.datatype, self.entities, self.suffix)
+
+
+# The Philani protocol's series names (philaniToBIDS.sh), plus a clinical scan's T1.
 SCAN_RULES = (
     ScanRule("*_ABCD_T1w_*_RMS", "anat", "", "T1w"),
     ScanRule("*_Cog_reappraisal_task_AP", "func", "task-Reappraisal", "bold"),
@@ -126,7 +138,56 @@ SCAN_RULES = (
     ScanRule("*_rest_AP", "func", "task-Rest", "bold"),
     ScanRule("*_AP_Peer", "func", "task-Peer", "bold"),
     ScanRule("*_Checkerboard_task_AP", "func", "task-Checkerboard", "bold"),
+    ScanRule("*t1_mprage*", "anat", "", "T1w"),
 )
+SCAN_RULES_FILE = Path("code") / "scan_rules.json"
+ANAT_SUFFIXES = ("T1w", "T2w", "FLAIR")
+TASK_SCAN = re.compile(r"task-([A-Za-z0-9]+)_bold")
+
+
+def rule_from(pattern: str, scan: str) -> ScanRule:
+    """A rule from the editor's two fields; ValueError says what is wrong."""
+    pattern, scan = pattern.strip(), scan.strip()
+    if not pattern:
+        raise ValueError("a folder pattern is needed (e.g. *_rest_AP)")
+    if scan in ANAT_SUFFIXES:
+        return ScanRule(pattern, "anat", "", scan)
+    if match := TASK_SCAN.fullmatch(scan):
+        return ScanRule(pattern, "func", f"task-{match.group(1)}", "bold")
+    raise ValueError(
+        f"{scan!r} isn't a BIDS scan this converter writes: use one of "
+        f"{', '.join(ANAT_SUFFIXES)}, or task-<Name>_bold (letters and digits only)"
+    )
+
+
+def read_scan_rules(bids_root: Path | None) -> tuple[ScanRule, ...]:
+    """The scan rules saved with a BIDS folder (code/scan_rules.json), else SCAN_RULES."""
+    if bids_root is None:
+        return SCAN_RULES
+    try:
+        saved = json.loads((bids_root / SCAN_RULES_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return SCAN_RULES
+    rules = []
+    for entry in saved.get("rules", []) if isinstance(saved, dict) else []:
+        try:
+            rules.append(rule_from(str(entry.get("pattern", "")), str(entry.get("scan", ""))))
+        except (ValueError, AttributeError) as e:
+            log.warning("Ignoring a scan rule in %s: %s", SCAN_RULES_FILE, e)
+    return tuple(rules)
+
+
+def write_scan_rules(bids_root: Path, rules: tuple[ScanRule, ...]) -> None:
+    old = {(r.pattern, r.scan) for r in read_scan_rules(bids_root)}
+    new = {(r.pattern, r.scan) for r in rules}
+    write_json_atomic(
+        bids_root / SCAN_RULES_FILE,
+        {"rules": [{"pattern": r.pattern, "scan": r.scan} for r in rules]},
+    )
+    for pattern, scan in sorted(new - old):
+        record_action(bids_root, "add scan rule", pattern, scan)
+    for pattern, scan in sorted(old - new):
+        record_action(bids_root, "remove scan rule", pattern, scan)
 
 
 @dataclass(frozen=True)
@@ -516,14 +577,28 @@ def drop_copies(series: list[Path]) -> list[Path]:
     return sorted(kept.values())
 
 
-def match_series(session_folder: Path) -> dict[ScanRule, list[Path]]:
-    """Series folders per scan rule (only rules with at least one match)."""
+def match_series(
+    session_folder: Path, rules: tuple[ScanRule, ...] = SCAN_RULES
+) -> dict[ScanRule, list[Path]]:
+    """Series folders per BIDS scan (keyed by the first rule making it; only scans found).
+
+    Rules with the same output feed one scan: a session with both a Philani and a clinical
+    T1w gets both, as runs to pick from. A folder inside another matching folder (a pattern
+    such as *t1_mprage* also matches what lies below the series) isn't a series of its own.
+    """
     session_dirs = sorted(d for d in session_folder.rglob("*") if d.is_dir())
-    matches = {
-        rule: drop_copies([d for d in session_dirs if fnmatchcase(d.as_posix(), rule.pattern)])
-        for rule in SCAN_RULES
-    }
-    return {rule: series for rule, series in matches.items() if series}
+    by_output: dict[tuple[str, str, str], tuple[ScanRule, list[Path]]] = {}
+    for rule in rules:
+        _, found = by_output.setdefault(rule.output, (rule, []))
+        found += [
+            d for d in session_dirs if fnmatchcase(d.as_posix(), rule.pattern) and d not in found
+        ]
+    matches = {}
+    for first, found in by_output.values():
+        outermost = [d for d in found if not any(parent in found for parent in d.parents)]
+        if series := drop_copies(outermost):
+            matches[first] = series
+    return matches
 
 
 def truncated_dicoms(series_dir: Path) -> list[Path]:
@@ -792,6 +867,7 @@ def convert_dicom_root(
     remove_staging(bids_root)
     log_groups = find_behav_logs(behav_root, bids_root) if behav_root is not None else {}
     excluded = read_excluded_sessions(bids_root)
+    rules = read_scan_rules(bids_root)
     if subject_id is not None:
         found = [single_session(dicom_root, subject_id)]
     else:
@@ -814,7 +890,7 @@ def convert_dicom_root(
 
     for subject_id, sessions in subjects.items():
         renumber_sessions(bids_root, subject_id, sessions, report)
-        series = {s: match_series(s.dicom.folder) for s in sessions}
+        series = {s: match_series(s.dicom.folder, rules) for s in sessions}
         for session in sessions:
             step(f"{session.prefix} from {session.dicom.folder.name}")
             log.info("%s from %s", session.prefix, session.dicom.folder.name)
@@ -890,7 +966,9 @@ def series_folder_names(session_folder: Path) -> list[str]:
 
 
 def scan_dicom_root(
-    dicom_root: Path, progress: Callable[[int, int], None] | None = None
+    dicom_root: Path,
+    progress: Callable[[int, int], None] | None = None,
+    rules: tuple[ScanRule, ...] = SCAN_RULES,
 ) -> list[ScannedFolder]:
     """Every dated session folder with the tasks it holds -- the slow part (walks the series
     folders), done once; corrections are applied afterwards by session_infos. progress, if
@@ -902,7 +980,7 @@ def scan_dicom_root(
             progress(n, len(folders))
         if folder.name in IGNORED_FOLDERS or not folder.is_dir() or not any(folder.iterdir()):
             continue
-        tasks = frozenset(rule.task_name or rule.suffix for rule in match_series(folder))
+        tasks = frozenset(rule.task_name or rule.suffix for rule in match_series(folder, rules))
         scanned.append((folder, tasks))
     return scanned
 
@@ -954,6 +1032,8 @@ def scan_sessions(
     excluded: Collection[str] = (),
     dates: dict[str, date] | None = None,
     fixed: dict[str, str] | None = None,
+    rules: tuple[ScanRule, ...] = SCAN_RULES,
 ) -> list[SessionInfo]:
     """Every DICOM session as the behaviour check sees it: subject, ses label, date, tasks."""
-    return session_infos(scan_dicom_root(dicom_root), corrections or {}, excluded, dates, fixed)
+    scanned = scan_dicom_root(dicom_root, rules=rules)
+    return session_infos(scanned, corrections or {}, excluded, dates, fixed)

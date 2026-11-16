@@ -344,6 +344,27 @@ def test_task_ticks_filter_and_partial(
     assert window._tasks() == ["Rest"] and window.subjects == ["P01", "P02"]
 
 
+def test_reload_bids_picks_up_new_subjects_and_tasks(
+    window: preprocess_gui.PreprocessWindow, tmp_path: Path
+) -> None:
+    """A conversion into the same BIDS folder shows without a relaunch (the toolbox calls
+    reload_bids when the folder's contents changed)."""
+    bids = make_bids(tmp_path / "bids")
+    window._set_bids_folder(bids)
+    window._set_output_folder(tmp_path / "out")
+    window._set_ticked_tasks(["Rest"])  # Matching unticked: it should stay unticked
+    window._refresh_roster()
+    new_run = bids / "sub-P03/ses-1/func/sub-P03_ses-1_task-Checkerboard_bold.nii.gz"
+    new_run.parent.mkdir(parents=True)
+    new_run.touch()
+    assert window._all_task_labels() == ["Matching", "Rest"]  # not re-read yet
+
+    window.reload_bids()
+    assert window._all_task_labels() == ["Checkerboard", "Matching", "Rest"]
+    assert window._ticked_tasks() == ["Checkerboard", "Rest"]  # new task starts ticked
+    assert window.subjects == ["P01", "P02", "P03"]
+
+
 def test_stop_now_frees_resources_and_marks_the_subject(
     window: preprocess_gui.PreprocessWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -446,3 +467,13 @@ def test_renumbered_subject_is_flagged_and_can_be_renamed(
     renamed = out / "output" / "pipeline_cpac_preproc" / "sub-P02" / "ses-2" / "func"
     assert (renamed / "sub-P02_ses-2_task-Rest_space-template_desc-preproc_bold.nii.gz").exists()
     assert window.statuses["P02"] != "renumbered"
+
+
+def test_expand_gives_the_outputs_the_whole_height(
+    window: preprocess_gui.PreprocessWindow,
+) -> None:
+    assert not window.top_panel.isHidden() and window.expand_button.text() == "Expand ⤢"
+    window.expand_button.click()
+    assert window.top_panel.isHidden() and window.expand_button.text() == "Restore ⤡"
+    window.expand_button.click()
+    assert not window.top_panel.isHidden()

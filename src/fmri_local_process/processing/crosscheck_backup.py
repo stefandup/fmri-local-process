@@ -37,6 +37,7 @@ from fmri_local_process.processing.philani_bids import (
     DICOM_DATE_CORRECTIONS_FILE,
     DICOM_SESSION_CORRECTIONS_FILE,
     EXCLUDED_SESSIONS_FILE,
+    SCAN_RULES_FILE,
 )
 
 # Every record of a human decision, relative to the BIDS folder.
@@ -44,6 +45,7 @@ RECORD_FILES = (
     DICOM_CORRECTIONS_FILE,
     DICOM_DATE_CORRECTIONS_FILE,
     DICOM_SESSION_CORRECTIONS_FILE,
+    SCAN_RULES_FILE,
     CORRECTIONS_FILE,
     EXCLUDED_SESSIONS_FILE,
     NOTES_FILE,

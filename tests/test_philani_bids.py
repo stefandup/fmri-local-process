@@ -625,13 +625,42 @@ def test_a_session_with_no_recognised_series_is_reported_with_its_series(
 ) -> None:
     dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
     bids.mkdir()
-    make_series(dicoms, "20261028_0900_P001", "3_t1_mprage_sag", "7_ep2d_bold_clinical")
+    make_series(dicoms, "20261028_0900_P001", "3_localizer", "7_ep2d_bold_clinical")
     make_series(dicoms, "20240101_X_P002", "2_ABCD_T1w_MPR_vNav_RMS")
 
     report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None)
 
-    assert report.no_scans == [("20261028_0900_P001", "3_t1_mprage_sag, 7_ep2d_bold_clinical")]
+    assert report.no_scans == [("20261028_0900_P001", "3_localizer, 7_ep2d_bold_clinical")]
     assert not (bids / "sub-P001" / "ses-1").exists()
     # The scan sessions view lists the T1w too (not only the BOLD tasks).
     scanned = dict((folder.name, scans) for folder, scans in pb.scan_dicom_root(dicoms))
     assert scanned == {"20240101_X_P002": frozenset({"T1w"}), "20261028_0900_P001": frozenset()}
+
+
+def test_scan_rules_saved_with_the_bids_folder_feed_one_scan(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    # A Philani T1 and a clinical one in one session; a clinical scan alone in another.
+    make_series(dicoms, "20240101_X_P001", "2_ABCD_T1w_MPR_vNav_RMS", "9_t1_mprage_sag")
+    make_series(dicoms, "20261028_0900_P002", "3_t1_mprage_sag", "8_resting_state_fmri")
+    nested = dicoms / "20261028_0900_P002" / "scans" / "3_t1_mprage_sag" / "t1_mprage_extra"
+    nested.mkdir()  # below a matching series: not a series of its own
+
+    assert pb.read_scan_rules(bids) == pb.SCAN_RULES  # nothing saved: the built-in rules
+    rules = (*pb.SCAN_RULES, pb.rule_from("*_resting_state_fmri", "task-Rest_bold"))
+    pb.write_scan_rules(bids, rules)
+    assert pb.read_scan_rules(bids) == rules
+
+    report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None)
+
+    assert {"sub-P001_ses-1_run-1_T1w", "sub-P001_ses-1_run-2_T1w"} <= set(report.to_pick)
+    assert {"sub-P002_ses-1_T1w", "sub-P002_ses-1_task-Rest_bold"} <= set(report.converted)
+    assert [a["action"] for a in read_actions(bids)] == ["add scan rule"]
+
+
+def test_bad_scan_rules_are_explained() -> None:
+    with pytest.raises(ValueError, match="folder pattern is needed"):
+        pb.rule_from(" ", "T1w")
+    with pytest.raises(ValueError, match="task-<Name>_bold"):
+        pb.rule_from("*_rest_AP", "rest")
+    assert pb.rule_from("*x*", "task-Rest2_bold").output == ("func", "task-Rest2", "bold")

@@ -1,5 +1,6 @@
 """Offscreen tests of the toolbox window: its tabs, shared folders and locks, and the
-Setup & Convert / BIDS Crosscheck / Scan lengths / Overview pages (no conversion or Docker run)."""
+Setup & Convert / BIDS Crosscheck / Scan lengths / Crosscheck overview pages (no conversion
+or Docker run)."""
 
 import os
 from collections.abc import Iterator
@@ -76,7 +77,8 @@ def test_tabs_follow_the_order_of_the_work(window: toolbox.ToolboxWindow) -> Non
         "3. Scan lengths & trimming",
         "4. BIDS Crosscheck",
         "5. Preprocess BIDS (C-PAC)",
-        "6. Overview",
+        "6. Crosscheck overview",
+        "7. First-level stats",
     ]
 
 
@@ -312,3 +314,32 @@ def test_table_mountain_sits_in_the_top_right_corner(window: toolbox.ToolboxWind
     assert toolbox.LOGO_IMAGE.is_file()
     logo = window.logo.pixmap()
     assert not logo.isNull() and logo.height() == toolbox.LOGO_HEIGHT
+
+
+def test_scan_rules_dialog_checks_rows_previews_and_saves(
+    window: toolbox.ToolboxWindow, tmp_path: Path
+) -> None:
+    from fmri_local_process.gui.scan_rules_dialog import ScanRulesDialog
+    from fmri_local_process.processing import philani_bids as pb
+
+    bids, dicom = tmp_path / "bids", tmp_path / "dicom"
+    bids.mkdir()
+    series = dicom / "Clincial Scan - 28th October 2026" / "3_t1_mprage_sag"
+    series.mkdir(parents=True)
+    (series / "IM0001").write_bytes(b"fake")
+    (dicom / "Clincial Scan - 28th October 2026" / "7_localizer").mkdir()
+    (dicom / "Clincial Scan - 28th October 2026" / "7_localizer" / "IM0001").write_bytes(b"x")
+    dialog = ScanRulesDialog(bids, dicom, window)
+    assert dialog.table.rowCount() == len(pb.SCAN_RULES)
+
+    dialog.add_row("*_localizer", "localizer")  # not a BIDS scan this converter writes
+    assert dialog.rules() is None
+    assert "task-<Name>_bold" in dialog.table.item(dialog.table.rowCount() - 1, 1).toolTip()  # pyright: ignore[reportOptionalMemberAccess]
+    dialog.table.removeRow(dialog.table.rowCount() - 1)
+
+    dialog.check()
+    report = dialog.report.toPlainText()
+    assert "T1w <- 3_t1_mprage_sag" in report and "not matched: 7_localizer" in report
+
+    dialog.save()
+    assert pb.read_scan_rules(bids) == pb.SCAN_RULES

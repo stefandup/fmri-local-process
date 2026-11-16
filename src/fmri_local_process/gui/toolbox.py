@@ -1,6 +1,7 @@
 """fmri_toolbox: the Philani fMRI steps in one window, one tab per step, in the order of the
 work: Setup & Convert to BIDS, ID & Behaviour Logs, Scan lengths & trimming, BIDS Crosscheck
-(everything in BIDS correct before preprocessing), Preprocess BIDS (C-PAC), Overview.
+(everything in BIDS correct before preprocessing), Preprocess BIDS (C-PAC), Crosscheck overview,
+First-level stats.
 
 The tabs share their folders (chosen on the first tab) and know what the others are doing: while one
 job changes the BIDS folder (converting, trimming, C-PAC reading it), the others' changing
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
 from fmri_local_process.gui.behav_logs_dialog import BehavLogsPage
 from fmri_local_process.gui.convert_page import ConvertPage
 from fmri_local_process.gui.crosscheck_gui import CrosscheckPage
+from fmri_local_process.gui.first_level_page import FirstLevelPage
 from fmri_local_process.gui.overview_page import OverviewPage
 from fmri_local_process.gui.preprocess_gui import PreprocessWindow
 from fmri_local_process.gui.qt_common import (
@@ -54,8 +56,9 @@ BEHAV = "ID & Behaviour Logs"
 SCAN_LENGTHS = "Scan lengths & trimming"
 CROSSCHECK = "BIDS Crosscheck"
 PREPROCESS = "Preprocess BIDS (C-PAC)"
-OVERVIEW = "Overview"
-TAB_ORDER = (SETUP, BEHAV, SCAN_LENGTHS, CROSSCHECK, PREPROCESS, OVERVIEW)
+OVERVIEW = "Crosscheck overview"
+FIRST_LEVEL = "First-level stats"
+TAB_ORDER = (SETUP, BEHAV, SCAN_LENGTHS, CROSSCHECK, PREPROCESS, OVERVIEW, FIRST_LEVEL)
 HEADER_POINT_INCREASE = NAME_LABEL_FONT_POINT_INCREASE // 2
 LOGO_IMAGE = Path(__file__).parent / "assets" / "table_mountain.png"  # top right corner
 LOGO_HEIGHT = 40
@@ -90,7 +93,9 @@ class ToolboxWindow(QMainWindow):
         self.scan_lengths = ScanLengthsPage(self.state, self.trimmer)
         self.preprocess = PreprocessWindow()
         self.preprocess.setWindowFlags(Qt.WindowType.Widget)  # a page here, not a window
+        self.preprocess_generation = self.state.generation  # BIDS contents it last read
         self.overview = OverviewPage(self.state)
+        self.first_level = FirstLevelPage(self.state)
         self.pages: dict[str, QWidget] = {
             SETUP: self.convert,
             BEHAV: self.behav,
@@ -98,6 +103,7 @@ class ToolboxWindow(QMainWindow):
             CROSSCHECK: self.crosscheck,
             PREPROCESS: scrolling(self.preprocess),
             OVERVIEW: self.overview,
+            FIRST_LEVEL: self.first_level,
         }
 
         central = QWidget()
@@ -195,6 +201,11 @@ class ToolboxWindow(QMainWindow):
     def show_page(self, page: QWidget) -> None:
         if isinstance(page, QScrollArea) and (inner := page.widget()) is not None:
             page = inner
+        if page is self.preprocess and self.preprocess_generation != self.state.generation:
+            # It keeps its own subject and task lists; re-read them after other tabs'
+            # changes, or new conversions only show after a relaunch.
+            self.preprocess_generation = self.state.generation
+            self.preprocess.reload_bids()
         show = getattr(page, "show_page", None)
         if callable(show):
             show()

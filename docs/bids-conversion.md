@@ -88,8 +88,15 @@ BIDS_ROOT/
   the files in them) are renamed so the numbers stay in date order, and the summary lists
   them as **RENUMBERED**. Outputs made from the old numbers elsewhere (e.g. C-PAC) are not
   renamed.
-- **Scans.** Each `ScanRule` in `philani_bids.py` maps a series folder pattern to a BIDS name:
-  T1w, Reappraisal, Matching, Rest, Peer and Checkerboard.
+- **Scans.** Scan rules map a series folder pattern to a BIDS scan. The built-in ones are
+  the Philani protocol's names (T1w, Reappraisal, Matching, Rest, Peer, Checkerboard), plus
+  `*t1_mprage*` for a clinical scan's T1w. **Scan rules...** on tab 1 edits them: add,
+  change or remove rows, **Reset to Philani defaults**, and **Check DICOM folder** to see
+  per session folder what the rules find and which series folders nothing matches. The
+  rules are saved with the BIDS folder (`code/scan_rules.json`), logged and backed up.
+  Several rules can make one scan; a session where more than one matches gets them as
+  runs to pick. A session where nothing matches is listed as **NO SCANS** in the
+  conversion summary, with its series folder names.
 - **Events** (BIDS conventions):
     - `onset` and `duration` are in **seconds**. Presentation logs time in units of 0.1 ms.
     - `onset` is measured from the **first scanner pulse** (the first volume). This assumes
@@ -173,7 +180,7 @@ in date order, and the summary lists the folder as **LEFT OUT**. To convert it a
 its line from `code/excluded_sessions.json`.
 
 Notes are saved in `code/session_notes.json` against the DICOM folder, so they stay with the
-right session when sessions are renumbered. The **Overview** tab shows every session in one
+right session when sessions are renumbered. The **Crosscheck overview** tab shows every session in one
 table (runs and volumes per scan, coloured where something needs a look), and its
 **Export CSV...** saves that table with each session's DICOM folder, problems and note, for
 QC meetings or handing over.

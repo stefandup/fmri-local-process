@@ -18,6 +18,8 @@ nav:
   - The toolbox window: toolbox.md
   - BIDS conversion: bids-conversion.md
   - Preprocessing: preprocessing.md
+  - First-level stats: first-level-stats.md
+  - Roadmap: roadmap.md
   - For Contributors:
       - Golden Rules: golden-rules.md
   - AI Style Guide: ai-style-guide.md

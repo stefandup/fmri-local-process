@@ -44,6 +44,7 @@ from fmri_local_process.gui.qt_common import (
     style_secondary_label,
     wrap_tooltip,
 )
+from fmri_local_process.gui.scan_rules_dialog import ScanRulesDialog
 from fmri_local_process.gui.toolbox_state import CONVERTING, ToolboxState
 from fmri_local_process.processing.crosscheck import (
     read_expected_sessions,
@@ -166,6 +167,8 @@ HELP_TEXT = (
     "from the raw data, and the corrections saved on the other tabs (IDs, logs, deleted "
     "sessions) are applied. Each scan is converted in a temporary folder and only moved into "
     "BIDS once it (and its defacing) worked.<br><br>"
+    "<b>Scan rules...</b>: which DICOM series folders become which BIDS scan (the Philani "
+    "protocol names, plus your own, e.g. a clinical scan's t1_mprage as the T1w).<br><br>"
     "<b>Sessions per subject</b>: how many visits this study has; a subject with more is "
     "flagged ⊕ on the BIDS Crosscheck tab, so a dud visit stands out."
 )
@@ -265,6 +268,15 @@ class ConvertPage(QWidget):
         options_layout.addStretch(1)
         self.help = HelpToggle("Help ?", "What this tab does, step by step.")
         self.help.set_text(HELP_TEXT)
+        self.rules_button = QPushButton("Scan rules...")
+        self.rules_button.setToolTip(
+            wrap_tooltip(
+                "Which DICOM series folders become which BIDS scan: the Philani protocol "
+                "names, plus your own (e.g. a clinical scan's T1). Saved with the BIDS folder."
+            )
+        )
+        self.rules_button.clicked.connect(self.on_scan_rules)
+        options_layout.addWidget(self.rules_button)
         options_layout.addWidget(self.help.button)
         self.convert_button = QPushButton("Convert to BIDS")
         self.convert_button.setToolTip(
@@ -362,6 +374,19 @@ class ConvertPage(QWidget):
         self.deface_box.setEnabled(
             self.convert_thread is None and self.defacer_probe is None and not self.defacer_error
         )
+
+    def on_scan_rules(self) -> None:
+        bids_root = self.state.folder("bids")
+        if bids_root is None:
+            QMessageBox.information(
+                self,
+                "BIDS folder needed",
+                "Choose the BIDS folder first: the rules are kept in it.",
+            )
+            return
+        if ScanRulesDialog(bids_root, self.state.folder("dicom"), self).exec():
+            self.log_line("Scan rules saved: Convert to BIDS to apply them.")
+            self.state.bump()
 
     # ---- defacer ----------------------------------------------------------------------------
 

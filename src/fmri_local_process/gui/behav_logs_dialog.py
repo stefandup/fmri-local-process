@@ -87,6 +87,7 @@ from fmri_local_process.processing.philani_bids import (
     read_dicom_date_corrections,
     read_dicom_session_corrections,
     read_excluded_sessions,
+    read_scan_rules,
     scan_dicom_root,
     session_infos,
     write_dicom_corrections,
@@ -229,7 +230,9 @@ def load_behav_data(
         return lambda done, total: report(done, total, what)
 
     infos = inspect_logs(behav_root, read_corrections(bids_root), step("Reading logs"))
-    scanned = scan_dicom_root(dicom_root, step("Scanning DICOM session folders"))
+    scanned = scan_dicom_root(
+        dicom_root, step("Scanning DICOM session folders"), read_scan_rules(bids_root)
+    )
     return BehavData(
         infos,
         scanned,
