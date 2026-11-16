@@ -15,7 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings, Qt  # noqa: E402 -- needs QT_QPA_PLATFORM set first
 from PySide6.QtGui import QImage  # noqa: E402
-from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 
 from fmri_local_process.gui import preprocess_gui  # noqa: E402
 
@@ -402,3 +402,47 @@ def test_stop_now_frees_resources_and_marks_the_subject(
     window.subject_table.selectRow(0)
     texts = [label.text() for label in window.outputs_widget.findChildren(QLabel)]
     assert any(text.startswith("Stopped by you before it finished") for text in texts)
+
+
+def test_renumbered_subject_is_flagged_and_can_be_renamed(
+    window: preprocess_gui.PreprocessWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bids = make_bids(tmp_path / "bids")
+    out = tmp_path / "out"
+    sessions = bids / "sub-P02" / "sub-P02_sessions.tsv"
+    sessions.write_text("session_id\tacq_time\tsource_folder\nses-1\t2024-03-01\t0301_P02\n")
+    func = out / "output" / "pipeline_cpac_preproc" / "sub-P02" / "ses-1" / "func"
+    func.mkdir(parents=True)
+    (func / "sub-P02_ses-1_task-Rest_space-template_desc-preproc_bold.nii.gz").touch()
+    window._set_bids_folder(bids)
+    window._set_output_folder(out)
+    window._refresh_roster()  # adopts the current numbering for the existing output
+    assert window.statuses["P02"] == "done"
+
+    # An earlier scan turns up: the converter makes it ses-1 and the old one ses-2.
+    sessions.write_text(
+        "session_id\tacq_time\tsource_folder\n"
+        "ses-1\t2024-01-01\t0101_P02\nses-2\t2024-03-01\t0301_P02\n"
+    )
+    window._refresh_roster()
+    assert window.statuses["P02"] == "renumbered"
+    window.subject_table.selectRow(1)
+    buttons = [b for b in window.outputs_widget.findChildren(QPushButton) if "Rename" in b.text()]
+    assert buttons and "⚠" in buttons[0].toolTip()
+
+    cleared: list[str] = []
+    monkeypatch.setattr(preprocess_gui, "find_docker", lambda: Path("docker"))
+    monkeypatch.setattr(
+        preprocess_gui, "clear_working_volume", lambda *args: cleared.append(args[-1]) or []
+    )
+    monkeypatch.setattr(
+        preprocess_gui.QMessageBox,
+        "question",
+        lambda *_: preprocess_gui.QMessageBox.StandardButton.Yes,
+    )
+    buttons[0].click()
+
+    assert cleared == ["P02"]
+    renamed = out / "output" / "pipeline_cpac_preproc" / "sub-P02" / "ses-2" / "func"
+    assert (renamed / "sub-P02_ses-2_task-Rest_space-template_desc-preproc_bold.nii.gz").exists()
+    assert window.statuses["P02"] != "renumbered"

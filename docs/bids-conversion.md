@@ -6,6 +6,7 @@ Two commands, both thin wrappers around `src/fmri_local_process/processing/`:
 |---|---|
 | `fmri_convert_to_bids` | Converts a folder of DICOM sessions into a BIDS dataset, including behavioural `events.tsv` files when given `--behav-logs`. |
 | `fmri_behav_events` | Batch-converts behavioural `.log` files (one file, or a whole folder) into `events.tsv` files using the same code. `--compare` runs the original R script on each log and reports any differences. |
+| `fmri_behav_check` | Read-only report: which log matches which scan session (by ID and date), which don't and why, which logs are incomplete, and what trial types and columns the logs contain. |
 
 This is a Python port of `philani_scripts/philaniToBIDS.sh` and the behavioural Rmds in
 `philani_scripts/behavioural_processing_r_scripts/`. Neither command needs R, `jq` or bash.
@@ -43,35 +44,50 @@ BEHAV_LOGS/                          only with --behav-logs; searched recursivel
 
 Each log's task comes from `cogreappraisal` or `emolabeling` appearing anywhere in its path
 below `BEHAV_LOGS`, as a folder name or in the file name. Logs with neither are ignored. The
-subject ID is the part of the file name before the first `-`. `BEHAV_LOGS` can be
+subject ID is the part of the name before `-<task>`. Logs are named
+`<ID>-<task>_scan-YYYYMMDD-HHMMSS-<unique id>.log`, and the date (and time) comes from the
+`_scan-` part. For other names it is the first 8-digit `YYYYMMDD`, else the date on the log's
+`Logfile written - MM/DD/YYYY` line. `BEHAV_LOGS` can be
 `DICOM_ROOT` itself if the logs live alongside the DICOMs.
 
 Folders that are empty or don't start with a valid `YYYYMMDD_` date are skipped with a
-warning. Characters BIDS doesn't allow in a subject ID (anything not a letter or digit, e.g.
-`^`) are dropped, with a warning.
+warning. The folder's second part, when it is `HHMM`, is shown as the scan time.
+
+**Subject IDs** (folders and logs alike):
+
+- A twin's dash between digits becomes `T`: `12345-1` is `sub-12345T1`, `12345-2` is
+  `sub-12345T2`.
+- Any other character BIDS doesn't allow (anything not a letter or digit, e.g. `^` or a
+  space) is dropped, with a warning. A dropped character may hide a typo, so the crosscheck
+  flags it.
+- A wrong ID is corrected in the crosscheck (**IDs & behaviour logs...**, see below). Raw
+  folders and logs are never renamed.
 
 To convert a single session folder that doesn't follow these naming rules, pass the folder
 itself as `DICOM_ROOT` with `--subject <id>`: it becomes `sub-<id>/ses-1`.
 
 A series folder that is a copy of another, meaning the same folder name with the same file
 names (e.g. a scanner export's extra `Untitled/` subfolder), is converted once rather than
-staged as a repeated run.
+as a repeated run.
 
 ## Output
 
 ```
 BIDS_ROOT/
   dataset_description.json
-  .bidsignore                        lists crosscheck_pending/
   sub-<id>/ses-<n>/anat/sub-<id>_ses-<n>_T1w.nii.gz (+ .json, defaced)
   sub-<id>/ses-<n>/func/sub-<id>_ses-<n>_task-<task>_bold.nii.gz (+ .json)
   sub-<id>/ses-<n>/func/sub-<id>_ses-<n>_task-<task>_events.tsv (+ .json: SourceLog)
-  crosscheck_pending/                ambiguous items, for crosscheck (see below)
+  sub-<id>/sub-<id>_sessions.tsv     each ses-<n>: scan date/time and DICOM source folder
 ```
 
 - **Sessions.** Every session is converted. `ses-1`, `ses-2`, … follow the calendar order of
-  each subject's scan dates, and every subject gets `ses-1`, even with a single session. If an
-  earlier session turns up later, the later ones are renumbered.
+  each subject's scan dates, and every subject gets `ses-1`, even with a single session.
+  `sub-<id>_sessions.tsv` records which DICOM folder each session came from, with its scan
+  date and time. If an earlier session turns up later, the converted session folders (and
+  the files in them) are renamed so the numbers stay in date order, and the summary lists
+  them as **RENUMBERED**. Outputs made from the old numbers elsewhere (e.g. C-PAC) are not
+  renamed.
 - **Scans.** Each `ScanRule` in `philani_bids.py` maps a series folder pattern to a BIDS name:
   T1w, Reappraisal, Matching, Rest, Peer and Checkerboard.
 - **Events** (BIDS conventions):
@@ -81,17 +97,20 @@ BIDS_ROOT/
     - There is one file per run, with the behavioural modulator as an extra column: `rating`
       for Reappraisal, `sub_acc` (block accuracy) for Matching.
 
-### Staged for crosscheck: `crosscheck_pending/`
+### When there is a choice to make
 
-The converter never guesses which of several candidates is the right one. It stages them all:
+Everything is converted straight into its session; you choose in the crosscheck afterwards.
 
-| Situation | Staged as |
+| Situation | What the converter does |
 |---|---|
-| Several series of the same scan in one session | `crosscheck_pending/sub-<id>/ses-<n>/<datatype>/..._run-<k>_<suffix>` |
-| Several logs for a subject + task, a log that can't be tied to exactly one session with that task, or a log for a subject with no DICOM session | `crosscheck_pending/sub-<id>/func/sub-<id>_task-<task>_run-<k>_events.tsv` (+ `.json` naming the source log) |
+| Several series of the same scan in one session | Converts each as `..._run-<k>_<suffix>` in that session. In the crosscheck, **Keep selected run** gives the chosen one the run-less name and deletes the others; re-runs then leave it alone. Until then C-PAC would preprocess every run. |
+| A log's date matches one of the subject's sessions with that task | Puts its events in that session. |
+| One log and one session with that task, but the dates differ | Puts it in that session anyway (if there is no other session, it's that one) and the crosscheck flags it ⚑. |
+| Several logs for one session, a date matching no session, or a subject with no scan session | Doesn't convert it; the summary lists it as **NOT PLACED**. Choose a log, correct its date or ID in **IDs & behaviour logs...**, then convert again. |
 
-At crosscheck, put the chosen file into the main tree under its run-less name. Re-runs
-then leave that item alone and don't stage it again.
+If a different log is chosen later, its events replace the old ones on the next conversion.
+Older versions staged these in `crosscheck_pending/`; that folder is removed on the next
+conversion (everything in it is made from the raw data).
 
 ### Incomplete DICOM series
 
@@ -111,14 +130,92 @@ folder. The only changes it makes there are the ones you click.
 
 | Icon | Meaning |
 |---|---|
-| ⚠ | Staged runs/logs in `crosscheck_pending/`: keep one run (the others are deleted), or assign each log to a session |
-| ❗ | Short: fewer volumes than the same scan in other sessions (bytes for a 3D image), or an `events.tsv` with no events |
+| ⚠ | A scan converted as several runs: keep one (the others are deleted) |
+| ❗ | Short: fewer volumes than the scan's expected length (bytes for a 3D image: smaller than in other sessions), or an `events.tsv` with no events |
+| ✂ | Long: more volumes than the expected length (the scan ran on after the task): trim it |
 | ○ | Missing: a NIfTI without its sidecar, a task bold without its `events.tsv`, or a scan most other sessions have |
+| ⚑ | Events from a log dated other than the scan: check it's the right log |
 
-Every file also shows its volume count and duration. A scan with no other session to compare
+The session list shows each session's **ID**, **Date** (scan date and time, from
+`sessions.tsv`; hover it for the DICOM folder), **Session**, number of files, and problems.
+
+Every file also shows its volume count and duration.
+
+**Scan lengths & trimming.** A BOLD scan's expected length is the median volume count
+of all its runs. (It's the upper median, so it is always a length some run has, and with
+only two runs it's the longer one.) **Scan lengths & trimming...** lists each BOLD scan with
+its runs, the volume counts found, the expected length (shown as "median (N)"), the minutes
+that makes, and how many runs are too long. Type
+another number to set it; it is remembered in `code/expected_volumes.json` in the BIDS
+folder. Step the box down to the bottom ("median (N)") to follow the median again. A run
+longer than its expected length gets **Trim to N...** in its session. **Save and trim N long
+run(s)...** in the same window saves the lengths and trims them all, after asking you to
+confirm. Trimming keeps the first N volumes, records the original count in the sidecar
+(`TrimmedFromVolumes`), and refuses if the run's events would be cut off. The raw DICOMs
+keep every volume: delete the file and convert again to undo. Trimming happens here, at
+crosscheck, never during preprocessing. A scan with no other session to compare
 against (e.g. a single pilot) can't be marked short automatically, so check those numbers by
-eye. **Convert / update BIDS** runs the converter from the window. Deleted files are recreated
+eye. **Convert / update BIDS** runs the converter from the window, with a progress bar (one step per session, plus one per subject for its behavioural logs) and the step it is on. Deleted files are recreated
 from the raw data.
+
+### Behaviour logs: wrong IDs and dates
+
+Logs are often saved under a mistyped subject ID or on the wrong date. **IDs & behaviour
+logs...** in the crosscheck window (it needs all three folders set) has two tabs.
+
+**Scan sessions** lists every DICOM session folder with:
+
+- when it was scanned (date and time from the folder name), which tells twins scanned on the
+  same day apart;
+- the ID as written in the folder, and the ID it resolves to;
+- a **Corrected ID** box;
+- its BIDS session, its task scans, and which logs matched it (with the log's time), or
+  which task has no log.
+
+A correction is saved in `code/dicom_id_corrections.json`, keyed by folder name. Sessions
+already converted under the old ID stay in the BIDS folder until you remove them (or
+rebuild with `--reset`).
+
+**Behaviour logs** lists every log (ID as written and as resolved, its date and time) with:
+
+| Match | Meaning |
+|---|---|
+| matched | ID and date match one session with that task scan |
+| date mismatch | the ID has scans, but not on this date; the scan dates are listed |
+| unknown ID | no session has this ID; same-day sessions that still lack this task's log are suggested |
+| duplicate | several logs for one session and task on the same day: pick one (below) |
+| excluded | marked **error** or **not used**: left out of BIDS |
+| no task scan | a session on that date, but without this task's scan |
+| no date | neither the file name nor the log header has a date |
+
+It also shows each log's state: **complete**, **aborted** (it ends before the thank-you
+screen), or **unreadable**. Notes flag logs with no scanner pulses, or a column count other
+than the one the R script hard-codes. Below the table it lists the trial types and column
+layouts found per task.
+
+Type a corrected ID or date (`YYYY-MM-DD`) and press **Re-check** to see the effect.
+
+Select a log to see, under **Selected log**, the events it produces (onset, duration,
+trial type and modulator) and whether they fit the converted BOLD run (volumes × TR). A
+summary beside it lists each trial type with its event count and total time, then the
+behavioural column per trial type. Ratings are ordinal, so they are summarised as how often
+each value occurs, the median and the range, never a mean. Accuracy gets median and range.
+Rows of a rated trial type without a value are counted as missing. Then
+record a verdict, with an optional note:
+
+- **Mark OK**: the issues are acceptable; the log is used.
+- **Mark error**: unusable; the log is left out of BIDS.
+- **Use this one**: of several logs for a subject, task and day (e.g. a restarted run), put
+  this one into BIDS. The others are marked **not used** (one already marked error keeps
+  that verdict).
+- **Clear verdict**.
+
+**Needs review only** hides logs that are fine or already have a verdict. **Save**
+writes the corrections and verdicts to `code/behav_corrections.json` in the BIDS folder, and **Convert /
+update BIDS** applies them. Raw logs are never renamed. The events sidecar records the
+correction (`SourceLogCorrectedID`, `SourceLogCorrectedDate`).
+`fmri_behav_check BEHAV_LOGS DICOM_ROOT --bids BIDS_ROOT` prints the same report in the
+terminal.
 
 Every subject is expected to have both a Reappraisal log and a Matching log. A missing one is
 logged, listed as **MISSING** in the summary, and conversion carries on. It does not affect
@@ -160,15 +257,15 @@ fmri_behav_events <BEHAV_LOGS> results\behav
 #         results\behav\sub-<id>_task-<task>[_run-<n>]_events.tsv
 
 # 4. One participant, redone and checked against the original R
-#    (needs R with rmarkdown, tidyverse and stringr)
-$env:PHILANI_RMD_DIR = "C:\Users\stefan\philani_scripts\behavioural_processing_r_scripts"
+#    (needs Rscript on PATH with tidyverse and stringr; no rmarkdown/pandoc needed)
+$env:PHILANI_RMD_DIR = "behavioural_processing_r_scripts"
 fmri_behav_events <BEHAV_LOGS> results\behav --subject_id P001 --rerun --compare
 # expect: "R agrees" in the summary, or one DIFF line per mismatching cell (exit code 1)
 
 # 5. Full conversion on a small DICOM folder (--no-deface: skip the Docker defacer here)
 fmri_convert_to_bids <DICOM_ROOT> results\bids --behav-logs <BEHAV_LOGS> --no-deface -y
-# expect: a summary table (converted / staged / skipped / failed), and
-#         results\bids\sub-*\ses-*\{anat,func}; anything ambiguous in crosscheck_pending\
+# expect: a summary table (converted / runs to pick / logs not placed / renumbered /
+#         skipped / failed), and results\bids\sub-*\ses-*\{anat,func}
 ```
 
 `fmri_behav_events` works like the vr_lab_toolbox batch tools:

@@ -202,6 +202,7 @@ all** / **Tick none** change every box at once. New subjects start ticked.
 | ◐ | Partly done: some ticked tasks are preprocessed, others not yet (e.g. you ran one task first). |
 | ✗ | Failed: C-PAC ran but its output is incomplete. The Outputs tab says why. |
 | ■ | Stopped by you before it finished. Run it again to resume. |
+| ⇄ | Renumbered: the BIDS sessions got new numbers after it was preprocessed. See [When BIDS sessions are renumbered](#when-bids-sessions-are-renumbered). |
 | ▶ | Running now. |
 | ○ | Not run yet. |
 
@@ -216,6 +217,8 @@ has.
     - **Why it failed** (red) — a plain-English cause, read from C-PAC's log, with what to
       do about it. **Stopped before it finished** (orange) when you stopped it.
     - **Not all tasks preprocessed** — which ticked tasks are still to do.
+    - **BIDS sessions renumbered since preprocessing** — which sessions changed number, with
+      **Rename output to the new session numbers...** (see below).
     - **Not complete: N expected outputs missing** — files C-PAC planned to write but
       didn't. Running it again with "Skip done, resume the rest" fills the gaps.
     - **Preprocessed BOLD** — the finished scans, each with **Reveal** to open its folder.
@@ -233,6 +236,31 @@ has.
 !!! tip "What am I looking at?"
     The **?** button on the QC Figures, Brain Slices and Motion tabs opens a short note on
     what the current picture shows and what a problem looks like.
+
+## When BIDS sessions are renumbered
+
+Sessions are numbered by scan date. If an earlier scan of a subject is added to BIDS after
+the later ones were converted, the converter renames them (ses-1 becomes ses-2, and so on).
+C-PAC names its output by session number too, so that subject's output now carries the old
+numbers.
+
+To catch this, each subject's BIDS `sub-<id>_sessions.tsv` is copied to
+`OUTPUT/bids_sessions/` when it is preprocessed. That file records which DICOM folder each
+session number came from. If the BIDS copy has changed since, the subject shows **⇄** and
+never counts as done. You have two options:
+
+- **Run it again.** Its old results and working data are cleared first, then every session
+  is preprocessed from scratch with the new numbers. This is the safe choice.
+- **Rename its output** with **Rename output to the new session numbers...** in its details.
+  This renames the C-PAC output and log files to the new numbers and clears C-PAC's working
+  data (Docker must be running). The results themselves don't change, because they were made
+  from the same scans. Use it to keep existing results labelled right, e.g. for QC or
+  analysis, until you re-run. The next C-PAC run of the subject still preprocesses every
+  session again: C-PAC runs whole subjects, and the BIDS file names changed.
+
+Output made before this check existed is assumed to match the BIDS numbering it finds the
+first time. The command line behaves the same: a renumbered subject is not skipped as done,
+and its old results are cleared before it runs.
 
 ## Running several subjects at once
 

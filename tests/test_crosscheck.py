@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from fmri_local_process.processing import crosscheck as cc
-from fmri_local_process.processing.philani_bids import PENDING_DIR
 
 
 def write_nifti(path: Path, volumes: int, padding: int = 0, tr: float | None = 2.0) -> Path:
@@ -61,7 +60,7 @@ def test_short_scan_found_by_comparing_with_other_sessions(tmp_path: Path) -> No
 
     review = review_of(tmp_path, "sub-C_ses-1")
     assert [(i.kind, i.path) for i in review.issues] == [("short", short)]
-    assert "138 volumes, others have 495" in review.issues[0].text
+    assert "138 volumes, median of runs 495" in review.issues[0].text
     assert review_of(tmp_path, "sub-A_ses-1").issues == []
     assert review.files[0].summary() == "138 volumes (4.6 min)"
 
@@ -89,7 +88,7 @@ def test_missing_sidecar_events_and_common_scan(tmp_path: Path) -> None:
 
     texts = [i.text for i in review_of(tmp_path, "sub-C_ses-1").issues]
     assert "sub-C_ses-1_task-Matching_bold.json (sidecar)" in texts
-    assert "task-Matching_events.tsv" in texts
+    assert "task-Matching_events.tsv: no log placed here (see IDs & behaviour logs)" in texts
     missing_rest = [i.text for i in review_of(tmp_path, "sub-A_ses-1").issues]
     assert missing_rest == ["task-Rest_bold (2 of 3 sessions have it)"]
 
@@ -103,52 +102,57 @@ def test_empty_events_file_is_short(tmp_path: Path) -> None:
     ]
 
 
-def staged(bids: Path, subject: str, session: str, name: str) -> Path:
-    return bids / PENDING_DIR / f"sub-{subject}" / f"ses-{session}" / "func" / name
-
-
-def test_keep_run_moves_choice_into_place_and_deletes_others(tmp_path: Path) -> None:
-    write_nifti(func(tmp_path, "A", "1", "task-Rest_bold.nii.gz"), 10)  # session exists
+def test_keep_run_renames_choice_and_deletes_the_other_runs(tmp_path: Path) -> None:
+    write_nifti(func(tmp_path, "A", "1", "task-Rest_bold.nii.gz"), 10)
     for run in (1, 2):
-        write_nifti(staged(tmp_path, "A", "1", f"sub-A_ses-1_task-Peer_run-{run}_bold.nii.gz"), 10)
+        write_nifti(func(tmp_path, "A", "1", f"task-Peer_run-{run}_bold.nii.gz"), 10)
 
     review = review_of(tmp_path, "sub-A_ses-1")
-    assert [i.kind for i in review.issues] == ["pending"]
+    assert [(i.kind, i.text) for i in review.issues] == [
+        ("pending", "task-Peer_bold: 2 runs, keep one")
+    ]
+    assert [d.path.name for d in review.pending] == [
+        "sub-A_ses-1_task-Peer_run-1_bold.nii.gz",
+        "sub-A_ses-1_task-Peer_run-2_bold.nii.gz",
+    ]
     chosen = review.pending[1]
     target = cc.keep_run(tmp_path, chosen, review.pending)
 
     assert target == func(tmp_path, "A", "1", "task-Peer_bold.nii.gz")
     assert target.exists() and target.with_name("sub-A_ses-1_task-Peer_bold.json").exists()
-    assert not (tmp_path / PENDING_DIR / "sub-A").exists()  # emptied staging folders removed
+    assert not list(target.parent.glob("*_run-*"))
     assert review_of(tmp_path, "sub-A_ses-1").issues == []
 
 
 def test_keep_run_refuses_to_overwrite(tmp_path: Path) -> None:
     write_nifti(func(tmp_path, "A", "1", "task-Peer_bold.nii.gz"), 10)
-    write_nifti(staged(tmp_path, "A", "1", "sub-A_ses-1_task-Peer_run-1_bold.nii.gz"), 10)
+    write_nifti(func(tmp_path, "A", "1", "task-Peer_run-1_bold.nii.gz"), 10)
     review = review_of(tmp_path, "sub-A_ses-1")
     with pytest.raises(cc.CrosscheckError, match="already exists"):
         cc.keep_run(tmp_path, review.pending[0], review.pending)
 
 
-def test_staged_log_assigned_to_session(tmp_path: Path) -> None:
-    for session in "12":
-        write_nifti(func(tmp_path, "A", session, "task-Matching_bold.nii.gz"), 10)
-    log = write_events(
-        tmp_path / PENDING_DIR / "sub-A" / "func" / "sub-A_task-Matching_run-1_events.tsv", 3
+def test_session_date_from_sessions_tsv_and_log_date_check(tmp_path: Path) -> None:
+    write_nifti(func(tmp_path, "A", "1", "task-Matching_bold.nii.gz"), 10)
+    events = write_events(func(tmp_path, "A", "1", "task-Matching_events.tsv"), 3)
+    events.with_suffix(".json").write_text(
+        json.dumps({"SourceLog": "A.log", "SourceLogDate": "2024-10-15"})
     )
-    log.with_suffix(".json").write_text(json.dumps({"SourceLog": "A.log"}))
+    (tmp_path / "sub-A" / "sub-A_sessions.tsv").write_text(
+        "session_id\tacq_time\tsource_folder\nses-1\t2024-10-14T13:41:00\t20241014_1341_A\n"
+    )
 
-    logs = review_of(tmp_path, "sub-A")
-    assert logs.session is None and logs.issues[0].kind == "pending"
-    assert "staged, assign below" in review_of(tmp_path, "sub-A_ses-2").issues[0].text
-    assert cc.sidecar_note(logs.pending[0]) == "SourceLog A.log"
-    assert cc.subject_sessions(tmp_path, "A") == ["1", "2"]
+    review = review_of(tmp_path, "sub-A_ses-1")
 
-    target = cc.move_into_session(tmp_path, logs.pending[0], "2")
-    assert target == func(tmp_path, "A", "2", "task-Matching_events.tsv")
-    assert json.loads(target.with_suffix(".json").read_text()) == {"SourceLog": "A.log"}
-    assert review_of(tmp_path, "sub-A_ses-2").issues == []
+    assert (review.date, review.source_folder) == ("2024-10-14 13:41", "20241014_1341_A")
+    assert [(i.kind, i.text) for i in review.issues] == [
+        (
+            "check",
+            "sub-A_ses-1_task-Matching_events.tsv: from a log dated 2024-10-15, "
+            "scanned 2024-10-14 (A.log)",
+        )
+    ]
+    assert cc.sidecar_note(review.files[1]) == "SourceLog A.log"
 
 
 def test_delete_keeps_session_folder(tmp_path: Path) -> None:
@@ -226,3 +230,56 @@ def test_trim_refuses_to_cut_off_events(tmp_path: Path) -> None:
     with pytest.raises(cc.CrosscheckError, match="events run to 16 s"):
         cc.trim_run(data, 6)  # 12 s
     cc.trim_run(data, 8)  # 16 s: fits
+
+
+def test_median_of_the_runs_is_the_default_expected_length(tmp_path: Path) -> None:
+    for subject, volumes in (("A", 441), ("B", 441), ("C", 520), ("D", 33)):
+        write_nifti(func(tmp_path, subject, "1", "task-Rest_bold.nii.gz"), volumes)
+
+    assert cc.median_volumes(cc.find_data_files(tmp_path)) == {"task-Rest_bold": 441}
+    [long] = review_of(tmp_path, "sub-C_ses-1").issues
+    assert (long.kind, long.trim_to) == ("long", 441)
+    assert "median of runs 441" in long.text
+    assert [i.kind for i in review_of(tmp_path, "sub-D_ses-1").issues] == ["short"]
+
+    cc.write_expected(tmp_path, {"task-Rest_bold": 520})  # the human's number wins
+    assert review_of(tmp_path, "sub-C_ses-1").issues == []
+    assert "expected 520" in review_of(tmp_path, "sub-A_ses-1").issues[0].text
+
+
+def test_two_runs_one_cut_short_never_offers_trimming_the_full_one(tmp_path: Path) -> None:
+    write_nifti(func(tmp_path, "A", "1", "task-Rest_bold.nii.gz"), 441)
+    write_nifti(func(tmp_path, "B", "1", "task-Rest_bold.nii.gz"), 33)
+    assert review_of(tmp_path, "sub-A_ses-1").issues == []
+    assert [i.kind for i in review_of(tmp_path, "sub-B_ses-1").issues] == ["short"]
+
+
+def test_expected_lengths_dialog_defaults_to_median_and_saves_overrides(tmp_path: Path) -> None:
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from fmri_local_process.gui.scan_lengths import ScanLengthsDialog
+
+    _app = QApplication.instance() or QApplication([])
+    for subject, volumes in (("A", 441), ("B", 441), ("C", 520)):
+        write_nifti(func(tmp_path, subject, "1", "task-Rest_bold.nii.gz"), volumes)
+        write_nifti(func(tmp_path, subject, "1", "task-Peer_bold.nii.gz"), 100)
+
+    dialog = ScanLengthsDialog(tmp_path, cc.find_data_files(tmp_path), None)
+    rest, peer = dialog.spins["task-Rest_bold"], dialog.spins["task-Peer_bold"]
+    assert (rest.value(), rest.specialValueText()) == (0, "median (441)")
+    assert dialog.trim_button.text() == "Save and trim 1 long run(s)..."  # C: 520 > 441
+    rest.setValue(520)  # typed: nothing is too long any more
+    assert not dialog.trim_button.isEnabled()
+    rest.setValue(0)
+    peer.setValue(90)  # a number set by hand is remembered; the median isn't stored
+    dialog.save()
+    assert cc.read_expected(tmp_path) == {"task-Peer_bold": 90}
+
+    reopened = ScanLengthsDialog(tmp_path, cc.find_data_files(tmp_path), None, can_trim=False)
+    assert reopened.spins["task-Peer_bold"].value() == 90
+    assert not reopened.trim_button.isEnabled()  # a trim is already running
+    reopened.save_and_trim()
+    assert reopened.trim_requested

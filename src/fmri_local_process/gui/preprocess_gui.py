@@ -22,7 +22,7 @@ from pathlib import Path
 
 from nibabel.filebasedimages import ImageFileError
 from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QColor, QFont, QPixmap, QTextCursor
+from PySide6.QtGui import QCloseEvent, QColor, QFont, QGuiApplication, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -127,6 +127,12 @@ from fmri_local_process.processing.cpac_outputs import (
     qc_figures,
     read_tsv,
 )
+from fmri_local_process.processing.session_sync import (
+    SessionChange,
+    adopt_sessions,
+    rename_outputs,
+    session_changes,
+)
 
 log = logging.getLogger(__name__)
 
@@ -142,6 +148,7 @@ STATUS_ICON = {
     "partial": ("◐", WARNING_COLOR),
     "failed": ("✗", ERROR_COLOR),
     "stopped": ("■", WARNING_COLOR),
+    "renumbered": ("⇄", WARNING_COLOR),
     "running": ("▶", RUNNING_COLOR),
     "not run": ("○", UNKNOWN_COLOR),
 }
@@ -152,6 +159,9 @@ STATUS_LEGEND = (
     "◐ (several tasks ticked) some are preprocessed, others not yet\n"
     "✗ C-PAC ran (a log exists) but its output is incomplete\n"
     "■ stopped by you before it finished; running it again resumes it\n"
+    "⇄ the BIDS sessions were renumbered since it was preprocessed (an earlier session was "
+    "added): its output carries the old numbers. Run it again (old results are cleared "
+    "first) or rename its output -- select it for both options\n"
     "▶ running now\n"
     "○ not run yet"
 )
@@ -993,6 +1003,8 @@ class PreprocessWindow(QMainWindow):
             return "running"
         if self.bids_folder is None or self.output_folder is None:
             return "not run"
+        if session_changes(self.bids_folder, self.output_folder, subject):
+            return "renumbered"
         tasks = self._tasks()
         if is_subject_done(self.bids_folder, self.output_folder, subject, tasks):
             return "done"
@@ -1020,6 +1032,9 @@ class PreprocessWindow(QMainWindow):
         self.subjects = (
             bids_subjects(self.bids_folder, task) if self.bids_folder and ticked_any else []
         )
+        if self.bids_folder is not None and self.output_folder is not None:
+            for subject in self.subjects:  # output from before sessions were recorded
+                adopt_sessions(self.bids_folder, self.output_folder, subject)
         self.statuses = {subject: self._subject_status(subject) for subject in self.subjects}
         self.subject_table.blockSignals(True)
         self.subject_table.setRowCount(len(self.subjects))
@@ -1258,6 +1273,9 @@ class PreprocessWindow(QMainWindow):
             self.outputs_layout.addWidget(self._failure_group(subject, self.output_folder))
         if self.statuses.get(subject) == "partial":
             self.outputs_layout.addWidget(self._partial_group(self._tasks_to_do(subject)))
+        if self.statuses.get(subject) == "renumbered" and self.bids_folder is not None:
+            changes = session_changes(self.bids_folder, self.output_folder, subject)
+            self.outputs_layout.addWidget(self._renumbered_group(subject, changes))
         if self.bids_folder is not None and self.statuses.get(subject) != "running":
             task = self._tasks()
             sessions = bold_sessions(self.bids_folder, subject, task)
@@ -1278,6 +1296,68 @@ class PreprocessWindow(QMainWindow):
         self.outputs_layout.addWidget(group)
         self.outputs_layout.addStretch(1)
         self._show_log(subject)
+
+    def _renumbered_group(self, subject: str, changes: list[SessionChange]) -> QGroupBox:
+        """The subject's BIDS sessions were renumbered after it was preprocessed."""
+        group = QGroupBox("BIDS sessions renumbered since preprocessing")
+        group.setStyleSheet(accent_group_box_stylesheet(WARNING_COLOR))
+        layout = QVBoxLayout(group)
+        moves = "<br>".join(f"&nbsp;&nbsp;{change}" for change in changes)
+        label = QLabel(
+            "An earlier session was added to BIDS, so this subject's sessions have new "
+            f"numbers:<br>{moves}<br>Its output still carries the old ones. Either run it "
+            "again (its old results are cleared first and every session is preprocessed "
+            "again), or rename its output to the new numbers."
+        )
+        label.setWordWrap(True)
+        label.setStyleSheet(f"color: {WARNING_COLOR};")
+        layout.addWidget(label)
+        rename = QPushButton("Rename output to the new session numbers...")
+        rename.setToolTip(
+            wrap_tooltip(
+                "⚠ Renames this subject's C-PAC output and log files (e.g. ses-1 -> ses-2) "
+                "so the existing results are labelled right, and clears its C-PAC working "
+                "data (Docker must be running). The results themselves are unchanged: they "
+                "were made from the same scans. The next C-PAC run of this subject still "
+                "preprocesses every session again (C-PAC runs whole subjects, and the BIDS "
+                "file names changed). Check the session list above first: renaming the "
+                "wrong way round would mislabel results."
+            )
+        )
+        rename.clicked.connect(partial(self._on_rename_outputs, subject, changes))
+        layout.addWidget(rename)
+        return group
+
+    def _on_rename_outputs(self, subject: str, changes: list[SessionChange]) -> None:
+        if self.bids_folder is None or self.output_folder is None:
+            return
+        listing = "\n".join(f"  {change}" for change in changes)
+        answer = QMessageBox.question(
+            self,
+            "Rename output",
+            f"Rename sub-{subject}'s C-PAC output to the new session numbers?\n{listing}\n\n"
+            "Its C-PAC working data is cleared too (Docker must be running).",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            docker = find_docker()
+        except DockerUnavailableError as e:
+            QMessageBox.warning(self, "Docker needed", f"Start Docker first: {e}")
+            return
+        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            renamed = rename_outputs(self.bids_folder, self.output_folder, subject, changes)
+            clear_working_volume(docker, CPAC_IMAGE, self.output_folder, subject)
+        except OSError as e:
+            QMessageBox.warning(self, "Not renamed", str(e))
+            return
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+        self._log_activity(
+            f"sub-{subject}: renamed {len(renamed)} output path(s) to the new session numbers"
+        )
+        self._refresh_roster()
 
     def _partial_group(self, tasks_to_do: list[str]) -> QGroupBox:
         """Which tasks an 'All tasks' run would still preprocess for this subject."""

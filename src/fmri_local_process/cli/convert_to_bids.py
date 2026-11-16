@@ -17,7 +17,6 @@ from fmri_local_process.processing.dcm2niix import (
 )
 from fmri_local_process.processing.deface import DefaceUnavailableError, make_deface
 from fmri_local_process.processing.philani_bids import (
-    PENDING_DIR,
     ConversionReport,
     convert_dicom_root,
     reset_bids_root,
@@ -51,7 +50,9 @@ def print_report(report: ConversionReport) -> None:
     table.add_column("Result")
     table.add_column("Count", justify="right")
     table.add_row("converted/updated", str(len(report.converted)))
-    table.add_row(f"[yellow]staged in {PENDING_DIR}/", f"[yellow]{len(report.pending)}")
+    table.add_row("[yellow]repeated runs to pick at crosscheck", f"[yellow]{len(report.to_pick)}")
+    table.add_row("[yellow]logs not placed in a session", f"[yellow]{len(report.unplaced)}")
+    table.add_row("[yellow]sessions renumbered", f"[yellow]{len(report.renumbered)}")
     table.add_row("[yellow]converted from incomplete data", f"[yellow]{len(report.flagged)}")
     table.add_row("skipped sessions (>1 GB)", str(len(report.skipped)))
     table.add_row("[yellow]missing behavioural logs", f"[yellow]{len(report.missing)}")
@@ -59,6 +60,10 @@ def print_report(report: ConversionReport) -> None:
     console.print(table)
     for what, why in report.flagged:
         console.print(f"[yellow]INCOMPLETE[/yellow] {what}: {why}")
+    for change in report.renumbered:
+        console.print(f"[yellow]RENUMBERED[/yellow] {change} (an earlier session was added)")
+    for log_key, why in report.unplaced:
+        console.print(f"[yellow]NOT PLACED[/yellow] {log_key}: {why}")
     for what in report.missing:
         console.print(f"[yellow]MISSING[/yellow] {what} log")
     for what, why in report.failures:
@@ -80,7 +85,8 @@ def print_report(report: ConversionReport) -> None:
 @click.option(
     "--reset",
     is_flag=True,
-    help=f"First delete sub-*, {PENDING_DIR}/ and the crosscheck JSON files in BIDS_ROOT.",
+    help="First delete sub-*, crosscheck_pending/ (older versions) and the crosscheck JSON "
+    "files in BIDS_ROOT.",
 )
 @click.option(
     "--behav-logs",
@@ -118,8 +124,11 @@ def main(
     """Convert DICOM_ROOT (one folder per scan session) into a BIDS dataset at BIDS_ROOT.
 
     Every session is written as sub-<id>/ses-<n>/, n = 1, 2, ... in calendar order of the
-    YYYYMMDD date in the session folder name. Repeated runs, ambiguous behavioural logs and
-    logs for subjects without a DICOM session are staged in BIDS_ROOT/crosscheck_pending/.
+    YYYYMMDD date in the session folder name (sub-<id>_sessions.tsv records which folder each
+    session came from; when an earlier session turns up, the later ones are renumbered).
+    A scan repeated in one session is converted as run-1, run-2, ...: keep one at crosscheck.
+    A log goes into the session its date matches (or the only one); logs that fit nowhere
+    are listed as NOT PLACED -- sort them out in the crosscheck's IDs & behaviour logs.
 
     With --behav-logs, every subject is expected to have a Reappraisal and a Matching log;
     a missing one is logged and listed as MISSING, and conversion carries on. events.tsv
@@ -164,8 +173,8 @@ def main(
     except ValueError as e:  # unusable --subject
         raise click.ClickException(str(e)) from e
     print_report(report)
-    if report.pending:
-        console.print(f"[yellow]Resolve {bids_root / PENDING_DIR} at crosscheck.")
+    if report.to_pick or report.unplaced:
+        console.print("[yellow]Pick runs / place logs in the crosscheck (fmri_crosscheck).")
     sys.exit(1 if report.failures else 0)
 
 

@@ -82,12 +82,12 @@ def test_subject_flag_converts_root_as_one_session(tmp_path: Path) -> None:
         "sub-PILOT01_ses-1_task-Checkerboard_bold",
         "sub-PILOT01_ses-1_task-Rest_bold",
     ]
-    assert not report.pending and not report.failures
+    assert not report.to_pick and not report.failures
     with pytest.raises(ValueError, match="no letters or digits"):
         pb.convert_dicom_root(dicoms, bids, fake, deface=None, subject_id="^_^")
 
 
-def test_copied_series_converted_once_real_repeats_still_staged(tmp_path: Path) -> None:
+def test_copied_series_converted_once_real_repeats_still_runs(tmp_path: Path) -> None:
     dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
     bids.mkdir()
     session = make_series(dicoms, "20240101_X_P001", "5_rest_AP", "7_Cog_reappraisal_task_AP")
@@ -104,7 +104,7 @@ def test_copied_series_converted_once_real_repeats_still_staged(tmp_path: Path) 
     report = pb.convert_dicom_root(dicoms, bids, fake, deface=None)
 
     assert report.converted == ["sub-P001_ses-1_task-Rest_bold"]
-    assert report.pending == [f"sub-P001_ses-1_task-Reappraisal_run-{n}_bold" for n in (1, 2)]
+    assert report.to_pick == [f"sub-P001_ses-1_task-Reappraisal_run-{n}_bold" for n in (1, 2)]
 
 
 @pytest.mark.parametrize(
@@ -137,28 +137,33 @@ def test_every_session_converted_in_date_order(tmp_path: Path) -> None:
     assert (ses1["SeriesDescription"], ses2["SeriesDescription"]) == ("5_rest_AP", "6_rest_AP")
     assert ses1["TaskName"] == "Rest"
     assert (bids / "dataset_description.json").exists()
-    assert (bids / ".bidsignore").read_text() == f"{pb.PENDING_DIR}/\n"
-    assert not report.pending and not report.failures
+    assert pb.read_sessions_tsv(bids, "P001") == [
+        {"session_id": "ses-1", "acq_time": "2023-12-15", "source_folder": "20231215_X_P001"},
+        {"session_id": "ses-2", "acq_time": "2024-03-01", "source_folder": "20240301_X_P001"},
+    ]
+    assert not report.to_pick and not report.failures
 
 
-def test_repeated_series_staged_for_crosscheck(tmp_path: Path) -> None:
+def test_repeated_series_converted_as_runs_in_the_session(tmp_path: Path) -> None:
     dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
     bids.mkdir()
     make_series(dicoms, "20240101_X_P001", "7_Cog_reappraisal_task_AP", "9_Cog_reappraisal_task_AP")
+    old_staging = bids / pb.PENDING_DIR / "sub-P001"  # left by an older version
+    old_staging.mkdir(parents=True)
 
     fake = FakeDcm2niix()
     report = pb.convert_dicom_root(dicoms, bids, fake, deface=None)
 
     stems = [f"sub-P001_ses-1_task-Reappraisal_run-{n}_bold" for n in (1, 2)]
     assert fake.calls == stems
-    assert report.pending == stems
-    pending = bids / pb.PENDING_DIR / "sub-P001" / "ses-1" / "func"
-    assert sorted(p.name for p in pending.glob("*.nii.gz")) == [f"{s}.nii.gz" for s in stems]
+    assert report.to_pick == stems
     final = bids / "sub-P001" / "ses-1" / "func"
-    assert not final.exists()
+    assert sorted(p.name for p in final.glob("*.nii.gz")) == [f"{s}.nii.gz" for s in stems]
+    assert not (bids / pb.PENDING_DIR).exists()
 
-    # Once crosscheck has put the chosen run in place, a re-run leaves it alone.
-    final.mkdir(parents=True)
+    # Once crosscheck has kept one run (run-less name), a re-run leaves it alone.
+    for stem in stems:
+        (final / f"{stem}.nii.gz").unlink()
     (final / "sub-P001_ses-1_task-Reappraisal_bold.nii.gz").write_bytes(b"chosen")
     fake.calls.clear()
     pb.convert_dicom_root(dicoms, bids, fake, deface=None)
@@ -235,7 +240,7 @@ def test_single_log_single_session_goes_into_func(tmp_path: Path, behav_root: Pa
     ],
     ids=["two-logs", "two-sessions"],
 )
-def test_ambiguous_logs_staged_for_crosscheck(
+def test_ambiguous_logs_not_converted_but_listed(
     tmp_path: Path, behav_root: Path, sessions: list[str], logs: list[str]
 ) -> None:
     dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
@@ -247,12 +252,9 @@ def test_ambiguous_logs_staged_for_crosscheck(
 
     report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None, behav_root)
 
-    pending = bids / pb.PENDING_DIR / "sub-P001" / "func"
-    staged = sorted(p.name for p in pending.glob("*_events.tsv"))
-    expected = [f"sub-P001_task-Matching_run-{n}_events.tsv" for n in range(1, len(logs) + 1)]
-    assert staged == expected
-    assert len(report.pending) == len(logs)
-    assert not list((bids / "sub-P001").rglob("*_events.tsv"))
+    assert sorted(key for key, _ in report.unplaced) == sorted(f"emolabeling/{n}" for n in logs)
+    assert "not matched to one of" in report.unplaced[0][1]
+    assert not list(bids.rglob("*_events.tsv"))
 
 
 def test_missing_log_is_reported_not_a_failure(tmp_path: Path, behav_root: Path) -> None:
@@ -268,7 +270,9 @@ def test_missing_log_is_reported_not_a_failure(tmp_path: Path, behav_root: Path)
     assert len(report.converted) == 2  # the scans still converted
 
 
-def test_log_without_dicom_session_is_staged(tmp_path: Path, behav_root: Path) -> None:
+def test_log_without_dicom_session_is_listed_not_converted(
+    tmp_path: Path, behav_root: Path
+) -> None:
     dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
     bids.mkdir()
     make_series(dicoms, "20240101_X_P001", "4_labeling_task_AP")
@@ -277,9 +281,10 @@ def test_log_without_dicom_session_is_staged(tmp_path: Path, behav_root: Path) -
 
     report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None, behav_root)
 
-    staged = bids / pb.PENDING_DIR / "sub-P009" / "func"
-    assert (staged / "sub-P009_task-Matching_run-1_events.tsv").exists()
-    assert "sub-P009_task-Matching_run-1_events" in report.pending
+    assert report.unplaced == [
+        ("emolabeling/P009-emolabeling.log", "no scan session with this subject ID")
+    ]
+    assert not (bids / "sub-P009").exists()
 
 
 def test_reset_removes_subjects_pending_and_crosscheck_files(tmp_path: Path) -> None:
@@ -327,7 +332,6 @@ def test_truncated_files_left_out_and_reported(tmp_path: Path) -> None:
     assert "1 of 3 DICOM files" in report.flagged[0][1]
     assert (series / "img0003.dcm").stat().st_size == 40  # raw data untouched
     assert sorted(p.name for p in bids.iterdir()) == [
-        ".bidsignore",
         "dataset_description.json",
         "sub-P001",
     ]  # nothing about it written into the BIDS folder
@@ -393,3 +397,94 @@ def test_find_dcm2niix_explicit_and_missing(
     )
     with pytest.raises(Dcm2niixNotFoundError):
         find_dcm2niix()
+
+
+def test_twin_folder_ids_times_and_corrections(tmp_path: Path) -> None:
+    session = pb.parse_session_folder(Path("20241014_1341_12345-1"))
+    assert session is not None
+    assert (session.subject_id, session.raw_id, session.time) == ("12345T1", "12345-1", "13:41")
+    corrected = pb.parse_session_folder(Path("20241014_1448_12345 2"), corrected_id="12345-2")
+    assert corrected is not None and corrected.subject_id == "12345T2"
+    assert pb.parse_session_folder(Path("20241014_1500_^^"), corrected_id="P9") is not None
+
+    pb.write_dicom_corrections(tmp_path, {"20241014_1448_12345 2": "12345-2", "x": " "})
+    assert pb.read_dicom_corrections(tmp_path) == {"20241014_1448_12345 2": "12345-2"}
+
+
+def test_converter_applies_dicom_id_corrections(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20241014_1341_12345-1", "5_rest_AP")
+    make_series(dicoms, "20241014_1448_12345 2", "5_rest_AP")  # typo: space for the dash
+    pb.write_dicom_corrections(bids, {"20241014_1448_12345 2": "12345-2"})
+
+    pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None)
+
+    assert sorted(p.name for p in bids.glob("sub-*")) == ["sub-12345T1", "sub-12345T2"]
+    infos = pb.scan_sessions(dicoms, pb.read_dicom_corrections(bids))
+    assert [(s.subject, s.raw_id, s.when, s.tasks) for s in infos] == [
+        ("12345T1", "12345-1", "2024-10-14 13:41", frozenset({"Rest"})),
+        ("12345T2", "12345 2", "2024-10-14 14:48", frozenset({"Rest"})),
+    ]
+
+
+def test_progress_reports_each_session_and_behaviour_step(tmp_path: Path, behav_root: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20240101_X_P001", "4_labeling_task_AP")
+    make_series(dicoms, "20240301_X_P001", "5_rest_AP")
+    calls: list[tuple[int, int, str]] = []
+
+    pb.convert_dicom_root(
+        dicoms, bids, FakeDcm2niix(), None, behav_root, progress=lambda *c: calls.append(c)
+    )
+
+    assert calls == [
+        (0, 4, "sub-P001_ses-1 from 20240101_X_P001"),
+        (1, 4, "sub-P001_ses-2 from 20240301_X_P001"),
+        (2, 4, "sub-P001: behavioural logs"),
+        (3, 4, "behavioural logs without a scan session"),
+        (4, 4, "done"),
+    ]
+
+
+def test_earlier_session_added_later_renumbers_the_converted_ones(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20240301_1000_P001", "6_rest_AP")
+    make_series(dicoms, "20240401_1000_P001", "7_rest_AP")
+    pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None)
+    (bids / "sub-P001" / "ses-1" / "func" / "note.txt").write_text("kept with its session")
+
+    make_series(dicoms, "20240101_0900_P001", "5_rest_AP")  # an earlier scan turns up
+    fake = FakeDcm2niix()
+    report = pb.convert_dicom_root(dicoms, bids, fake, None)
+
+    assert report.renumbered == ["sub-P001: ses-1 -> ses-2", "sub-P001: ses-2 -> ses-3"]
+    assert fake.calls == ["sub-P001_ses-1_task-Rest_bold"]  # only the new one is converted
+    func = bids / "sub-P001" / "ses-{0}" / "func" / "sub-P001_ses-{0}_task-Rest_bold.json"
+    described = [read_json(Path(str(func).format(n)))["SeriesDescription"] for n in (1, 2, 3)]
+    assert described == ["5_rest_AP", "6_rest_AP", "7_rest_AP"]
+    assert (bids / "sub-P001" / "ses-2" / "func" / "note.txt").exists()
+    assert [r["acq_time"] for r in pb.read_sessions_tsv(bids, "P001")] == [
+        "2024-01-01T09:00:00",
+        "2024-03-01T10:00:00",
+        "2024-04-01T10:00:00",
+    ]
+
+
+def test_single_log_goes_to_the_only_session_even_on_another_date(
+    tmp_path: Path, behav_root: Path
+) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20240101_X_P001", "4_labeling_task_AP")
+    (behav_root / "emolabeling" / "P001-emolabeling_scan-20240105-101500-AAAAA.log").write_text(
+        "match\n"
+    )
+
+    report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None, behav_root)
+
+    events = bids / "sub-P001" / "ses-1" / "func" / "sub-P001_ses-1_task-Matching_events.tsv"
+    assert read_json(events.with_suffix(".json"))["SourceLogDate"] == "2024-01-05"
+    assert report.unplaced == []

@@ -20,6 +20,7 @@ import csv
 import logging
 import math
 import os
+import re
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -130,6 +131,13 @@ def _last_duration(trial_types: list[str], onsets: list[float], events: list[Row
     return _to_float(quit_times[0]) - onsets[-1]
 
 
+def require_events(onsets: list[float]) -> None:
+    """A log that stopped before its first block has nothing to convert: a ValueError, so
+    callers report that log as failed and carry on (instead of an IndexError further on)."""
+    if not onsets:
+        raise ValueError("no block events in the log (stopped before the first block?)")
+
+
 def _block_fixation_rows(events: list[Row]) -> list[int]:
     """Indices of every block fixation and the event right after it (block start), sorted."""
     fixations = [i for i, r in enumerate(events) if r["block(str)"] == "block_fixation"]
@@ -173,6 +181,7 @@ def emolabeling_events(lines: Sequence[str]) -> EventTable:
         accuracy.get(int(r["block_num(str)"])) if r["block_num(str)"].strip() else None
         for r in kept
     ]
+    require_events(onsets)
     durations = _durations(onsets)
     durations[-1] = _last_duration(trial_types, onsets, events_joined)
     return _bids_table("sub_acc", onsets, durations, trial_types, list(sub_acc), first_pulse)
@@ -232,6 +241,7 @@ def cogreappraisal_events(lines: Sequence[str]) -> EventTable:
         "fixation" if t in ("block_fixation", "rating_fixation") else t for t in trial_types
     ]
 
+    require_events(onsets)
     durations = _durations(onsets)
     durations[-1] = _last_duration(trial_types, onsets, merged_rows)
     return _bids_table("rating", onsets, durations, trial_types, rating_values, first_pulse)
@@ -292,9 +302,50 @@ BEHAV_TASKS = (
 )
 
 
+TWIN_DASH = re.compile(r"(?<=\d)-(?=\d)")  # 12345-1: twin 1 of 12345
+# <ID>-<task>_scan-YYYYMMDD-HHMMSS-<unique id>.log, where the ID may itself hold a dash (twins)
+LOG_NAME = re.compile(r"^(?P<id>.+?)-[A-Za-z][^-]*_scan-\d{8}-\d{6}-")
+
+
+def canonical_id(raw: str) -> str:
+    """The subject ID as BIDS uses it, for DICOM folders and logs alike.
+
+    A dash between digits marks a twin and becomes 'T' (12345-1 -> 12345T1); then anything
+    that isn't a letter or digit is dropped (BIDS labels are alphanumeric), e.g. a stray
+    space. Dropped characters may hide a typo, so callers flag IDs that changed.
+    """
+    text = TWIN_DASH.sub("T", raw.strip())
+    return "".join(c for c in text if c.isascii() and c.isalnum())
+
+
+def id_problem(raw: str) -> str:
+    """Why an ID needs a look: characters dropped beyond the twin rule ('' if none)."""
+    if canonical_id(raw) != TWIN_DASH.sub("T", raw.strip()):
+        return f"characters removed from {raw!r}: typo?"
+    return ""
+
+
+def raw_log_id(log_file: Path) -> str:
+    """The subject ID as written in a log's name (twin dashes and typos included).
+
+    Philani names put the ID before -<task>_scan-; otherwise it's whatever precedes
+    -cogreappraisal / -emolabeling, else the part before the first '-'.
+    """
+    name = log_file.name
+    found = LOG_NAME.match(name)
+    if found:
+        return found["id"]
+    lower = name.lower()
+    for task in BEHAV_TASKS:
+        at = lower.find(f"-{task.log_subdir}")
+        if at > 0:
+            return name[:at]
+    return name.split("-")[0]
+
+
 def log_subject_id(log_file: Path) -> str:
-    """Logs are named <subject id>-<anything>.log."""
-    return log_file.name.split("-")[0]
+    """The canonical subject ID of a log (see canonical_id)."""
+    return canonical_id(raw_log_id(log_file))
 
 
 def task_for_log(log_file: Path, root: Path | None = None) -> BehavTask | None:

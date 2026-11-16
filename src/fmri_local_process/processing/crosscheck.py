@@ -1,8 +1,8 @@
 """Crosscheck of a converted Philani BIDS folder.
 
 Works on the BIDS folder only (never the raw DICOMs) and writes nothing into it except the
-human's own decisions: moving a staged file into place, or deleting one. Problems are found
-from the data itself:
+human's own decisions: keeping one of several runs, trimming, or deleting a file. Problems are
+found from the data itself:
 
 * missing: a NIfTI without its JSON sidecar, a task bold without its events.tsv, or a scan
   most other sessions have
@@ -11,10 +11,12 @@ from the data itself:
   events.tsv with no events
 * long: more volumes than its expected length (the scan was stopped by hand after the
   task); trim_run keeps the first volumes
-* pending: candidates the converter staged in crosscheck_pending/
+* pending: a scan converted as several runs (run-1, run-2, ...): keep one
+* check: an events.tsv made from a log dated other than its scan
 
-Expected lengths are set by the human per scan (e.g. task-Matching_bold: 441) and kept in
-the BIDS folder's code/expected_volumes.json, so they travel with the data.
+A scan's expected length is the (upper) median volume count of all its runs, unless the
+human set a number for it (e.g. task-Matching_bold: 441); those are kept in the BIDS
+folder's code/expected_volumes.json, so they travel with the data.
 """
 
 import csv
@@ -24,13 +26,13 @@ import logging
 import struct
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from statistics import median
+from statistics import median, median_high
 
 import nibabel as nib
 import numpy as np
 
 from fmri_local_process.processing.behav_logs import BEHAV_TASKS
-from fmri_local_process.processing.philani_bids import PENDING_DIR
+from fmri_local_process.processing.session_sync import read_sessions_tsv
 
 log = logging.getLogger(__name__)
 
@@ -48,10 +50,10 @@ class CrosscheckError(Exception):
 class DataFile:
     path: Path
     subject: str
-    session: str | None  # None for logs staged at subject level
+    session: str | None  # None only for a file outside ses-* (not made by the converter)
     datatype: str
     label: str  # name without sub-/ses-/run- and extension, e.g. "task-Rest_bold"
-    pending: bool
+    pending: bool  # one of several runs of a scan (run-<n> in its name): keep one
     size: int
     volumes: int | None = None  # NIfTI only; 1 for a 3D image
     repetition_time: float | None = None  # bold only, seconds, from the sidecar
@@ -80,7 +82,7 @@ class DataFile:
 
 @dataclass(frozen=True)
 class Issue:
-    kind: str  # "missing" / "short" / "long" / "pending"
+    kind: str  # "missing" / "short" / "long" / "pending" / "check"
     text: str
     path: Path | None = None
     trim_to: int | None = None  # "long" only: the expected volumes
@@ -89,10 +91,17 @@ class Issue:
 @dataclass
 class SessionReview:
     subject: str
-    session: str | None  # None: the subject's staged logs that belong to no session yet
+    session: str | None
     files: list[DataFile] = field(default_factory=list)
-    pending: list[DataFile] = field(default_factory=list)
+    pending: list[DataFile] = field(default_factory=list)  # runs to choose from
     issues: list[Issue] = field(default_factory=list)
+    acq_time: str = ""  # scan date/time from sub-<id>_sessions.tsv, e.g. 2024-10-14T13:41:00
+    source_folder: str = ""  # DICOM session folder it was converted from
+
+    @property
+    def date(self) -> str:
+        """'2024-10-14 13:41' (or just the date); '' if unknown."""
+        return self.acq_time.replace("T", " ")[:16]
 
     @property
     def name(self) -> str:
@@ -120,6 +129,20 @@ def repetition_time(sidecar: Path) -> float | None:
         return None
 
 
+def bold_run_length(
+    bids_root: Path, subject: str, session: str, task: str
+) -> tuple[int, float | None] | None:
+    """(volumes, TR) of a session's converted task bold, or None if it isn't in BIDS yet."""
+    stem = f"sub-{subject}_ses-{session}_task-{task}_bold"
+    nifti = bids_root / f"sub-{subject}" / f"ses-{session}" / "func" / f"{stem}.nii.gz"
+    if not nifti.is_file():
+        return None
+    volumes = nifti_volumes(nifti)
+    if volumes is None:
+        return None
+    return volumes, repetition_time(nifti.with_name(f"{stem}.json"))
+
+
 def count_events(tsv: Path) -> int | None:
     try:
         with tsv.open(newline="", encoding="utf-8") as f:
@@ -134,7 +157,7 @@ def label_of(name: str) -> str:
     return "_".join(p for p in stem.split("_") if not p.startswith(("sub-", "ses-", "run-")))
 
 
-def read_data_file(path: Path, subject_dir: Path, pending: bool) -> DataFile:
+def read_data_file(path: Path, subject_dir: Path) -> DataFile:
     parts = path.relative_to(subject_dir).parts
     session = parts[0].removeprefix("ses-") if parts[0].startswith("ses-") else None
     data = DataFile(
@@ -143,7 +166,7 @@ def read_data_file(path: Path, subject_dir: Path, pending: bool) -> DataFile:
         session=session,
         datatype=path.parent.name,
         label=label_of(path.name),
-        pending=pending,
+        pending="_run-" in path.name,
         size=path.stat().st_size,
     )
     if path.name.endswith(".nii.gz"):
@@ -155,19 +178,16 @@ def read_data_file(path: Path, subject_dir: Path, pending: bool) -> DataFile:
 
 def find_data_files(bids_root: Path) -> list[DataFile]:
     found = []
-    for top, pending in ((bids_root, False), (bids_root / PENDING_DIR, True)):
-        for subject_dir in sorted(top.glob("sub-*")):
-            if not subject_dir.is_dir():
-                continue
-            for pattern in DATA_PATTERNS:
-                found += [
-                    read_data_file(p, subject_dir, pending) for p in subject_dir.rglob(pattern)
-                ]
+    for subject_dir in sorted(bids_root.glob("sub-*")):
+        if not subject_dir.is_dir():
+            continue
+        for pattern in DATA_PATTERNS:
+            found += [read_data_file(p, subject_dir) for p in subject_dir.rglob(pattern)]
     return sorted(found, key=lambda d: d.path.as_posix())
 
 
 def sidecar_note(data: DataFile) -> str:
-    """The sidecar fields that tell staged candidates apart."""
+    """The sidecar fields that tell runs (or an events file's log) apart."""
     try:
         sidecar = json.loads(data.sidecar.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -192,20 +212,48 @@ def write_expected(bids_root: Path, expected: dict[str, int]) -> None:
     path.write_text(json.dumps(kept, indent=2) + "\n", encoding="utf-8")
 
 
-def length_issue(data: DataFile, expected: int) -> Issue | None:
-    """Compare a 4D scan with the length the human set for it."""
+def median_volumes(data_files: list[DataFile]) -> dict[str, int]:
+    """Per 4D scan label, the upper median volume count of its runs in the main tree.
+
+    The upper median is a length some run actually has, and with two runs (one cut short)
+    it's the longer one, so a full-length run is never offered a trim down to a short one.
+    """
+    runs: dict[str, list[int]] = {}
+    for data in data_files:
+        if not data.pending and data.volumes is not None and data.volumes > 1:
+            runs.setdefault(data.label, []).append(data.volumes)
+    return {label: median_high(counts) for label, counts in runs.items() if len(counts) > 1}
+
+
+def expected_lengths(bids_root: Path, data_files: list[DataFile]) -> dict[str, tuple[int, str]]:
+    """Expected volumes per label: the human's saved number, else the median of the runs.
+
+    Values are (volumes, where it came from): "expected" (saved) or "median of runs".
+    """
+    lengths = {label: (n, "median of runs") for label, n in median_volumes(data_files).items()}
+    lengths |= {label: (n, "expected") for label, n in read_expected(bids_root).items()}
+    return lengths
+
+
+def length_issue(data: DataFile, expected: int, source: str = "expected") -> Issue | None:
+    """Compare a 4D scan with its expected length (saved, or the median of its runs)."""
     assert data.volumes is not None
     if data.volumes < expected:
-        text = f"{data.path.name}: {data.volumes} volumes, expected {expected}"
+        text = f"{data.path.name}: {data.volumes} volumes, {source} {expected}"
         return Issue("short", text, data.path)
     if data.volumes > expected:
-        text = f"{data.path.name}: {data.volumes} volumes, expected {expected} (trim the rest)"
+        text = f"{data.path.name}: {data.volumes} volumes, {source} {expected} (trim the rest)"
         return Issue("long", text, data.path, trim_to=expected)
     return None
 
 
-def short_issue(data: DataFile, peers: list[DataFile], expected: int | None = None) -> Issue | None:
-    """Compare data with its expected length if set, else with the same scan elsewhere
+def short_issue(
+    data: DataFile,
+    peers: list[DataFile],
+    expected: int | None = None,
+    source: str = "expected",
+) -> Issue | None:
+    """Compare data with its expected length if known, else with the same scan elsewhere
     (needs at least one other copy)."""
     if data.events is not None:
         return (
@@ -214,7 +262,7 @@ def short_issue(data: DataFile, peers: list[DataFile], expected: int | None = No
     if data.volumes is None:
         return Issue("short", f"{data.path.name}: NIfTI header unreadable", data.path)
     if expected and data.volumes > 1:
-        return length_issue(data, expected)
+        return length_issue(data, expected, source)
     others = [p for p in peers if p.path != data.path and p.volumes is not None]
     if not others:
         return None
@@ -238,10 +286,28 @@ def short_issue(data: DataFile, peers: list[DataFile], expected: int | None = No
     return None
 
 
+def log_date_issue(data: DataFile, review: SessionReview) -> Issue | None:
+    """An events.tsv from a log dated other than its session's scan (it was the only log and
+    the only session, so it went there anyway): worth a look."""
+    try:
+        sidecar = json.loads(data.sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    log_date, scan_date = str(sidecar.get("SourceLogDate", "")), review.acq_time[:10]
+    if not log_date or not scan_date or log_date == scan_date:
+        return None
+    return Issue(
+        "check",
+        f"{data.path.name}: from a log dated {log_date}, scanned {scan_date} "
+        f"({sidecar.get('SourceLog', '?')})",
+        data.path,
+    )
+
+
 def review_bids_folder(bids_root: Path) -> list[SessionReview]:
-    """Every session (plus subject-level staged logs) with the problems found in it."""
+    """Every session with its scan date (sessions.tsv) and the problems found in it."""
     data_files = find_data_files(bids_root)
-    expected = read_expected(bids_root)
+    expected = expected_lengths(bids_root, data_files)
     reviews: dict[tuple[str, str | None], SessionReview] = {}
     for session_dir in sorted(bids_root.glob("sub-*/ses-*")):  # listed even when empty
         if session_dir.is_dir():
@@ -250,6 +316,12 @@ def review_bids_folder(bids_root: Path) -> list[SessionReview]:
                 session_dir.name.removeprefix("ses-"),
             )
             reviews[key] = SessionReview(*key)
+    for subject in {subject for subject, _ in reviews}:
+        for row in read_sessions_tsv(bids_root, subject):
+            review = reviews.get((subject, row.get("session_id", "").removeprefix("ses-")))
+            if review is not None:
+                review.acq_time = row.get("acq_time", "")
+                review.source_folder = row.get("source_folder", "")
     for data in data_files:
         review = reviews.setdefault(
             (data.subject, data.session), SessionReview(data.subject, data.session)
@@ -263,35 +335,34 @@ def review_bids_folder(bids_root: Path) -> list[SessionReview]:
     sessions = [r for r in reviews.values() if r.session is not None]
     scan_counts: dict[str, int] = {}
     for review in sessions:
-        for label in {d.label for d in review.files if d.events is None}:
+        for label in {d.label for d in review.files + review.pending if d.events is None}:
             scan_counts[label] = scan_counts.get(label, 0) + 1
 
     for review in reviews.values():
-        labels = {d.label for d in review.files}
-        staged_labels = {
-            d.label for r in reviews.values() if r.subject == review.subject for d in r.pending
-        }
+        labels = {d.label for d in review.files + review.pending}
         for data in review.files + review.pending:
             if data.volumes is not None and not data.sidecar.exists():
                 review.issues.append(Issue("missing", f"{data.sidecar.name} (sidecar)", data.path))
-            issue = short_issue(data, by_label[data.label], expected.get(data.label))
+            length, source = expected.get(data.label, (None, ""))
+            issue = short_issue(data, by_label[data.label], length, source)
             if issue:
                 review.issues.append(issue)
-        if review.session is None:
-            review.issues += [
-                Issue("pending", f"{d.path.name}: assign to a session") for d in review.pending
-            ]
-            continue
+            if data.events is not None and (issue := log_date_issue(data, review)):
+                review.issues.append(issue)
         for label in sorted({d.label for d in review.pending}):
-            review.issues.append(Issue("pending", f"{label}: pick one of the staged runs"))
+            runs = sum(d.label == label for d in review.pending)
+            review.issues.append(Issue("pending", f"{label}: {runs} runs, keep one"))
         for task in BEHAV_TASKS:
             events = f"task-{task.task}_events"
             if f"task-{task.task}_bold" in labels and events not in labels:
-                where = " (staged, assign below)" if events in staged_labels else ""
-                review.issues.append(Issue("missing", f"{events}.tsv{where}"))
+                review.issues.append(
+                    Issue(
+                        "missing",
+                        f"{events}.tsv: no log placed here (see IDs & behaviour logs)",
+                    )
+                )
         for label, count in sorted(scan_counts.items()):
-            staged = label in {d.label for d in review.pending}
-            if count * 2 > len(sessions) and label not in labels and not staged:
+            if count * 2 > len(sessions) and label not in labels:
                 review.issues.append(
                     Issue("missing", f"{label} ({count} of {len(sessions)} sessions have it)")
                 )
@@ -317,7 +388,7 @@ def remove_empty_dirs(folder: Path, stop: Path) -> None:
 
 
 def move_into_session(bids_root: Path, data: DataFile, session: str) -> Path:
-    """Move a staged file (and its sidecar) to its run-less name in the session."""
+    """Move a file (and its sidecar), e.g. the kept run, to its run-less name in the session."""
     target = final_path(bids_root, data, session)
     if target.exists():
         raise CrosscheckError(f"{target.name} already exists")
@@ -341,7 +412,7 @@ def delete_data_file(bids_root: Path, data: DataFile) -> None:
 
 
 def keep_run(bids_root: Path, chosen: DataFile, candidates: list[DataFile]) -> Path:
-    """Keep chosen among one scan's staged runs; delete the others."""
+    """Keep chosen among one scan's runs in a session (run-less name); delete the others."""
     if chosen.session is None:
         raise CrosscheckError(f"{chosen.path.name} has no session")
     target = move_into_session(bids_root, chosen, chosen.session)
@@ -396,11 +467,3 @@ def trim_run(data: DataFile, volumes: int) -> None:
     sidecar.setdefault("TrimmedFromVolumes", original)
     data.sidecar.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
     log.info("Trimmed %s: %d -> %d volumes", data.path.name, original, volumes)
-
-
-def subject_sessions(bids_root: Path, subject: str) -> list[str]:
-    return sorted(
-        d.name.removeprefix("ses-")
-        for d in (bids_root / f"sub-{subject}").glob("ses-*")
-        if d.is_dir()
-    )

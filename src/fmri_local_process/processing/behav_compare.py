@@ -1,6 +1,7 @@
 """TEMPORARY: check the Python behavioural port against the original Rmds.
 
-Renders philani_scripts' *_regressors.Rmd with Rscript on the same log and compares the
+Runs the R code of philani_scripts' *_regressors.Rmd with Rscript (no rmarkdown/pandoc
+needed) on the same log and compares the
 "_withrating" CSV it writes with the Python EventTable. Remove once parity is confirmed.
 
 The R output is converted to the Python conventions before comparing: times / 10 000
@@ -10,6 +11,7 @@ measures onsets from the first scanner pulse and R from the first event.
 
 import csv
 import math
+import re
 import subprocess
 from pathlib import Path
 
@@ -32,21 +34,38 @@ def _r_string(value: Path | str) -> str:
     return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
+def rmd_r_code(rmd_text: str) -> str:
+    """The R code of every ```{r ...} chunk in an Rmd, in order.
+
+    Running the code directly (instead of rmarkdown::render) means no rmarkdown/pandoc is
+    needed -- only R and the packages the chunks load.
+    """
+    chunks = re.findall(r"^```\{r[^}]*\}[^\n]*\n(.*?)^```", rmd_text, flags=re.M | re.S)
+    if not chunks:
+        raise ValueError("no ```{r} chunks in the Rmd")
+    return "\n".join(chunks)
+
+
 def render_r_events(
     rscript: Path, rmd_dir: Path, task: BehavTask, log_file: Path, subject_id: str, work_dir: Path
 ) -> Path:
-    """Run the task's Rmd on log_file; returns the CSV it wrote (all output stays in work_dir)."""
+    """Run the task's Rmd code on log_file; returns the CSV it wrote (output stays in work_dir)."""
     rmd = rmd_dir / RMD_FILES[task.task]
     if not rmd.is_file():
         raise FileNotFoundError(f"{rmd} not found")
-    expr = (
-        f"rmarkdown::render({_r_string(rmd)}, quiet = TRUE, "
-        f"output_dir = {_r_string(work_dir)}, intermediates_dir = {_r_string(work_dir)}, "
-        f"knit_root_dir = {_r_string(work_dir)}, params = list("
-        f"logfile = {_r_string(log_file.resolve())}, participant_id = {_r_string(subject_id)}, "
-        f"output_dir = {_r_string(work_dir)}))"
+    params = (
+        f"params <- list(logfile = {_r_string(log_file.resolve())}, "
+        f"participant_id = {_r_string(subject_id)}, output_dir = {_r_string(work_dir)})\n"
     )
-    subprocess.run([str(rscript), "-e", expr], check=True, capture_output=True, text=True)
+    script = work_dir / f"{rmd.stem}.R"
+    script.write_text(params + rmd_r_code(rmd.read_text(encoding="utf-8")), encoding="utf-8")
+    subprocess.run(
+        [str(rscript), "--vanilla", str(script)],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=work_dir,
+    )
     csv_path = work_dir / f"sub-{subject_id}_task-{task.task}_events_withrating.csv"
     if not csv_path.is_file():
         raise FileNotFoundError(f"Rscript finished but wrote no {csv_path.name}")

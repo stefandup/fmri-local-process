@@ -20,6 +20,8 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from fmri_local_process.processing.session_sync import record_sessions, session_changes
+
 log = logging.getLogger(__name__)
 
 CPAC_IMAGE = "fcpindi/c-pac:release-v1.8.7"
@@ -311,8 +313,13 @@ def is_subject_done(bids_root: Path, output_root: Path, subject: str, tasks: Tas
     Checked task by task because several tasks must not count a subject as done when only
     some were run (e.g. an earlier task-Matching-only run): any one task's preprocessed
     BOLD would otherwise satisfy every session.
+
+    Never done when the BIDS sessions were renumbered since the output was made: its
+    session labels no longer match (see session_sync).
     """
     labels = subject_tasks_in(bids_root, subject, tasks)
+    if session_changes(bids_root, output_root, subject):
+        return False
     return bool(labels) and all(
         is_preprocessed(output_root, subject, bold_sessions(bids_root, subject, label), label)
         for label in labels
@@ -1014,6 +1021,14 @@ def preprocess_subject(
     say = tell or log.info
     sessions = bold_sessions(bids_root, subject, task)
     console_log = subject_console_log(output_root, subject)
+    if changes := session_changes(bids_root, output_root, subject):
+        say(
+            f"sub-{subject}: BIDS sessions renumbered since it was last preprocessed "
+            f"({'; '.join(map(str, changes))}): clearing its old results and working data"
+        )
+        clear_subject_results(output_root, subject)
+        clear_working_volume(docker, image, output_root, subject)
+    record_sessions(bids_root, output_root, subject)  # what this run's output is made from
     problem = migrate_working(docker, image, output_root, subject, say)
     if problem is not None:
         return problem
