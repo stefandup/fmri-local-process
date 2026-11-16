@@ -18,6 +18,7 @@ from fmri_local_process.processing.dcm2niix import (
 from fmri_local_process.processing.deface import DefaceUnavailableError, make_deface
 from fmri_local_process.processing.philani_bids import (
     ConversionReport,
+    NotEnoughSpaceError,
     convert_dicom_root,
     reset_bids_root,
 )
@@ -55,13 +56,16 @@ def print_report(report: ConversionReport) -> None:
     table.add_row("[yellow]sessions renumbered", f"[yellow]{len(report.renumbered)}")
     table.add_row("[yellow]converted from incomplete data", f"[yellow]{len(report.flagged)}")
     table.add_row("skipped sessions (>1 GB)", str(len(report.skipped)))
+    table.add_row("sessions left out (deleted at crosscheck)", str(len(report.excluded)))
     table.add_row("[yellow]missing behavioural logs", f"[yellow]{len(report.missing)}")
     table.add_row("[red]failed", f"[red]{len(report.failures)}")
     console.print(table)
     for what, why in report.flagged:
         console.print(f"[yellow]INCOMPLETE[/yellow] {what}: {why}")
     for change in report.renumbered:
-        console.print(f"[yellow]RENUMBERED[/yellow] {change} (an earlier session was added)")
+        console.print(f"[yellow]RENUMBERED[/yellow] {change} (a session was added or deleted)")
+    for folder in report.excluded:
+        console.print(f"LEFT OUT {folder} (deleted at crosscheck: code/excluded_sessions.json)")
     for log_key, why in report.unplaced:
         console.print(f"[yellow]NOT PLACED[/yellow] {log_key}: {why}")
     for what in report.missing:
@@ -170,7 +174,7 @@ def main(
         report = convert_dicom_root(
             dicom_root, bids_root, partial(run_dcm2niix, exe), deface, behav_root, subject_id
         )
-    except ValueError as e:  # unusable --subject
+    except (ValueError, NotEnoughSpaceError) as e:  # unusable --subject, or the disk is full
         raise click.ClickException(str(e)) from e
     print_report(report)
     if report.to_pick or report.unplaced:

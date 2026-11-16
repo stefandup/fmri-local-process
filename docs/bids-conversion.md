@@ -112,6 +112,16 @@ If a different log is chosen later, its events replace the old ones on the next 
 Older versions staged these in `crosscheck_pending/`; that folder is removed on the next
 conversion (everything in it is made from the raw data).
 
+### Safe writing and disk space
+
+Each scan is converted, and a T1w defaced, in a temporary `.converting/` folder inside the
+BIDS folder. It moves into its session only once that has all worked, and the temporary
+folder is then removed. If a conversion stops halfway (a crash, a power cut, a full disk), the
+session never holds a half-written scan or a T1w that wasn't defaced: the next conversion does
+that scan again. Before each session the converter checks that the BIDS drive has room for
+that session's DICOM folder plus 1 GB. If not, it stops with a message; the sessions already
+converted are kept.
+
 ### Incomplete DICOM series
 
 dcm2niix refuses a whole series if a single file is cut short, which happens when a copy
@@ -135,15 +145,49 @@ folder. The only changes it makes there are the ones you click.
 | ✂ | Long: more volumes than the expected length (the scan ran on after the task): trim it |
 | ○ | Missing: a NIfTI without its sidecar, a task bold without its `events.tsv`, or a scan most other sessions have |
 | ⚑ | Events from a log dated other than the scan: check it's the right log |
+| ⊕ | The subject has more sessions than **Sessions per subject**: is one a dud visit? |
 
 The session list shows each session's **ID**, **Date** (scan date and time, from
-`sessions.tsv`; hover it for the DICOM folder), **Session**, number of files, and problems.
+`sessions.tsv`; hover it for the DICOM folder), **Session**, number of files, problems and
+your **Note**.
+
+**Sessions per subject** (beside the buttons, default 1) is how many sessions this study
+expects; set it to 2 for a two-visit study. It is saved in `code/crosscheck_settings.json`.
+A subject with more sessions gets ⊕ on each of them, with all its sessions and dates listed,
+so a dud visit, or one visit split over two days, stands out.
+
+**Ticking sessions.** Tick the box beside an ID to act on several sessions at once; the
+**Ticked sessions** bar above the detail pane then offers:
+
+- **Note...**: give them all the same note (empty clears it).
+- **Delete N session(s)...**: delete the session folders, after asking you to confirm.
+
+**Select none** clears the ticks. A single session has the same **Note** box and
+**Delete session...** button at the top of its detail pane.
+
+**Deleting a session** removes its `ses-<n>` folder and lists its DICOM folder in
+`code/excluded_sessions.json`, so later conversions leave it out instead of bringing it back.
+Click **Convert / update BIDS** afterwards: the subject's remaining sessions are renumbered
+in date order, and the summary lists the folder as **LEFT OUT**. To convert it again, remove
+its line from `code/excluded_sessions.json`.
+
+Notes are saved in `code/session_notes.json` against the DICOM folder, so they stay with the
+right session when sessions are renumbered. **Export CSV...** writes every session with its
+date, DICOM folder, note and problems (one row per problem, `ok` if none) for QC meetings or
+handing over.
+
+**Action log.** Every change made here is added to `code/crosscheck_actions.tsv` in the BIDS
+folder, with the time and the computer login: runs kept, files and sessions deleted,
+trims, notes, ID and log corrections, expected lengths and sessions, and sessions the
+converter renumbered.
 
 Every file also shows its volume count and duration.
 
 **Scan lengths & trimming.** A BOLD scan's expected length is the median volume count
 of all its runs. (It's the upper median, so it is always a length some run has, and with
-only two runs it's the longer one.) **Scan lengths & trimming...** lists each BOLD scan with
+only two runs it's the longer one.) A scan with a single run in the whole folder (e.g. one
+pilot) is compared with the study's usual length instead, shown as "study default": Matching
+495, Reappraisal 500, Rest 495 and Peer 140 volumes. **Scan lengths & trimming...** lists each BOLD scan with
 its runs, the volume counts found, the expected length (shown as "median (N)"), the minutes
 that makes, and how many runs are too long. Type
 another number to set it; it is remembered in `code/expected_volumes.json` in the BIDS
@@ -153,8 +197,8 @@ run(s)...** in the same window saves the lengths and trims them all, after askin
 confirm. Trimming keeps the first N volumes, records the original count in the sidecar
 (`TrimmedFromVolumes`), and refuses if the run's events would be cut off. The raw DICOMs
 keep every volume: delete the file and convert again to undo. Trimming happens here, at
-crosscheck, never during preprocessing. A scan with no other session to compare
-against (e.g. a single pilot) can't be marked short automatically, so check those numbers by
+crosscheck, never during preprocessing. A single-run scan without a study default (e.g.
+Checkerboard, or the T1w) can't be marked short automatically, so check those numbers by
 eye. **Convert / update BIDS** runs the converter from the window, with a progress bar (one step per session, plus one per subject for its behavioural logs) and the step it is on. Deleted files are recreated
 from the raw data.
 

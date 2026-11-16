@@ -1,9 +1,11 @@
 """Tests for the Philani DICOM -> BIDS port, using fake dcm2niix/deface (no real data)."""
 
 import json
+import shutil
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -193,9 +195,80 @@ def test_failed_deface_is_reported_and_not_noted(tmp_path: Path) -> None:
     report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), FakeDeface(fail=True))
 
     assert [what for what, _ in report.failures] == ["sub-P001_ses-1_T1w"]
-    t1w_json = bids / "sub-P001" / "ses-1" / "anat" / "sub-P001_ses-1_T1w.json"
-    assert "Notes" not in read_json(t1w_json)
+    # Converted in .converting/ and never moved in: no un-defaced face in the BIDS folder.
+    anat = bids / "sub-P001" / "ses-1" / "anat"
+    assert not anat.exists() or not list(anat.iterdir())
+    assert not (bids / pb.CONVERTING_DIR).exists()
     assert "sub-P001_ses-1_task-Rest_bold" in report.converted  # one failure doesn't stop the rest
+
+    deface = FakeDeface()
+    pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), deface)  # the next run does it
+    assert len(deface.calls) == 1
+    assert "Notes" in read_json(anat / "sub-P001_ses-1_T1w.json")
+
+
+def test_failed_conversion_leaves_no_half_written_scan(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20240101_X_P001", "5_rest_AP")
+
+    def crashes_after_writing(dicom_dir: Path, out_dir: Path, stem: str) -> None:
+        (out_dir / f"{stem}.nii.gz").write_bytes(b"half")
+        raise OSError("killed mid-write")
+
+    report = pb.convert_dicom_root(dicoms, bids, crashes_after_writing, None)
+
+    assert [what for what, _ in report.failures] == ["sub-P001_ses-1_task-Rest_bold"]
+    assert not list(bids.glob("sub-P001/ses-1/func/*"))
+    assert not (bids / pb.CONVERTING_DIR).exists()
+
+
+def test_leftover_staging_from_a_killed_run_is_removed(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    make_series(dicoms, "20240101_X_P001", "5_rest_AP")
+    leftover = bids / pb.CONVERTING_DIR / "sub-P001_ses-1_task-Rest_bold_x"
+    leftover.mkdir(parents=True)
+    (leftover / "sub-P001_ses-1_task-Rest_bold.nii.gz").write_bytes(b"half")
+
+    pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None)
+
+    assert not (bids / pb.CONVERTING_DIR).exists()
+    assert (bids / "sub-P001" / "ses-1" / "func" / "sub-P001_ses-1_task-Rest_bold.nii.gz").exists()
+
+
+def test_not_enough_disk_space_stops_before_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20240101_X_P001", "5_rest_AP")
+    monkeypatch.setattr(pb.shutil, "disk_usage", lambda _: SimpleNamespace(free=1))
+
+    fake = FakeDcm2niix()
+    with pytest.raises(pb.NotEnoughSpaceError, match="needs about 1.0 GB"):
+        pb.convert_dicom_root(dicoms, bids, fake, None)
+    assert fake.calls == []
+
+
+def test_excluded_session_is_left_out_and_the_rest_renumbered(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20240101_X_P001", "5_rest_AP")
+    make_series(dicoms, "20240102_X_P001", "5_rest_AP")
+    pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None)
+    assert (bids / "sub-P001" / "ses-2").is_dir()
+
+    pb.exclude_session(bids, "20240101_X_P001", "dud")
+    shutil.rmtree(bids / "sub-P001" / "ses-1")  # as the crosscheck does
+    report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None)
+
+    assert report.excluded == ["20240101_X_P001"]
+    assert report.renumbered == ["sub-P001: ses-2 -> ses-1"]
+    assert sorted(p.name for p in (bids / "sub-P001").glob("ses-*")) == ["ses-1"]
+    sessions = (bids / "sub-P001" / "sub-P001_sessions.tsv").read_text()
+    assert "20240102_X_P001" in sessions and "20240101_X_P001" not in sessions
+    infos = pb.scan_sessions(dicoms, excluded=pb.read_excluded_sessions(bids))
+    assert [(i.folder, i.label) for i in infos] == [("20240102_X_P001", "1")]
 
 
 def fake_extract(lines: Sequence[str]) -> EventTable:

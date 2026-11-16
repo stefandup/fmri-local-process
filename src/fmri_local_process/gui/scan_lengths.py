@@ -1,9 +1,10 @@
 """Scan lengths & trimming: how many volumes each BOLD scan should have, and trimming the
 runs that are longer (scans stopped by hand after the task).
 
-The expected length is by default the (upper) median of all a scan's runs; the human can set
-another number, which is saved in the BIDS folder (code/expected_volumes.json) so it travels
-with the data. The crosscheck flags runs shorter than that as short.
+The expected length is by default the (upper) median of all a scan's runs (with a single
+run, the study's usual length); the human can set another number, which is saved in the BIDS
+folder (code/expected_volumes.json) so it travels with the data. The crosscheck flags runs
+shorter than that as short.
 """
 
 from collections import Counter
@@ -26,7 +27,7 @@ from PySide6.QtWidgets import (
 from fmri_local_process.processing.crosscheck import (
     EXPECTED_FILE,
     DataFile,
-    median_volumes,
+    automatic_lengths,
     read_expected,
     write_expected,
 )
@@ -66,13 +67,14 @@ class ScanLengthsDialog(QDialog):
         self.resize(1000, 480)
         self.bids_root = bids_root
         self.scans = scan_lengths(data_files)
-        self.medians = median_volumes(data_files)
+        self.automatic = automatic_lengths(data_files)  # median of runs, else study default
         self.trim_requested = False
         expected = read_expected(bids_root)
 
         layout = QVBoxLayout(self)
         intro = QLabel(
-            "How many volumes each scan should have. By default the median of its runs; type "
+            "How many volumes each scan should have. By default the median of its runs (with "
+            "a single run, the study's usual length); type "
             "another number to set it (remembered), or step down to the bottom to go back to "
             "the median. Runs with fewer volumes are flagged as short. Runs with more can be "
             "trimmed to this length, keeping the first volumes: the cut volumes are deleted "
@@ -94,8 +96,12 @@ class ScanLengthsDialog(QDialog):
                 self.table.setItem(row, column, QTableWidgetItem(text))
             spin = QSpinBox()
             spin.setRange(0, MAX_VOLUMES)
-            median = self.medians.get(label)
-            spin.setSpecialValueText(f"median ({median})" if median else "not set")
+            if label in self.automatic:
+                volumes, source = self.automatic[label]
+                kind = "median" if source == "median of runs" else source
+                spin.setSpecialValueText(f"{kind} ({volumes})")
+            else:
+                spin.setSpecialValueText("not set")
             spin.setValue(expected.get(label, 0))
             spin.valueChanged.connect(lambda _=0, r=row, lab=label: self.update_row(r, lab))
             self.table.setCellWidget(row, self.EXPECTED, spin)
@@ -124,8 +130,9 @@ class ScanLengthsDialog(QDialog):
         self.update_trim_button()
 
     def expected_for(self, label: str) -> int | None:
-        """The number typed for a scan, else its median (None if neither)."""
-        return self.spins[label].value() or self.medians.get(label)
+        """The number typed for a scan, else its median or study default (None if neither)."""
+        automatic = self.automatic.get(label)
+        return self.spins[label].value() or (automatic[0] if automatic else None)
 
     def too_long(self, label: str) -> list[DataFile]:
         expected = self.expected_for(label)

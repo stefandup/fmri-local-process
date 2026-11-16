@@ -23,6 +23,16 @@ code/dicom_id_corrections.json) are applied first; the raw files are never renam
 A series with truncated DICOM files (an incomplete copy) is converted from its intact files
 and listed in the report; nothing is written about it into the BIDS folder; the crosscheck
 GUI spots the short scan itself. Delete that output and re-run once the raw data is complete.
+
+Each series is converted (and its T1w defaced) in a temporary folder, ``.converting/`` in the
+BIDS folder, and only moved into its session once that has all worked; the temporary folder
+is then removed. A conversion that stops halfway (crash, power cut, a full disk) never leaves
+a half-written scan, or an un-defaced T1w, in the session. Before each session the free disk
+space is checked against the size of its DICOM folder.
+
+A DICOM session deleted at crosscheck (a dud visit) is listed in
+code/excluded_sessions.json and left out from then on, so the next conversion doesn't bring
+it back; the remaining sessions are renumbered.
 """
 
 import csv
@@ -31,13 +41,14 @@ import logging
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
 
+from fmri_local_process.processing.action_log import record_action
 from fmri_local_process.processing.behav_logs import (
     BEHAV_TASKS,
     BehavTask,
@@ -71,6 +82,9 @@ SKIP_SESSION_ABOVE_BYTES = 1024**3  # an existing ses-* folder over 1 GB counts 
 IGNORED_FOLDERS = {"trash"}
 PENDING_DIR = "crosscheck_pending"
 DICOM_CORRECTIONS_FILE = Path("code") / "dicom_id_corrections.json"
+EXCLUDED_SESSIONS_FILE = Path("code") / "excluded_sessions.json"
+CONVERTING_DIR = ".converting"  # in the BIDS folder: series being converted right now
+SPACE_MARGIN_BYTES = 1024**3  # free space to keep on top of a session's DICOM size
 SESSIONS_COLUMNS = ("session_id", "acq_time", "source_folder")
 RESET_FILES = ("crosscheck.json", "selected_runs.json")
 TRUNCATED_MESSAGE = "File not large enough"  # dcm2niix's complaint about a cut-off file
@@ -148,7 +162,12 @@ class ConversionReport:
     flagged: list[tuple[str, str]] = field(default_factory=list)  # converted, but incomplete
     missing: list[str] = field(default_factory=list)  # expected behavioural logs not found
     skipped: list[str] = field(default_factory=list)
+    excluded: list[str] = field(default_factory=list)  # DICOM folders deleted at crosscheck
     failures: list[tuple[str, str]] = field(default_factory=list)  # (what, why)
+
+
+class NotEnoughSpaceError(OSError):
+    """Too little free disk space to convert the next session: conversion stops there."""
 
 
 def bids_stem(prefix: str, entities: str, suffix: str, run: int | None = None) -> str:
@@ -172,9 +191,31 @@ def read_dicom_corrections(bids_root: Path) -> dict[str, str]:
 
 def write_dicom_corrections(bids_root: Path, corrections: dict[str, str]) -> None:
     path = bids_root / DICOM_CORRECTIONS_FILE
+    old = read_dicom_corrections(bids_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     kept = {k: v.strip() for k, v in sorted(corrections.items()) if v.strip()}
     path.write_text(json.dumps(kept, indent=2) + "\n", encoding="utf-8")
+    for folder in sorted(old.keys() | kept.keys()):
+        if old.get(folder) != kept.get(folder):
+            detail = f"{old.get(folder, '(folder name)')} -> {kept.get(folder, '(folder name)')}"
+            record_action(bids_root, "correct DICOM folder ID", folder, detail)
+
+
+def read_excluded_sessions(bids_root: Path) -> dict[str, str]:
+    """DICOM session folders deleted at crosscheck: {folder name: why}. Never converted."""
+    try:
+        saved = json.loads((bids_root / EXCLUDED_SESSIONS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in saved.items()}
+
+
+def exclude_session(bids_root: Path, folder_name: str, why: str) -> None:
+    """Leave DICOM session folder_name out of every conversion from now on."""
+    excluded = read_excluded_sessions(bids_root) | {folder_name: why}
+    path = bids_root / EXCLUDED_SESSIONS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(sorted(excluded.items())), indent=2) + "\n", encoding="utf-8")
 
 
 def parse_session_folder(folder: Path, corrected_id: str | None = None) -> DicomSession | None:
@@ -216,12 +257,18 @@ def single_session(folder: Path, subject_id: str) -> DicomSession:
 
 
 def find_sessions(
-    dicom_root: Path, corrections: dict[str, str] | None = None
+    dicom_root: Path,
+    corrections: dict[str, str] | None = None,
+    excluded: Collection[str] = (),
 ) -> list[DicomSession]:
-    """Every session folder in dicom_root, with crosscheck ID corrections applied."""
+    """Every session folder in dicom_root, with crosscheck ID corrections applied, except
+    the excluded ones (deleted at crosscheck)."""
     sessions = []
     for folder in sorted(dicom_root.iterdir()):
         if folder.name in IGNORED_FOLDERS or not folder.is_dir():
+            continue
+        if folder.name in excluded:
+            log.info("Leaving out %s: deleted at crosscheck", folder.name)
             continue
         if not any(folder.iterdir()):
             log.warning("Skipping empty folder %s", folder.name)
@@ -317,9 +364,10 @@ def renumber_sessions(
         old_prefix, new_prefix = f"sub-{subject_id}_ses-{old}_", f"sub-{subject_id}_ses-{new}_"
         for path in sorted(target.rglob(f"{old_prefix}*")):
             path.rename(path.with_name(new_prefix + path.name.removeprefix(old_prefix)))
-        log.warning("sub-%s: ses-%s renumbered to ses-%s (an earlier session was added)",
+        log.warning("sub-%s: ses-%s renumbered to ses-%s (a session was added or deleted)",
                     subject_id, old, new)  # fmt: skip
         report.renumbered.append(f"sub-{subject_id}: ses-{old} -> ses-{new}")
+        record_action(bids_root, "renumber session", f"sub-{subject_id}", f"ses-{old} -> ses-{new}")
 
 
 def reset_bids_root(bids_root: Path) -> None:
@@ -456,6 +504,7 @@ def convert_session(
         log.info("%s already converted (>1 GB), skipping", session.prefix)
         report.skipped.append(session.prefix)
         return
+    check_free_space(bids_root, session.dicom.folder)
 
     for rule, series in series_by_rule.items():
         final_dir = session_dir / rule.datatype
@@ -479,12 +528,43 @@ def convert_session(
             ]
         for series_dir, out_dir, stem, bucket in targets:
             try:
-                problems = convert_series(series_dir, out_dir, stem, rule, convert, deface)
+                problems = convert_series(
+                    series_dir, out_dir, stem, rule, convert, deface, bids_root / CONVERTING_DIR
+                )
                 bucket.append(stem)
                 report.flagged.extend((stem, problem) for problem in problems)
             except (subprocess.CalledProcessError, OSError, ValueError) as e:
+                if isinstance(e, NotEnoughSpaceError):
+                    raise
                 log.error("%s failed: %s", stem, e)
                 report.failures.append((stem, str(e)))
+
+
+def check_free_space(bids_root: Path, dicom_folder: Path) -> None:
+    """Stop before a session whose DICOMs (plus a margin) don't fit on the BIDS drive.
+
+    The compressed NIfTIs are smaller than the DICOMs, so this errs on the safe side.
+    """
+    needed = folder_size(dicom_folder) + SPACE_MARGIN_BYTES
+    free = shutil.disk_usage(bids_root).free
+    if free < needed:
+        raise NotEnoughSpaceError(
+            f"Only {free / 1024**3:.1f} GB free on the BIDS drive; converting "
+            f"{dicom_folder.name} needs about {needed / 1024**3:.1f} GB. Free some space and "
+            "convert again: the sessions already converted are kept."
+        )
+
+
+def finish_series(
+    nifti: Path, sidecar: Path, rule: ScanRule, deface: DefaceFn | None, defaced_already: bool
+) -> None:
+    """Deface a T1w (if not done yet) and note the task name in the sidecar."""
+    if rule.suffix == "T1w" and deface is not None and not defaced_already:
+        log.info("Defacing %s", nifti.name)
+        tool = deface(nifti)
+        update_json(sidecar, Notes=f"{DEFACE_NOTE} {tool}")
+    if rule.task_name:
+        update_json(sidecar, TaskName=rule.task_name)
 
 
 def convert_series(
@@ -494,30 +574,45 @@ def convert_series(
     rule: ScanRule,
     convert: ConvertFn,
     deface: DefaceFn | None,
+    staging_root: Path,
 ) -> list[str]:
-    """Convert one series; returns problems for the report (e.g. truncated files left out)."""
-    out_dir.mkdir(parents=True, exist_ok=True)
+    """Convert one series; returns problems for the report (e.g. truncated files left out).
+
+    A new conversion happens in a temporary folder under staging_root (on the same drive as
+    the BIDS folder) and is moved into out_dir only once dcm2niix and defacing have worked;
+    the temporary folder is removed whatever happens.
+    """
     nifti = out_dir / f"{stem}.nii.gz"
     sidecar = out_dir / f"{stem}.json"
-
-    problems = []
     if nifti.exists() and sidecar.exists():
         log.info("%s exists, not reconverting", stem)
-    else:
-        log.info("Converting %s -> %s", series_dir.name, stem)
-        problems = convert_intact(series_dir, out_dir, stem, convert)
-        strip_duplicate_suffix(out_dir)
-        if not (nifti.exists() and sidecar.exists()):
+        finish_series(nifti, sidecar, rule, deface, is_defaced(sidecar))
+        return []
+
+    log.info("Converting %s -> %s", series_dir.name, stem)
+    staging_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f"{stem}_", dir=staging_root) as tmp:
+        work_dir = Path(tmp)
+        problems = convert_intact(series_dir, work_dir, stem, convert)
+        strip_duplicate_suffix(work_dir)
+        new_nifti, new_sidecar = work_dir / nifti.name, work_dir / sidecar.name
+        if not (new_nifti.exists() and new_sidecar.exists()):
             raise FileNotFoundError(f"dcm2niix produced no {nifti.name} / {sidecar.name}")
-
-    if rule.suffix == "T1w" and deface is not None and not is_defaced(sidecar):
-        log.info("Defacing %s", nifti.name)
-        tool = deface(nifti)
-        update_json(sidecar, Notes=f"{DEFACE_NOTE} {tool}")
-
-    if rule.task_name:
-        update_json(sidecar, TaskName=rule.task_name)
+        finish_series(new_nifti, new_sidecar, rule, deface, defaced_already=False)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        new_sidecar.replace(sidecar)  # the NIfTI last: a scan counts as done once both exist
+        new_nifti.replace(nifti)
     return problems
+
+
+def remove_staging(bids_root: Path) -> None:
+    """Leftovers of a conversion that was killed mid-series: never moved into a session."""
+    staging = bids_root / CONVERTING_DIR
+    if not staging.is_dir():
+        return
+    if any(staging.iterdir()):
+        log.info("Removing %s (left over from an interrupted conversion)", staging)
+    shutil.rmtree(staging, ignore_errors=True)
 
 
 def convert_behaviour(
@@ -605,12 +700,14 @@ def convert_dicom_root(
     report = ConversionReport()
     write_dataset_description(bids_root)
     remove_old_staging(bids_root)
+    remove_staging(bids_root)
     log_groups = find_behav_logs(behav_root, bids_root) if behav_root is not None else {}
-    found = (
-        [single_session(dicom_root, subject_id)]
-        if subject_id is not None
-        else find_sessions(dicom_root, read_dicom_corrections(bids_root))
-    )
+    excluded = read_excluded_sessions(bids_root)
+    if subject_id is not None:
+        found = [single_session(dicom_root, subject_id)]
+    else:
+        found = find_sessions(dicom_root, read_dicom_corrections(bids_root), excluded)
+        report.excluded = sorted(name for name in excluded if (dicom_root / name).is_dir())
     subjects = number_sessions(found)
     total = len(found) + (len(subjects) + 1 if behav_root is not None else 0)
     done = 0
@@ -645,6 +742,7 @@ def convert_dicom_root(
         if subject_id not in subjects:
             convert_behaviour(subject_id, [], tasks[task_label], logs, bids_root, report)
     remove_stray_logs(bids_root)
+    remove_staging(bids_root)
     if progress is not None:
         progress(total, total, "done")
     return report
@@ -684,16 +782,20 @@ def scan_dicom_root(dicom_root: Path) -> list[ScannedFolder]:
     return scanned
 
 
-def session_infos(scanned: list[ScannedFolder], corrections: dict[str, str]) -> list[SessionInfo]:
+def session_infos(
+    scanned: list[ScannedFolder], corrections: dict[str, str], excluded: Collection[str] = ()
+) -> list[SessionInfo]:
     """The sessions as the converter would number them with these ID corrections.
 
-    Folders whose name has no date or whose ID is empty (and uncorrected) are left out.
+    Folders whose name has no date or whose ID is empty (and uncorrected) are left out, as
+    are the excluded ones (deleted at crosscheck).
     """
     tasks = {folder.name: folder_tasks for folder, folder_tasks in scanned}
     found = [
         session
         for folder, _ in scanned
-        if (session := parse_session_folder(folder, corrections.get(folder.name))) is not None
+        if folder.name not in excluded
+        and (session := parse_session_folder(folder, corrections.get(folder.name))) is not None
     ]
     return [
         SessionInfo(
@@ -710,6 +812,8 @@ def session_infos(scanned: list[ScannedFolder], corrections: dict[str, str]) -> 
     ]
 
 
-def scan_sessions(dicom_root: Path, corrections: dict[str, str] | None = None) -> list[SessionInfo]:
+def scan_sessions(
+    dicom_root: Path, corrections: dict[str, str] | None = None, excluded: Collection[str] = ()
+) -> list[SessionInfo]:
     """Every DICOM session as the behaviour check sees it: subject, ses label, date, tasks."""
-    return session_infos(scan_dicom_root(dicom_root), corrections or {})
+    return session_infos(scan_dicom_root(dicom_root), corrections or {}, excluded)

@@ -75,3 +75,57 @@ def test_table_shows_id_scan_date_and_session(
     cells = [window.table.item(0, c).text() for c in range(window.table.columnCount())]  # pyright: ignore[reportOptionalMemberAccess]
     assert cells[:4] == ["12345T1", "2024-10-14 13:41", "ses-1", "2"]
     assert "⚠" in cells[4]  # two runs: keep one
+
+
+def two_session_subject(bids: Path) -> None:
+    """sub-A with ses-1 (scanned 2024-10-14) and ses-2 (2024-10-15), each with a Rest run."""
+    for session in ("1", "2"):
+        func = bids / "sub-A" / f"ses-{session}" / "func"
+        func.mkdir(parents=True)
+        (func / f"sub-A_ses-{session}_task-Rest_bold.nii.gz").write_bytes(b"")
+    (bids / "sub-A" / "sub-A_sessions.tsv").write_text(
+        "session_id\tacq_time\tsource_folder\n"
+        "ses-1\t2024-10-14T13:41:00\t20241014_1341_A\n"
+        "ses-2\t2024-10-15T09:00:00\t20241015_0900_A\n"
+    )
+
+
+def test_ticked_sessions_enable_actions_and_select_none_clears(
+    window: crosscheck_gui.CrosscheckWindow, tmp_path: Path
+) -> None:
+    bids = tmp_path / "bids"
+    two_session_subject(bids)
+    window.set_folder("bids", bids)
+    window.rescan()
+    assert not window.delete_ticked_button.isEnabled()
+    assert "⊕" in window.table.item(0, 4).text()  # pyright: ignore[reportOptionalMemberAccess]
+
+    for row in (0, 1):
+        window.table.item(row, 0).setCheckState(crosscheck_gui.Qt.CheckState.Checked)  # pyright: ignore[reportOptionalMemberAccess]
+    assert [r.name for r in window.ticked_reviews()] == ["sub-A_ses-1", "sub-A_ses-2"]
+    assert window.delete_ticked_button.text() == "Delete 2 session(s)..."
+    assert window.note_ticked_button.isEnabled()
+
+    window.on_select_none()
+    assert window.ticked_reviews() == []
+    assert not window.delete_ticked_button.isEnabled()
+
+    window.sessions_spin.setValue(2)  # this study expects two sessions: no flag
+    assert "⊕" not in window.table.item(0, 4).text()  # pyright: ignore[reportOptionalMemberAccess]
+
+
+def test_delete_ticked_session_after_confirming(
+    window: crosscheck_gui.CrosscheckWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bids = tmp_path / "bids"
+    two_session_subject(bids)
+    window.set_folder("bids", bids)
+    window.rescan()
+    window.table.item(0, 0).setCheckState(crosscheck_gui.Qt.CheckState.Checked)  # pyright: ignore[reportOptionalMemberAccess]
+    monkeypatch.setattr(window, "confirm", lambda _text: True)
+
+    window.on_delete_ticked()
+
+    assert not (bids / "sub-A" / "ses-1").exists()
+    assert [r.name for r in window.reviews] == ["sub-A_ses-2"]
+    assert window.ticked_reviews() == []

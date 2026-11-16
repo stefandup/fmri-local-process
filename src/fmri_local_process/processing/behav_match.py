@@ -27,6 +27,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from fmri_local_process.processing.action_log import record_action
 from fmri_local_process.processing.behav_logs import (
     BehavTask,
     EventTable,
@@ -100,8 +101,25 @@ def read_corrections(bids_root: Path) -> dict[str, Correction]:
     }
 
 
+def correction_text(c: Correction | None) -> str:
+    """'ID P001, date 2024-04-03, error (note)' for the action log; '-' if nothing set."""
+    if c is None:
+        return "-"
+    parts = [f"ID {c.subject}"] if c.subject else []
+    if c.date:
+        parts.append(f"date {c.date.strftime(ISO_DATE)}")
+    if c.review:
+        parts.append(c.review + (f" ({c.note})" if c.note else ""))
+    return ", ".join(parts) or "-"
+
+
 def write_corrections(bids_root: Path, corrections: dict[str, Correction]) -> None:
     path = bids_root / CORRECTIONS_FILE
+    old = read_corrections(bids_root) if path.is_file() else {}
+    for key in sorted(old.keys() | corrections.keys()):
+        before, after = correction_text(old.get(key)), correction_text(corrections.get(key))
+        if before != after:
+            record_action(bids_root, "correct behaviour log", key, f"{before} -> {after}")
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = {}
     for key, c in sorted(corrections.items()):

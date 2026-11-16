@@ -2,7 +2,11 @@
 
 Modelled on vr_lab_toolbox's BIDS crosscheck tools: sessions on the left, the selected
 session's files and problems on the right, and the converter one click away. All checks
-read the BIDS folder; nothing but the human's own moves/deletes is written to it.
+read the BIDS folder; nothing but the human's own moves/deletes/notes is written to it, and
+each of those is logged in its code/crosscheck_actions.tsv.
+
+Tick sessions (the box beside the ID) to act on several at once: delete them (dud visits)
+or give them a note.
 """
 
 import logging
@@ -21,13 +25,16 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -48,11 +55,16 @@ from fmri_local_process.processing.crosscheck import (
     DataFile,
     SessionReview,
     delete_data_file,
+    delete_session,
     find_data_files,
     keep_run,
+    read_expected_sessions,
     review_bids_folder,
+    set_note,
     sidecar_note,
     trim_run,
+    write_expected_sessions,
+    write_review_csv,
 )
 from fmri_local_process.processing.dcm2niix import (
     Dcm2niixNotFoundError,
@@ -66,17 +78,27 @@ log = logging.getLogger(__name__)
 
 SETTINGS_ORGANIZATION = "MooiToolbox"  # same as vr_lab_toolbox
 SETTINGS_APP = "FmriCrosscheck"
-ICONS = {"pending": "⚠", "short": "❗", "long": "✂", "missing": "○", "check": "⚑"}
+ICONS = {
+    "pending": "⚠",
+    "short": "❗",
+    "long": "✂",
+    "missing": "○",
+    "check": "⚑",
+    "extra": "⊕",
+}
 COLORS = {
     "pending": "#f39c12",
     "short": "#e74c3c",
     "long": "#3498db",
     "missing": "#9b59b6",
     "check": "#e67e22",
+    "extra": "#16a085",
     "ok": "#2ecc71",
 }
-TABLE_COLUMNS = ("ID", "Date", "Session", "Files", "Problems")
+TABLE_COLUMNS = ("ID", "Date", "Session", "Files", "Problems", "Note")
 PROBLEMS_COLUMN = 4
+NOTE_COLUMN = 5
+MAX_SESSIONS = 20
 OK_ICON = "●"
 ACCENT_COLOR = "#5b9bd5"
 LEGEND = (
@@ -85,7 +107,8 @@ LEGEND = (
     f"{ICONS['short']} shorter than expected (or than the same scan elsewhere), or no events\n"
     f"{ICONS['long']} longer than expected: trim it\n"
     f"{ICONS['missing']} expected file missing\n"
-    f"{ICONS['check']} events from a log dated other than the scan: check it's the right log"
+    f"{ICONS['check']} events from a log dated other than the scan: check it's the right log\n"
+    f"{ICONS['extra']} the subject has more sessions than expected: is one a dud to delete?"
 )
 
 
@@ -137,14 +160,14 @@ class TrimThread(QThread):
 
     line = Signal(str)
 
-    def __init__(self, jobs: list[tuple[DataFile, int]]):
+    def __init__(self, bids_root: Path, jobs: list[tuple[DataFile, int]]):
         super().__init__()
-        self.jobs = jobs
+        self.bids_root, self.jobs = bids_root, jobs
 
     def run(self) -> None:
         for number, (data, volumes) in enumerate(self.jobs, start=1):
             try:
-                trim_run(data, volumes)
+                trim_run(self.bids_root, data, volumes)
             except (CrosscheckError, OSError, ValueError) as e:
                 self.line.emit(f"NOT TRIMMED  {e}")
                 continue
@@ -165,7 +188,7 @@ def problem_text(review: SessionReview) -> str:
 
 def problem_color(review: SessionReview) -> str:
     kinds = {i.kind for i in review.issues}
-    order = ("short", "pending", "check", "long", "missing")
+    order = ("short", "pending", "check", "extra", "long", "missing")
     return next((COLORS[k] for k in order if k in kinds), COLORS["ok"])
 
 
@@ -177,6 +200,7 @@ class CrosscheckWindow(QMainWindow):
         self.settings = QSettings(SETTINGS_ORGANIZATION, SETTINGS_APP)
         self.folders: dict[str, Path | None] = {}
         self.reviews: list[SessionReview] = []
+        self.ticked: set[str] = set()  # names of the ticked sessions (sub-X_ses-N)
         self.convert_thread: ConvertThread | None = None
         self.trim_thread: TrimThread | None = None
         self.emitter = LogEmitter()
@@ -248,6 +272,23 @@ class CrosscheckWindow(QMainWindow):
         )
         behav.clicked.connect(self.on_behav_logs)
         actions.addWidget(behav)
+        export = QPushButton("Export CSV...")
+        export.setToolTip("Every session with its problems and note, one row per problem.")
+        export.clicked.connect(self.on_export_csv)
+        actions.addWidget(export)
+        sessions_label = QLabel("Sessions per subject:")
+        self.sessions_spin = QSpinBox()
+        self.sessions_spin.setRange(1, MAX_SESSIONS)
+        tip = (
+            "How many sessions each subject should have in this study. A subject with more is "
+            f"flagged {ICONS['extra']}: one may be a dud visit to delete. Saved in the BIDS "
+            "folder (code/crosscheck_settings.json)."
+        )
+        sessions_label.setToolTip(tip)
+        self.sessions_spin.setToolTip(tip)
+        self.sessions_spin.valueChanged.connect(self.on_expected_sessions)
+        actions.addWidget(sessions_label)
+        actions.addWidget(self.sessions_spin)
         actions.addStretch(1)
         self.deface_box = QCheckBox("Deface T1w")
         self.deface_box.setToolTip(
@@ -272,6 +313,16 @@ class CrosscheckWindow(QMainWindow):
         layout.addWidget(self._build_progress_group())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        tick_row = QHBoxLayout()
+        tick_row.addWidget(QLabel("Tick sessions to act on several at once; click one to see it."))
+        tick_row.addStretch(1)
+        self.select_none_button = QPushButton("Select none")
+        self.select_none_button.clicked.connect(self.on_select_none)
+        tick_row.addWidget(self.select_none_button)
+        left_layout.addLayout(tick_row)
         self.table = QTableWidget(0, len(TABLE_COLUMNS))
         self.table.setHorizontalHeaderLabels(list(TABLE_COLUMNS))
         problems_header = QTableWidgetItem("Problems")
@@ -283,12 +334,19 @@ class CrosscheckWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.itemSelectionChanged.connect(self.render_detail)
-        splitter.addWidget(self.table)
+        self.table.itemChanged.connect(self.on_tick_changed)
+        left_layout.addWidget(self.table, 1)
+        splitter.addWidget(left)
 
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(self._build_ticked_group())
         self.detail_scroll = QScrollArea()
         self.detail_scroll.setWidgetResizable(True)
-        splitter.addWidget(self.detail_scroll)
-        splitter.setSizes([380, 920])
+        right_layout.addWidget(self.detail_scroll, 1)
+        splitter.addWidget(right)
+        splitter.setSizes([480, 820])
         layout.addWidget(splitter, 1)
 
         self.summary = QLabel()
@@ -298,6 +356,39 @@ class CrosscheckWindow(QMainWindow):
         self.activity.setMaximumHeight(160)
         layout.addWidget(self.activity)
         self.setCentralWidget(central)
+
+    def _build_ticked_group(self) -> QGroupBox:
+        """Actions on the ticked sessions; stays in place (buttons disabled when none)."""
+        group = QGroupBox("Ticked sessions")
+        layout = QHBoxLayout(group)
+        self.ticked_label = QLabel()
+        layout.addWidget(self.ticked_label)
+        layout.addStretch(1)
+        self.note_ticked_button = QPushButton("Note...")
+        self.note_ticked_button.setToolTip("Give the ticked sessions a note (empty clears it).")
+        self.note_ticked_button.clicked.connect(self.on_note_ticked)
+        layout.addWidget(self.note_ticked_button)
+        self.delete_ticked_button = QPushButton("Delete sessions...")
+        self.delete_ticked_button.setToolTip(
+            "Delete the ticked session folders (dud visits). Their DICOM folders are left out "
+            "of conversion from now on, and the next conversion renumbers the remaining "
+            "sessions."
+        )
+        self.delete_ticked_button.clicked.connect(self.on_delete_ticked)
+        layout.addWidget(self.delete_ticked_button)
+        return group
+
+    def update_ticked(self) -> None:
+        n = len(self.ticked_reviews())
+        self.ticked_label.setText(
+            f"{n} ticked" if n else "Tick sessions on the left to act on several at once."
+        )
+        self.note_ticked_button.setEnabled(n > 0)
+        self.delete_ticked_button.setEnabled(n > 0)
+        self.delete_ticked_button.setText(
+            f"Delete {n} session(s)..." if n else "Delete sessions..."
+        )
+        self.select_none_button.setEnabled(n > 0)
 
     def _build_progress_group(self) -> QGroupBox:
         """Large progress panel (as in the preprocess GUI), shown only while converting."""
@@ -364,6 +455,12 @@ class CrosscheckWindow(QMainWindow):
         bids_root = self.folders.get("bids")
         selected = self.selected_review()
         self.reviews = review_bids_folder(bids_root) if bids_root else []
+        self.ticked &= {r.name for r in self.reviews}
+        self.sessions_spin.blockSignals(True)
+        self.sessions_spin.setValue(read_expected_sessions(bids_root) if bids_root else 1)
+        self.sessions_spin.setEnabled(bids_root is not None)
+        self.sessions_spin.blockSignals(False)
+        self.table.blockSignals(True)  # no itemChanged (tick) signals while filling
         self.table.setRowCount(len(self.reviews))
         for row, review in enumerate(self.reviews):
             cells = (
@@ -372,16 +469,25 @@ class CrosscheckWindow(QMainWindow):
                 f"ses-{review.session}" if review.session else "-",
                 str(len(review.files) + len(review.pending)),
                 problem_text(review),
+                review.note,
             )
             for column, text in enumerate(cells):
                 item = QTableWidgetItem(text)
+                if column == 0:
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    ticked = review.name in self.ticked
+                    item.setCheckState(Qt.CheckState.Checked if ticked else Qt.CheckState.Unchecked)
                 if column == 1 and review.source_folder:
                     item.setToolTip(f"Converted from {review.source_folder}")
                 if column == PROBLEMS_COLUMN:
                     item.setForeground(QColor(problem_color(review)))
                     item.setToolTip(LEGEND)
+                if column == NOTE_COLUMN:
+                    item.setToolTip(review.note)
                 self.table.setItem(row, column, item)
+        self.table.blockSignals(False)
         self.table.resizeColumnsToContents()
+        self.update_ticked()
         with_issues = sum(bool(r.issues) for r in self.reviews)
         self.summary.setText(
             f"{len(self.reviews)} session(s), {with_issues} with something to check"
@@ -400,6 +506,29 @@ class CrosscheckWindow(QMainWindow):
         rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
         return self.reviews[rows[0].row()] if rows and rows[0].row() < len(self.reviews) else None
 
+    def ticked_reviews(self) -> list[SessionReview]:
+        return [r for r in self.reviews if r.name in self.ticked]
+
+    def on_tick_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() != 0 or item.row() >= len(self.reviews):
+            return
+        name = self.reviews[item.row()].name
+        if item.checkState() == Qt.CheckState.Checked:
+            self.ticked.add(name)
+        else:
+            self.ticked.discard(name)
+        self.update_ticked()
+
+    def on_select_none(self) -> None:
+        self.ticked.clear()
+        self.table.blockSignals(True)
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None:
+                item.setCheckState(Qt.CheckState.Unchecked)
+        self.table.blockSignals(False)
+        self.update_ticked()
+
     # ---- detail pane -------------------------------------------------------------------------
 
     def render_detail(self) -> None:
@@ -414,6 +543,7 @@ class CrosscheckWindow(QMainWindow):
             source = f" from {review.source_folder}" if review.source_folder else ""
             title = QLabel(f"<h2>{review.name}</h2>{scanned}{source}")
             layout.addWidget(title)
+            layout.addLayout(self.session_row(review, bids_root))
             if review.issues:
                 layout.addWidget(self.issues_group(review))
             for label in sorted({d.label for d in review.pending}):
@@ -423,6 +553,27 @@ class CrosscheckWindow(QMainWindow):
                 layout.addWidget(self.files_group(review, bids_root))
         layout.addStretch(1)
         self.detail_scroll.setWidget(widget)
+
+    def session_row(self, review: SessionReview, bids_root: Path) -> QHBoxLayout:
+        """Note box and 'delete this session' for the session shown."""
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Note:"))
+        note = QLineEdit(review.note)
+        note.setPlaceholderText("e.g. scan stopped early, participant moved a lot...")
+        row.addWidget(note, 1)
+        save = QPushButton("Save note")
+        save.clicked.connect(lambda: self.save_note([review], note.text()))
+        note.returnPressed.connect(save.click)
+        row.addWidget(save)
+        delete = QPushButton("Delete session...")
+        delete.setToolTip(
+            "Delete this session folder (a dud visit). Its DICOM folder is left out of "
+            "conversion from now on; the next conversion renumbers the remaining sessions."
+        )
+        delete.setEnabled(review.session is not None)
+        delete.clicked.connect(lambda: self.delete_sessions([review], bids_root))
+        row.addWidget(delete)
+        return row
 
     def issues_group(self, review: SessionReview) -> QGroupBox:
         group = QGroupBox("Problems")
@@ -520,6 +671,90 @@ class CrosscheckWindow(QMainWindow):
         if self.confirm(f"Delete {data.path.name} and its sidecar from the BIDS folder?"):
             self.run_action(f"Deleted {data.path.name}", partial(delete_data_file, bids_root, data))
 
+    def save_note(self, reviews: list[SessionReview], text: str) -> None:
+        bids_root = self.folders.get("bids")
+        if bids_root is None:
+            return
+        names = ", ".join(r.name for r in reviews)
+        self.run_action(f"Note for {names}: {text.strip() or '(cleared)'}",
+                        partial(set_note, bids_root, reviews, text))  # fmt: skip
+
+    def on_note_ticked(self) -> None:
+        reviews = self.ticked_reviews()
+        if not reviews:
+            return
+        notes = {r.note for r in reviews}
+        text, ok = QInputDialog.getText(
+            self,
+            "Note",
+            f"Note for {len(reviews)} ticked session(s) (empty clears it):",
+            text=notes.pop() if len(notes) == 1 else "",
+        )
+        if ok:
+            self.save_note(reviews, text)
+
+    def on_delete_ticked(self) -> None:
+        bids_root = self.folders.get("bids")
+        if bids_root is not None:
+            self.delete_sessions(self.ticked_reviews(), bids_root)
+
+    def delete_sessions(self, reviews: list[SessionReview], bids_root: Path) -> None:
+        reviews = [r for r in reviews if r.session is not None]
+        if not reviews:
+            return
+        listing = "\n".join(
+            f"  {r.name}  scanned {r.date or '?'}  from {r.source_folder or '?'}"
+            + (f"  ({len(r.issues)} problem(s))" if r.issues else "")
+            for r in reviews[:15]
+        )
+        more = f"\n  ... and {len(reviews) - 15} more" if len(reviews) > 15 else ""
+        if not self.confirm(
+            f"Delete {len(reviews)} session folder(s) from the BIDS folder?\n{listing}{more}\n\n"
+            "Their DICOM folders are left out of conversion from now on (listed in "
+            "code/excluded_sessions.json; remove a line there to convert it again). Click "
+            "'Convert / update BIDS' afterwards to renumber the remaining sessions. Don't "
+            "delete while C-PAC is preprocessing these subjects."
+        ):
+            return
+        for review in reviews:
+            try:
+                delete_session(bids_root, review, review.note)
+            except (CrosscheckError, OSError) as e:
+                QMessageBox.warning(self, "Not deleted", str(e))
+                self.log_line(f"ERROR  deleting {review.name}: {e}")
+                continue
+            self.ticked.discard(review.name)
+            self.log_line(f"Deleted {review.name} (from {review.source_folder})")
+        self.log_line("Convert / update BIDS to renumber the remaining sessions.")
+        self.rescan()
+
+    def on_expected_sessions(self, sessions: int) -> None:
+        bids_root = self.folders.get("bids")
+        if bids_root is None:
+            return
+        try:
+            write_expected_sessions(bids_root, sessions)
+        except OSError as e:
+            QMessageBox.warning(self, "Not saved", str(e))
+            return
+        self.rescan()
+
+    def on_export_csv(self) -> None:
+        bids_root = self.folders.get("bids")
+        if bids_root is None or not self.reviews:
+            QMessageBox.information(self, "Nothing to export", "Choose a BIDS folder first.")
+            return
+        start = str(bids_root.parent / f"{bids_root.name}_crosscheck.csv")
+        chosen, _ = QFileDialog.getSaveFileName(self, "Export CSV", start, "CSV files (*.csv)")
+        if not chosen:
+            return
+        try:
+            write_review_csv(self.reviews, Path(chosen))
+        except OSError as e:
+            QMessageBox.warning(self, "Not exported", str(e))
+            return
+        self.log_line(f"Exported {len(self.reviews)} session(s) to {chosen}")
+
     def on_scan_lengths(self) -> None:
         bids_root = self.folders.get("bids")
         if bids_root is None:
@@ -574,7 +809,10 @@ class CrosscheckWindow(QMainWindow):
             "preprocessing these subjects."
         ):
             return
-        self.trim_thread = TrimThread(jobs)
+        bids_root = self.folders.get("bids")
+        if bids_root is None:
+            return
+        self.trim_thread = TrimThread(bids_root, jobs)
         self.trim_thread.line.connect(self.log_line)
         self.trim_thread.finished.connect(self.on_trim_done)
         self.trim_thread.start()
@@ -629,7 +867,9 @@ class CrosscheckWindow(QMainWindow):
                 f"{len(result.failures)} failed."
             )
             for change in result.renumbered:
-                self.log_line(f"RENUMBERED  {change} (an earlier session was added)")
+                self.log_line(f"RENUMBERED  {change}")
+            for folder in result.excluded:
+                self.log_line(f"LEFT OUT  {folder} (deleted at crosscheck)")
             for log_key, why in result.unplaced:
                 self.log_line(f"NOT PLACED  {log_key}: {why} -- see IDs & behaviour logs")
             for what, why in result.failures:

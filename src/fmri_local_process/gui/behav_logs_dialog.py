@@ -68,6 +68,7 @@ from fmri_local_process.processing.philani_bids import (
     DATE_FORMAT,
     DICOM_CORRECTIONS_FILE,
     read_dicom_corrections,
+    read_excluded_sessions,
     scan_dicom_root,
     session_infos,
     write_dicom_corrections,
@@ -171,7 +172,10 @@ class BehavLogsDialog(QDialog):
             self.infos = inspect_logs(behav_root, read_corrections(bids_root))
             self.scanned = scan_dicom_root(dicom_root)
             dicom_corrections = read_dicom_corrections(bids_root)
-            self.sessions: list[SessionInfo] = session_infos(self.scanned, dicom_corrections)
+            self.excluded = set(read_excluded_sessions(bids_root))  # deleted at crosscheck
+            self.sessions: list[SessionInfo] = session_infos(
+                self.scanned, dicom_corrections, self.excluded
+            )
         finally:
             QGuiApplication.restoreOverrideCursor()
         self.verdicts: dict[str, Verdict] = {
@@ -367,7 +371,7 @@ class BehavLogsDialog(QDialog):
             return
         for info in self.infos:
             info.correction = corrections.get(info.key, Correction())
-        self.sessions = session_infos(self.scanned, self.dicom_corrections())
+        self.sessions = session_infos(self.scanned, self.dicom_corrections(), self.excluded)
         self.show_matches(match_logs(self.infos, self.sessions))
         self.show_detail()
 
