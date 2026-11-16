@@ -50,10 +50,12 @@ Source: "build_output\payload\*"; DestDir: "{app}"; Flags: ignoreversion recurse
 
 [Tasks]
 Name: desktopicon; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"
-Name: dockersetup; Description: "Set up Docker now: download C-PAC and build the T1w defacer (10+ GB, can take hours; needs Docker Desktop running)"; GroupDescription: "Docker (fmri_preprocess, defacing):"
 
 [Icons]
 Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: postinstall nowait skipifsilent
 
 [Code]
 const
@@ -155,6 +157,10 @@ begin
     ewWaitUntilTerminated, ResultCode);
 end;
 
+// ---- Docker and tools page --------------------------------------------------------------
+// One checklist: Docker Desktop, the C-PAC image, and the T1w defacer image. Anything already
+// on this PC is shown as OK and greyed out (the defacer stays tickable, to rebuild/switch it).
+
 function DockerAnswers(): Boolean;
 var
   ResultCode: Integer;
@@ -163,35 +169,122 @@ begin
     ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
 end;
 
-// ---- Defacer choice (shown only when the dockersetup task is ticked) ----------------------
-// Order matches DefacerArg(): the -Defacer values of docker\setup_docker_image.ps1.
+function DockerInstalled(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := FileExists(ExpandConstant('{commonpf64}\Docker\Docker\Docker Desktop.exe'))
+    or (Exec(ExpandConstant('{cmd}'), '/c where docker >nul 2>&1', '', SW_HIDE,
+      ewWaitUntilTerminated, ResultCode) and (ResultCode = 0));
+end;
+
+function ImagePresent(Image: String): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := Exec(ExpandConstant('{cmd}'), '/c docker image inspect ' + Image + ' >nul 2>&1',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+// Order of the -Defacer radio buttons; matches DefacerArg().
 const
   DEFACER_FREESURFER = 0;
   DEFACER_LOCAL = 1;
   DEFACER_PYDEFACE = 2;
-  DEFACER_NONE = 3;
 
 var
-  DefacerPage: TInputOptionWizardPage;
+  ToolsPage: TWizardPage;
+  ToolsList: TNewCheckListBox;
   DefaceFilesPage: TInputDirWizardPage;
+  HaveDocker, DockerRunning, HaveCpac, HaveDefacer: Boolean;
+  ItemDocker, ItemCpac, ItemDefacer: Integer;
+  ItemRadio: array[0..2] of Integer;
+
+function WantDockerInstall(): Boolean;
+begin
+  Result := (not HaveDocker) and ToolsList.Checked[ItemDocker];
+end;
+
+function WantCpac(): Boolean;
+begin
+  Result := (not HaveCpac) and ToolsList.Checked[ItemCpac];
+end;
+
+function WantDefacer(): Boolean;
+begin
+  Result := ToolsList.Checked[ItemDefacer];
+end;
+
+function SelectedDefacer(): Integer;
+var
+  I: Integer;
+begin
+  Result := DEFACER_FREESURFER;
+  for I := 0 to 2 do
+    if ToolsList.Checked[ItemRadio[I]] then
+      Result := I;
+end;
 
 procedure InitializeWizard();
+var
+  Intro, Caption: String;
 begin
-  DefacerPage := CreateInputOptionPage(wpSelectTasks, 'T1w defacing',
-    'How should T1w images have their faces removed?',
-    'The defacer is built into a local Docker image ({#DefaceImage}) on top of C-PAC, '
-    + 'after the files are installed. Re-run the installer to change it later.',
-    True, False);
-  DefacerPage.Add('FreeSurfer mri_deface, downloaded (recommended). Extra ~5 GB download: '
-    + 'expect 30-90+ minutes on top of C-PAC.');
-  DefacerPage.Add('FreeSurfer mri_deface from files I already have (a FreeSurfer home, or '
-    + 'mri_deface + its 2 templates). A few minutes.');
-  DefacerPage.Add('pydeface. Small and quick to set up, but it worked less well on our scans.');
-  DefacerPage.Add('No defacer: only download C-PAC. T1w images are then not defaced '
-    + '(unless --freesurfer is given).');
-  DefacerPage.SelectedValueIndex := DEFACER_FREESURFER;
+  HaveDocker := DockerInstalled();
+  DockerRunning := HaveDocker and DockerAnswers();
+  HaveCpac := DockerRunning and ImagePresent('{#CpacImage}');
+  HaveDefacer := DockerRunning and ImagePresent('{#DefaceImage}');
 
-  DefaceFilesPage := CreateInputDirPage(DefacerPage.ID, 'Your mri_deface files',
+  Intro := 'Preprocessing (fmri_preprocess) and T1w defacing run in Docker. Tick what to set '
+    + 'up now; everything can be skipped and done later by re-running this installer.';
+  if HaveDocker and not DockerRunning then
+    Intro := Intro + ' Docker Desktop is not running, so it can''t tell which images are '
+      + 'already downloaded: ticked downloads are skipped if they are.';
+  ToolsPage := CreateCustomPage(wpSelectTasks, 'Docker and tools',
+    'What should be set up for preprocessing and defacing?');
+
+  ToolsList := TNewCheckListBox.Create(ToolsPage);
+  ToolsList.Parent := ToolsPage.Surface;
+  ToolsList.Top := ScaleY(56);
+  ToolsList.Width := ToolsPage.SurfaceWidth;
+  ToolsList.Height := ToolsPage.SurfaceHeight - ScaleY(56);
+  with TNewStaticText.Create(ToolsPage) do
+  begin
+    Parent := ToolsPage.Surface;
+    Width := ToolsPage.SurfaceWidth;
+    AutoSize := False;
+    WordWrap := True;
+    Height := ScaleY(52);
+    Caption := Intro;
+  end;
+
+  if HaveDocker then
+    Caption := 'Docker Desktop: installed - OK'
+  else
+    Caption := 'Install Docker Desktop (~600 MB download, asks for administrator rights)';
+  ItemDocker := ToolsList.AddCheckBox(Caption, '', 0, not HaveDocker, not HaveDocker,
+    False, True, nil);
+
+  if HaveCpac then
+    Caption := 'C-PAC ({#CpacImage}): downloaded - OK'
+  else
+    Caption := 'Download C-PAC ({#CpacImage}, ~15 GB; 30-90+ minutes)';
+  ItemCpac := ToolsList.AddCheckBox(Caption, '', 0, not HaveCpac, not HaveCpac, False, True, nil);
+
+  if HaveDefacer then
+    Caption := 'T1w defacer ({#DefaceImage}): built - OK. Tick to rebuild it with:'
+  else
+    Caption := 'Set up the T1w defacer ({#DefaceImage}, built on C-PAC) with:';
+  ItemDefacer := ToolsList.AddCheckBox(Caption, '', 0, not HaveDefacer, True, False, True, nil);
+  ItemRadio[DEFACER_FREESURFER] := ToolsList.AddRadioButton(
+    'FreeSurfer mri_deface, downloaded (recommended; extra ~5 GB, 30-90+ minutes)', '', 1,
+    True, True, nil);
+  ItemRadio[DEFACER_LOCAL] := ToolsList.AddRadioButton(
+    'FreeSurfer mri_deface from a folder I already have (chosen on the next page)', '', 1,
+    False, True, nil);
+  ItemRadio[DEFACER_PYDEFACE] := ToolsList.AddRadioButton(
+    'pydeface (small and quick, but worked less well on our scans)', '', 1, False, True, nil);
+
+  DefaceFilesPage := CreateInputDirPage(ToolsPage.ID, 'Your FreeSurfer files',
     'Where are mri_deface and its templates?',
     'Pick a FreeSurfer home (bin\mri_deface, average\talairach_mixed_with_skull.gca, '
     + 'average\face.gca) or one folder holding those three files. mri_deface must be the '
@@ -204,11 +297,8 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
-  if PageID = DefacerPage.ID then
-    Result := not WizardIsTaskSelected('dockersetup')
-  else if PageID = DefaceFilesPage.ID then
-    Result := (not WizardIsTaskSelected('dockersetup'))
-      or (DefacerPage.SelectedValueIndex <> DEFACER_LOCAL);
+  if PageID = DefaceFilesPage.ID then
+    Result := not (WantDefacer() and (SelectedDefacer() = DEFACER_LOCAL));
 end;
 
 // FreeSurfer-home layout (<SubFolder>\<Name>) or flat (<Name>), as the setup script accepts.
@@ -237,26 +327,34 @@ begin
   end;
 end;
 
+// The setup script's -Defacer value: 'none' downloads only C-PAC.
 function DefacerArg(): String;
 begin
-  case DefacerPage.SelectedValueIndex of
-    DEFACER_FREESURFER: Result := 'freesurfer';
-    DEFACER_LOCAL: Result := 'local';
-    DEFACER_PYDEFACE: Result := 'pydeface';
+  if not WantDefacer() then
+    Result := 'none'
   else
-    Result := 'none';
-  end;
+    case SelectedDefacer() of
+      DEFACER_FREESURFER: Result := 'freesurfer';
+      DEFACER_LOCAL: Result := 'local';
+    else
+      Result := 'pydeface';
+    end;
 end;
 
 function DownloadEstimate(): String;
 begin
-  Result := '- C-PAC ({#CpacImage}): ~15 GB unpacked, 30-90+ minutes (skipped if already '
-    + 'downloaded)';
-  if DefacerPage.SelectedValueIndex = DEFACER_FREESURFER then
-    Result := Result + #13#10'- FreeSurfer: another ~5 GB download, 30-90+ minutes; only '
-      + 'mri_deface is kept, the rest is deleted again'
-  else if DefacerPage.SelectedValueIndex = DEFACER_PYDEFACE then
-    Result := Result + #13#10'- pydeface: a few MB, about a minute';
+  if HaveCpac then
+    Result := '- C-PAC: already downloaded'
+  else
+    Result := '- C-PAC ({#CpacImage}): ~15 GB unpacked, 30-90+ minutes (skipped if already '
+      + 'downloaded)';
+  if WantDefacer() then
+    case SelectedDefacer() of
+      DEFACER_FREESURFER: Result := Result + #13#10'- FreeSurfer: another ~5 GB download, '
+        + '30-90+ minutes; only mri_deface is kept, the rest is deleted again';
+      DEFACER_LOCAL: Result := Result + #13#10'- mri_deface from your folder: a few minutes';
+      DEFACER_PYDEFACE: Result := Result + #13#10'- pydeface: a few MB, about a minute';
+    end;
 end;
 
 // A trailing backslash before the closing quote would escape it on the command line.
@@ -267,8 +365,30 @@ begin
   Result := '"' + Dir + '"';
 end;
 
-// Optional, after the files are installed: every step can be skipped, and a failure never
-// fails the install. Silent installs skip it (SuppressibleMsgBox returns the given default).
+// winget (built into Windows 10/11) downloads and installs Docker Desktop; it asks for
+// administrator rights itself. Without winget, the download page is opened instead.
+procedure InstallDocker();
+var
+  ResultCode: Integer;
+begin
+  WizardForm.StatusLabel.Caption := 'Installing Docker Desktop (progress in its own window)...';
+  if Exec('winget.exe', 'install -e --id Docker.DockerDesktop --accept-package-agreements '
+    + '--accept-source-agreements', '', SW_SHOW, ewWaitUntilTerminated, ResultCode)
+    and (ResultCode = 0) then
+  begin
+    SuppressibleMsgBox('Docker Desktop is installed. Start it now from the Start menu, accept '
+      + 'its terms and wait until it says "Engine running" (the first start can take a few '
+      + 'minutes, and may ask you to restart Windows).', mbInformation, MB_OK, IDOK);
+    exit;
+  end;
+  SuppressibleMsgBox('Docker Desktop could not be installed automatically. The download page '
+    + 'opens now: install it, start it and wait for "Engine running".', mbError, MB_OK, IDOK);
+  ShellExec('open', 'https://www.docker.com/products/docker-desktop/', '', '', SW_SHOW,
+    ewNoWait, ResultCode);
+end;
+
+// After the files are installed: every step can be skipped, and a failure never fails the
+// install. Silent installs skip it (SuppressibleMsgBox returns the given default).
 procedure SetupDockerImages();
 var
   ResultCode: Integer;
@@ -277,7 +397,7 @@ begin
   Script := ExpandConstant('{app}\docker\setup_docker_image.ps1');
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' + Script + '" -Defacer ' + DefacerArg()
     + ' -CpacImage "{#CpacImage}" -Image "{#DefaceImage}"';
-  if DefacerPage.SelectedValueIndex = DEFACER_LOCAL then
+  if WantDefacer() and (SelectedDefacer() = DEFACER_LOCAL) then
     Params := Params + ' -DefaceFiles ' + QuotedDir(DefaceFilesPage.Values[0]);
 
   if SuppressibleMsgBox('Docker setup will now download:'#13#10#13#10 + DownloadEstimate()
@@ -288,10 +408,10 @@ begin
     exit;
 
   while not DockerAnswers() do
-    if SuppressibleMsgBox('Docker Desktop is not installed or not running.'#13#10#13#10
-      + 'Install it from https://www.docker.com/products/docker-desktop/ or start it, wait '
-      + 'until it says "Engine running", then choose Retry. Choose Cancel to skip.',
-      mbError, MB_RETRYCANCEL, IDCANCEL) <> IDRETRY then
+    if SuppressibleMsgBox('Docker Desktop is not running.'#13#10#13#10
+      + 'Start it from the Start menu, wait until it says "Engine running", then choose '
+      + 'Retry. If it needs Windows restarted first, choose Cancel and re-run this installer '
+      + 'afterwards.', mbError, MB_RETRYCANCEL, IDCANCEL) <> IDRETRY then
       exit;
 
   WizardForm.StatusLabel.Caption := 'Setting up Docker (progress in the PowerShell window)...';
@@ -314,7 +434,10 @@ begin
   begin
     EnvAddPath(ExpandConstant('{app}'));
     EnvBroadcastChange();
-    if WizardIsTaskSelected('dockersetup') then
+    if WantDockerInstall() then
+      InstallDocker();
+    // A defacer image is built on C-PAC, so the script also downloads C-PAC when needed.
+    if WantCpac() or WantDefacer() then
       SetupDockerImages();
   end;
 end;

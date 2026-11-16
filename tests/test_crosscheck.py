@@ -157,3 +157,72 @@ def test_delete_keeps_session_folder(tmp_path: Path) -> None:
     cc.delete_data_file(tmp_path, data)
     assert not bold.exists() and not data.sidecar.exists()
     assert bold.parent.is_dir()  # the converter refills it
+
+
+def write_bold(path: Path, volumes: int, tr: float = 2.0) -> Path:
+    """A real (tiny) 4D NIfTI that nibabel can load, with a sidecar."""
+    import nibabel as nib
+    import numpy as np
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = np.arange(2 * 2 * 2 * volumes, dtype=np.int16).reshape(2, 2, 2, volumes)
+    nib.save(nib.Nifti1Image(data, np.eye(4)), path)
+    path.with_name(path.name.removesuffix(".nii.gz") + ".json").write_text(
+        json.dumps({"RepetitionTime": tr})
+    )
+    return path
+
+
+def test_expected_lengths_flag_short_and_long_runs(tmp_path: Path) -> None:
+    write_nifti(func(tmp_path, "A", "1", "task-Rest_bold.nii.gz"), 441)
+    long = write_nifti(func(tmp_path, "B", "1", "task-Rest_bold.nii.gz"), 520)
+    short = write_nifti(func(tmp_path, "C", "1", "task-Rest_bold.nii.gz"), 33)
+    cc.write_expected(tmp_path, {"task-Rest_bold": 441, "task-Peer_bold": 0})
+    assert cc.read_expected(tmp_path) == {"task-Rest_bold": 441}
+
+    assert review_of(tmp_path, "sub-A_ses-1").issues == []
+    [issue] = review_of(tmp_path, "sub-B_ses-1").issues
+    assert (issue.kind, issue.path, issue.trim_to) == ("long", long, 441)
+    [issue] = review_of(tmp_path, "sub-C_ses-1").issues
+    assert (issue.kind, issue.path) == ("short", short)
+    assert "33 volumes, expected 441" in issue.text
+
+
+def test_without_expected_lengths_the_longest_runs_set_the_bar(tmp_path: Path) -> None:
+    # Why the setting exists: runs stopped late make the right-length ones look short.
+    for subject in "AB":
+        write_nifti(func(tmp_path, subject, "1", "task-Rest_bold.nii.gz"), 520)
+    write_nifti(func(tmp_path, "C", "1", "task-Rest_bold.nii.gz"), 441)
+    assert [i.kind for i in review_of(tmp_path, "sub-C_ses-1").issues] == ["short"]
+    cc.write_expected(tmp_path, {"task-Rest_bold": 441})
+    assert review_of(tmp_path, "sub-C_ses-1").issues == []
+
+
+def test_trim_keeps_the_first_volumes_and_notes_the_original(tmp_path: Path) -> None:
+    import nibabel as nib
+    import numpy as np
+
+    path = write_bold(func(tmp_path, "A", "1", "task-Matching_bold.nii.gz"), 10)
+    before = np.asarray(nib.Nifti1Image.from_filename(path).dataobj)
+    data = next(d for d in cc.find_data_files(tmp_path) if d.path == path)
+
+    cc.trim_run(data, 6)
+
+    image = nib.Nifti1Image.from_filename(path)
+    assert image.shape == (2, 2, 2, 6)
+    assert image.get_data_dtype() == np.int16
+    assert np.array_equal(np.asarray(image.dataobj), before[..., :6])
+    assert json.loads(data.sidecar.read_text())["TrimmedFromVolumes"] == 10
+    assert not list(path.parent.glob("*_trim*"))
+    with pytest.raises(cc.CrosscheckError, match="nothing to trim"):
+        cc.trim_run(data, 6)
+
+
+def test_trim_refuses_to_cut_off_events(tmp_path: Path) -> None:
+    path = write_bold(func(tmp_path, "A", "1", "task-Matching_bold.nii.gz"), 10, tr=2.0)
+    events = func(tmp_path, "A", "1", "task-Matching_events.tsv")
+    events.write_text("onset\tduration\n2\t1\n14\t2\n")  # last event ends at 16 s
+    data = next(d for d in cc.find_data_files(tmp_path) if d.path == path)
+    with pytest.raises(cc.CrosscheckError, match="events run to 16 s"):
+        cc.trim_run(data, 6)  # 12 s
+    cc.trim_run(data, 8)  # 16 s: fits

@@ -254,7 +254,7 @@ def test_subjects_run_side_by_side(
     window.docker_error = ""
     both_running = threading.Barrier(2, timeout=10)  # breaks unless 2 run at once
 
-    def fake_preprocess(*args: object) -> str | None:
+    def fake_preprocess(*args: object, **_kwargs: object) -> str | None:
         on_line = args[-1]
         assert callable(on_line)
         both_running.wait()
@@ -308,6 +308,22 @@ def test_suggest_fills_in_the_plan(window: preprocess_gui.PreprocessWindow) -> N
     assert window.memory_label.text().startswith("⚠ 2 subjects x 40 GB = 80 GB")
 
 
+def test_suggest_rereads_docker_limits(
+    window: preprocess_gui.PreprocessWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window.memory_probe.wait()
+    QApplication.processEvents()  # the fixture's 'Docker isn't running' probe result
+    window._on_memory_probed(15.5, 20, "")  # read before .wslconfig was raised
+    monkeypatch.setattr(preprocess_gui, "find_docker", lambda: Path("docker"))
+    monkeypatch.setattr(preprocess_gui, "docker_resources", lambda _docker: (23.5, 16))
+    window._on_suggest()
+    window.memory_probe.wait()
+    QApplication.processEvents()  # deliver the fresh limits
+    plan = window._plan()
+    assert (plan.parallel, plan.n_cpus, plan.mem_gb) == (2, 8, 10.0)
+    assert not window.suggest_pending
+
+
 def test_task_ticks_filter_and_partial(
     window: preprocess_gui.PreprocessWindow, tmp_path: Path
 ) -> None:
@@ -338,7 +354,7 @@ def test_stop_now_frees_resources_and_marks_the_subject(
     started: list[str] = []
     stopped_calls: list[list[str]] = []
 
-    def fake_preprocess(*args: object) -> str | None:
+    def fake_preprocess(*args: object, **_kwargs: object) -> str | None:
         subject, on_line = args[3], args[-1]
         assert isinstance(subject, str) and callable(on_line)
         started.append(subject)

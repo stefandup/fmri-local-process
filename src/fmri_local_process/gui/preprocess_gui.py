@@ -26,6 +26,7 @@ from PySide6.QtGui import QCloseEvent, QColor, QFont, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -82,17 +83,21 @@ from fmri_local_process.gui.qt_common import (
 from fmri_local_process.processing.brain_slices import SlicePreview, render_slices, slice_previews
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
+    HANG_ACTIONS,
     MIN_CPUS_PER_SUBJECT,
     MIN_MEM_GB,
+    RESTART_MARKER,
     START_GAP_S,
     SUGGESTED_MEM_GB,
     DockerUnavailableError,
+    HangPolicy,
     ParallelPlan,
     StartGate,
     bids_subjects,
     bids_tasks,
     bold_sessions,
     clear_subject_results,
+    clear_working_volume,
     docker_desktop,
     docker_memory_gb,
     docker_resources,
@@ -174,6 +179,8 @@ class RunSettings:
     mode: str = "skip"  # a RUN_MODES key
     image: str = CPAC_IMAGE
     parallel: int = 1  # subjects at once, each in its own container
+    hang: HangPolicy = field(default_factory=HangPolicy)
+    keep_working: bool = False  # keep a finished subject's working folder in Docker
 
 
 @dataclass
@@ -268,6 +275,10 @@ class PreprocessThread(QThread):
             nonlocal steps_done
             if self.stop_now_requested and subject not in self.stopping:
                 self.stop_container(subject)
+            if line == RESTART_MARKER:  # the resumed run counts its steps again
+                steps_done = 0
+                self.step.emit(subject, "restarted after a hang", 0)
+                return
             node = finished_node(line)
             if node is not None:
                 steps_done += 1
@@ -275,7 +286,10 @@ class PreprocessThread(QThread):
 
         try:
             if run.mode == "scratch":
-                removed = clear_subject_results(run.output_root, subject)
+                removed = [
+                    *clear_subject_results(run.output_root, subject),
+                    *clear_working_volume(docker, run.image, run.output_root, subject),
+                ]
                 self.message.emit(
                     f"sub-{subject}: deleted {len(removed)} previous working/output folder(s)",
                     False,
@@ -290,6 +304,12 @@ class PreprocessThread(QThread):
                 run.mem_gb,
                 run.tasks,
                 on_line,
+                hang=run.hang,
+                tell=lambda text: self.message.emit(
+                    text, any(word in text for word in ("hung", "lost contact", "didn't come"))
+                ),
+                may_restart=lambda: not self.stop_now_requested,
+                keep_working=run.keep_working,
             )
         except Exception as e:  # noqa: BLE001 -- one subject's crash mustn't end the batch
             log.exception("sub-%s crashed", subject)
@@ -399,6 +419,7 @@ class PreprocessWindow(QMainWindow):
         self.docker_cpus: int | None = None
         self.docker_error = ""
         self.memory_probed = False
+        self.suggest_pending = False  # 'Suggest' waits for a fresh look at Docker's limits
         self.docker_control: DockerControlThread | None = None
         # Untick-list rather than tick-list, so newly found subjects start ticked.
         self.unticked: set[str] = set()
@@ -578,7 +599,8 @@ class PreprocessWindow(QMainWindow):
         self.suggest_button = QPushButton("Suggest")
         self.suggest_button.setToolTip(
             wrap_tooltip(
-                f"Fill in Subjects, CPUs and Memory from Docker's limits: about "
+                f"Re-read Docker's limits (they change after editing .wslconfig and "
+                f"restarting WSL) and fill in Subjects, CPUs and Memory: about "
                 f"{SUGGESTED_MEM_GB:g} GB and at least {MIN_CPUS_PER_SUBJECT} CPUs per "
                 "subject, at most as many subjects as are ticked."
             )
@@ -588,9 +610,11 @@ class PreprocessWindow(QMainWindow):
         form.addRow("Subjects:", parallel_row)
         self.cpus_spin = QSpinBox()
         self.cpus_spin.setRange(1, os.cpu_count() or 1)
-        self.cpus_spin.setToolTip("CPU cores C-PAC may use per subject.")
+        self.cpus_spin.setToolTip(
+            "CPU cores C-PAC may use per subject (the total is this x Subjects)."
+        )
         self.cpus_spin.valueChanged.connect(self._update_memory_label)
-        form.addRow("CPUs:", self.cpus_spin)
+        form.addRow("CPUs per subject:", self.cpus_spin)
         self.mem_spin = QDoubleSpinBox()
         self.mem_spin.setRange(MIN_MEM_GB, 512.0)
         self.mem_spin.setSingleStep(1.0)
@@ -598,13 +622,14 @@ class PreprocessWindow(QMainWindow):
         self.mem_spin.setSuffix(" GB")
         self.mem_spin.setToolTip(
             wrap_tooltip(
-                f"RAM C-PAC may use per subject. At least {MIN_MEM_GB:g} GB: below that "
+                f"RAM C-PAC may use per subject (the total is this x Subjects). At least "
+                f"{MIN_MEM_GB:g} GB: below that "
                 "C-PAC refuses to start. Docker Desktop's own memory limit (Settings > "
                 "Resources) must allow at least this much."
             )
         )
         self.mem_spin.valueChanged.connect(self._update_memory_label)
-        form.addRow("Memory:", self.mem_spin)
+        form.addRow("Memory per subject:", self.mem_spin)
         layout.addLayout(form)
         self.memory_label = QLabel("Checking this computer's and Docker's memory...")
         self.memory_label.setWordWrap(True)
@@ -649,6 +674,57 @@ class PreprocessWindow(QMainWindow):
             )
         )
         mode_form.addRow("Run mode:", self.mode_combo)
+
+        self.hang_spin = QSpinBox()
+        self.hang_spin.setRange(0, 24 * 60)
+        self.hang_spin.setSingleStep(5)
+        self.hang_spin.setSuffix(" min")
+        self.hang_spin.setSpecialValueText("Off")
+        self.hang_spin.setToolTip(
+            wrap_tooltip(
+                "C-PAC sometimes stops making progress without failing: it waits forever "
+                "for a step that isn't running. A subject counts as hung when no step starts "
+                "or finishes AND its container's CPU stays near idle for this long. Long real "
+                "steps (registration: an hour or more) keep a CPU busy, so they don't count. "
+                "Off: never check."
+            )
+        )
+        self.hang_action_combo = QComboBox()
+        for action, label in HANG_ACTIONS.items():
+            self.hang_action_combo.addItem(label, action)
+        self.hang_action_combo.setToolTip(
+            wrap_tooltip(
+                "Restart: stop the container and start it again; C-PAC picks up from its "
+                "last finished step (up to the number of times given, then it counts as "
+                "failed). Stop: free its CPU and memory and count it as failed (run it "
+                "again later to resume). Only warn: note it in the activity log."
+            )
+        )
+        self.restarts_spin = QSpinBox()
+        self.restarts_spin.setRange(0, 10)
+        self.restarts_spin.setPrefix("up to ")
+        self.restarts_spin.setSuffix(" times")
+        self.restarts_spin.setToolTip("How often one subject may be restarted after a hang.")
+        self.hang_action_combo.currentIndexChanged.connect(self._update_hang_widgets)
+        self.hang_spin.valueChanged.connect(self._update_hang_widgets)
+        hang_row = QHBoxLayout()
+        hang_row.addWidget(self.hang_spin)
+        hang_row.addWidget(QLabel("then"))
+        hang_row.addWidget(self.hang_action_combo, 1)
+        hang_row.addWidget(self.restarts_spin)
+        mode_form.addRow("If stuck for:", hang_row)
+
+        self.keep_working_check = QCheckBox("Keep C-PAC's working folder after a subject finishes")
+        self.keep_working_check.setToolTip(
+            wrap_tooltip(
+                "C-PAC's working folder holds every intermediate step (10+ GB per subject), "
+                "inside Docker's own disk. It's what lets a stopped or hung subject resume. "
+                "Off: deleted once the subject is fully preprocessed. On: kept, so a later "
+                "rerun with other tasks can reuse the anatomical steps, at the cost of disk "
+                "space on the drive Docker Desktop lives on."
+            )
+        )
+        mode_form.addRow("", self.keep_working_check)
         layout.addLayout(mode_form)
 
         run_row = QHBoxLayout()
@@ -778,6 +854,19 @@ class PreprocessWindow(QMainWindow):
         saved_mode = str(self.settings.value("run_mode", "skip"))
         if saved_mode != "scratch" and (index := self.mode_combo.findData(saved_mode)) >= 0:
             self.mode_combo.setCurrentIndex(index)
+        default_hang = HangPolicy()
+        self.hang_spin.setValue(
+            int(float(str(self.settings.value("hang_minutes", default_hang.minutes))))
+        )
+        action = str(self.settings.value("hang_action", default_hang.action))
+        self.hang_action_combo.setCurrentIndex(max(0, self.hang_action_combo.findData(action)))
+        self.restarts_spin.setValue(
+            int(str(self.settings.value("max_restarts", default_hang.max_restarts)))
+        )
+        self.keep_working_check.setChecked(
+            str(self.settings.value("keep_working", "false")).lower() == "true"
+        )
+        self._update_hang_widgets()
         self.memory_probe = MemoryProbeThread()
         self.memory_probe.done.connect(self._on_memory_probed)
         self.memory_probe.start()
@@ -995,6 +1084,10 @@ class PreprocessWindow(QMainWindow):
         self.docker_cpus = docker_cpus
         self.docker_error = docker_error
         self.memory_probed = True
+        if self.suggest_pending:
+            self.suggest_pending = False
+            if docker_gb is not None:  # fresh limits: fill in again from them
+                self._fill_in_suggestion()
         self._update_memory_label()
         self._update_docker_label()
 
@@ -1048,6 +1141,21 @@ class PreprocessWindow(QMainWindow):
         return suggest_plan(cpus, self.docker_gb, len(self._ticked_subjects()))
 
     def _on_suggest(self) -> None:
+        """Fill in from the limits known now, then again once Docker is re-asked: they
+        go stale when WSL restarts with a new .wslconfig while this window is open."""
+        self._fill_in_suggestion()
+        self.suggest_pending = True
+        self._probe_docker()
+
+    def _suggest_note(self) -> str:
+        """Why the suggestion runs fewer subjects at once than Docker would fit, if so."""
+        ticked = len(self._ticked_subjects())
+        cpus = self.docker_cpus or os.cpu_count()
+        if ticked and suggest_plan(cpus, self.docker_gb).parallel > ticked:
+            return f" (only {ticked} subject(s) ticked)"
+        return ""
+
+    def _fill_in_suggestion(self) -> None:
         plan = self._suggested_plan()
         self.parallel_spin.setValue(plan.parallel)
         self.cpus_spin.setValue(plan.n_cpus)
@@ -1078,8 +1186,8 @@ class PreprocessWindow(QMainWindow):
         suggested = self._suggested_plan()
         if suggested != plan and self.docker_gb is not None:
             text += (
-                f"\nSuggested here: {suggested.parallel} at once x {suggested.n_cpus} CPUs, "
-                f"{suggested.mem_gb:g} GB (click 'Suggest')."
+                f"\nSuggested here: {suggested.parallel} at once{self._suggest_note()} x "
+                f"{suggested.n_cpus} CPUs, {suggested.mem_gb:g} GB each (click 'Suggest')."
             )
         self.memory_label.setText(text)
         style = f"color: {color};" if color else f"color: {UNKNOWN_COLOR};"
@@ -1340,6 +1448,11 @@ class PreprocessWindow(QMainWindow):
         self.settings.setValue("n_cpus", plan.n_cpus)
         self.settings.setValue("mem_gb", plan.mem_gb)
         self.settings.setValue("run_mode", mode)
+        hang = self._hang_policy()
+        self.settings.setValue("hang_minutes", int(hang.minutes))
+        self.settings.setValue("hang_action", hang.action)
+        self.settings.setValue("max_restarts", hang.max_restarts)
+        self.settings.setValue("keep_working", self.keep_working_check.isChecked())
         run = RunSettings(
             bids_root=self.bids_folder,
             output_root=self.output_folder,
@@ -1349,6 +1462,8 @@ class PreprocessWindow(QMainWindow):
             mem_gb=plan.mem_gb,
             mode=mode,
             parallel=min(plan.parallel, len(subjects)),
+            hang=hang,
+            keep_working=self.keep_working_check.isChecked(),
         )
         self.output_folder.mkdir(parents=True, exist_ok=True)
         self.worker = PreprocessThread(run)
@@ -1378,6 +1493,20 @@ class PreprocessWindow(QMainWindow):
         self._update_run_title()
         self._update_buttons()
         self.worker.start()
+
+    def _hang_policy(self) -> HangPolicy:
+        return HangPolicy(
+            float(self.hang_spin.value()),
+            str(self.hang_action_combo.currentData()),
+            self.restarts_spin.value(),
+        )
+
+    def _update_hang_widgets(self) -> None:
+        checking = self.hang_spin.value() > 0
+        self.hang_action_combo.setEnabled(checking)
+        self.restarts_spin.setEnabled(
+            checking and self.hang_action_combo.currentData() == "restart"
+        )
 
     def _estimate_key(self) -> str:
         return f"steps_per_subject/{'+'.join(self._tasks()) or 'all'}"

@@ -36,16 +36,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fmri_local_process.gui.expected_lengths import ExpectedLengthsDialog
 from fmri_local_process.processing.crosscheck import (
     CrosscheckError,
     DataFile,
     SessionReview,
     delete_data_file,
+    find_data_files,
     keep_run,
     move_into_session,
     review_bids_folder,
     sidecar_note,
     subject_sessions,
+    trim_run,
 )
 from fmri_local_process.processing.dcm2niix import (
     Dcm2niixNotFoundError,
@@ -59,14 +62,21 @@ log = logging.getLogger(__name__)
 
 SETTINGS_ORGANIZATION = "MooiToolbox"  # same as vr_lab_toolbox
 SETTINGS_APP = "FmriCrosscheck"
-ICONS = {"pending": "⚠", "short": "❗", "missing": "○"}
-COLORS = {"pending": "#f39c12", "short": "#e74c3c", "missing": "#9b59b6", "ok": "#2ecc71"}
+ICONS = {"pending": "⚠", "short": "❗", "long": "✂", "missing": "○"}
+COLORS = {
+    "pending": "#f39c12",
+    "short": "#e74c3c",
+    "long": "#3498db",
+    "missing": "#9b59b6",
+    "ok": "#2ecc71",
+}
 OK_ICON = "●"
 ACCENT_COLOR = "#5b9bd5"
 LEGEND = (
     f"{OK_ICON} nothing to resolve\n"
     f"{ICONS['pending']} staged runs/logs to pick or assign\n"
-    f"{ICONS['short']} shorter than the same scan elsewhere, or no events\n"
+    f"{ICONS['short']} shorter than expected (or than the same scan elsewhere), or no events\n"
+    f"{ICONS['long']} longer than expected: trim it\n"
     f"{ICONS['missing']} expected file missing"
 )
 
@@ -108,6 +118,27 @@ class ConvertThread(QThread):
         self.done.emit(report)
 
 
+class TrimThread(QThread):
+    """Trims runs one by one (each is a few seconds of gzip); reports progress as log lines."""
+
+    line = Signal(str)
+
+    def __init__(self, jobs: list[tuple[DataFile, int]]):
+        super().__init__()
+        self.jobs = jobs
+
+    def run(self) -> None:
+        for number, (data, volumes) in enumerate(self.jobs, start=1):
+            try:
+                trim_run(data, volumes)
+            except (CrosscheckError, OSError, ValueError) as e:
+                self.line.emit(f"NOT TRIMMED  {e}")
+                continue
+            self.line.emit(
+                f"Trimmed {data.path.name} to {volumes} volumes ({number}/{len(self.jobs)})"
+            )
+
+
 def reveal(folder: Path) -> None:
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
@@ -120,7 +151,8 @@ def problem_text(review: SessionReview) -> str:
 
 def problem_color(review: SessionReview) -> str:
     kinds = {i.kind for i in review.issues}
-    return next((COLORS[k] for k in ("short", "pending", "missing") if k in kinds), COLORS["ok"])
+    order = ("short", "pending", "long", "missing")
+    return next((COLORS[k] for k in order if k in kinds), COLORS["ok"])
 
 
 class CrosscheckWindow(QMainWindow):
@@ -132,6 +164,7 @@ class CrosscheckWindow(QMainWindow):
         self.folders: dict[str, Path | None] = {}
         self.reviews: list[SessionReview] = []
         self.convert_thread: ConvertThread | None = None
+        self.trim_thread: TrimThread | None = None
         self.emitter = LogEmitter()
         self.emitter.line.connect(self.log_line)
         self.log_handler = QtLogHandler(self.emitter)
@@ -180,6 +213,17 @@ class CrosscheckWindow(QMainWindow):
         rescan = QPushButton("Rescan BIDS folder")
         rescan.clicked.connect(self.rescan)
         actions.addWidget(rescan)
+        lengths = QPushButton("Expected lengths...")
+        lengths.setToolTip("Set how many volumes each BOLD scan should have.")
+        lengths.clicked.connect(self.on_expected_lengths)
+        actions.addWidget(lengths)
+        self.trim_all_button = QPushButton("Trim all long runs...")
+        self.trim_all_button.setToolTip(
+            "Cut every run that is longer than its expected length down to it, keeping the "
+            "first volumes."
+        )
+        self.trim_all_button.clicked.connect(self.on_trim_all)
+        actions.addWidget(self.trim_all_button)
         actions.addStretch(1)
         self.deface_box = QCheckBox("Deface T1w")
         self.deface_box.setToolTip(
@@ -277,6 +321,7 @@ class CrosscheckWindow(QMainWindow):
                     item.setToolTip(LEGEND)
                 self.table.setItem(row, column, item)
         self.table.resizeColumnsToContents()
+        self.trim_all_button.setEnabled(bool(self.long_runs()) and self.trim_thread is None)
         with_issues = sum(bool(r.issues) for r in self.reviews)
         self.summary.setText(
             f"{len(self.reviews)} session(s), {with_issues} with something to check"
@@ -334,14 +379,20 @@ class CrosscheckWindow(QMainWindow):
     def files_group(self, review: SessionReview, bids_root: Path) -> QGroupBox:
         group = QGroupBox(f"Files ({len(review.files)})")
         grid = QGridLayout(group)
-        flagged = {i.path for i in review.issues if i.kind == "short"}
+        flagged = {i.path: i for i in review.issues if i.kind in ("short", "long")}
         for row, data in enumerate(review.files):
-            bad = data.path in flagged
-            mark = QLabel(ICONS["short"] if bad else "✓")
-            mark.setStyleSheet(f"color: {COLORS['short'] if bad else COLORS['ok']};")
+            issue = flagged.get(data.path)
+            kind = issue.kind if issue else "ok"
+            mark = QLabel(ICONS[kind] if issue else "✓")
+            mark.setStyleSheet(f"color: {COLORS[kind]};")
             grid.addWidget(mark, row, 0)
             grid.addWidget(QLabel(f"{data.datatype}/{data.path.name}"), row, 1)
             grid.addWidget(QLabel(data.summary()), row, 2)
+            if issue and issue.trim_to:
+                trim = QPushButton(f"Trim to {issue.trim_to}...")
+                trim.setEnabled(self.trim_thread is None)
+                trim.clicked.connect(partial(self.on_trim, [(data, issue.trim_to)]))
+                grid.addWidget(trim, row, 5)
             reveal_button = QPushButton("Reveal")
             reveal_button.clicked.connect(partial(reveal, data.path.parent))
             grid.addWidget(reveal_button, row, 3)
@@ -442,6 +493,52 @@ class CrosscheckWindow(QMainWindow):
     def on_delete(self, data: DataFile, bids_root: Path) -> None:
         if self.confirm(f"Delete {data.path.name} and its sidecar from the BIDS folder?"):
             self.run_action(f"Deleted {data.path.name}", partial(delete_data_file, bids_root, data))
+
+    def on_expected_lengths(self) -> None:
+        bids_root = self.folders.get("bids")
+        if bids_root is None:
+            QMessageBox.information(self, "No BIDS folder", "Choose the BIDS folder first.")
+            return
+        dialog = ExpectedLengthsDialog(bids_root, find_data_files(bids_root), self)
+        if dialog.exec():
+            self.log_line("Saved expected scan lengths")
+            self.rescan()
+
+    def long_runs(self) -> list[tuple[DataFile, int]]:
+        files = {d.path: d for r in self.reviews for d in r.files}
+        return [
+            (files[i.path], i.trim_to)
+            for r in self.reviews
+            for i in r.issues
+            if i.kind == "long" and i.trim_to and i.path in files
+        ]
+
+    def on_trim_all(self) -> None:
+        self.on_trim(self.long_runs())
+
+    def on_trim(self, jobs: list[tuple[DataFile, int]]) -> None:
+        if not jobs or self.trim_thread is not None:
+            return
+        names = "\n".join(f"  {d.path.name}: {d.volumes} -> {n}" for d, n in jobs[:15])
+        more = f"\n  ... and {len(jobs) - 15} more" if len(jobs) > 15 else ""
+        if not self.confirm(
+            f"Trim {len(jobs)} run(s), keeping the first volumes?\n{names}{more}\n\n"
+            "The cut volumes are deleted from the BIDS folder (the raw DICOMs keep them: "
+            "delete the file and convert again to restore it). Don't trim while C-PAC is "
+            "preprocessing these subjects."
+        ):
+            return
+        self.trim_all_button.setEnabled(False)
+        self.trim_thread = TrimThread(jobs)
+        self.trim_thread.line.connect(self.log_line)
+        self.trim_thread.finished.connect(self.on_trim_done)
+        self.trim_thread.start()
+
+    def on_trim_done(self) -> None:
+        if self.trim_thread is not None:
+            self.trim_thread.wait()
+        self.trim_thread = None
+        self.rescan()
 
     def on_convert(self) -> None:
         bids_root, dicom_root = self.folders.get("bids"), self.folders.get("dicom")

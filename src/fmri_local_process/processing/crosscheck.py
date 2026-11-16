@@ -6,9 +6,15 @@ from the data itself:
 
 * missing: a NIfTI without its JSON sidecar, a task bold without its events.tsv, or a scan
   most other sessions have
-* short: fewer volumes (or, for a 3D image, fewer bytes) than the same scan elsewhere --
-  e.g. a series converted from an incomplete copy; an events.tsv with no events
+* short: fewer volumes (or, for a 3D image, fewer bytes) than the same scan elsewhere, or
+  than its expected length -- e.g. a series converted from an incomplete copy; an
+  events.tsv with no events
+* long: more volumes than its expected length (the scan was stopped by hand after the
+  task); trim_run keeps the first volumes
 * pending: candidates the converter staged in crosscheck_pending/
+
+Expected lengths are set by the human per scan (e.g. task-Matching_bold: 441) and kept in
+the BIDS folder's code/expected_volumes.json, so they travel with the data.
 """
 
 import csv
@@ -20,6 +26,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from statistics import median
 
+import nibabel as nib
+import numpy as np
+
 from fmri_local_process.processing.behav_logs import BEHAV_TASKS
 from fmri_local_process.processing.philani_bids import PENDING_DIR
 
@@ -28,6 +37,7 @@ log = logging.getLogger(__name__)
 DATA_PATTERNS = ("*.nii.gz", "*_events.tsv")
 NIFTI1_HEADER_BYTES = 348
 SHORT_SIZE_FRACTION = 0.9  # a 3D image under 90% of the typical size is suspect
+EXPECTED_FILE = Path("code") / "expected_volumes.json"
 
 
 class CrosscheckError(Exception):
@@ -70,9 +80,10 @@ class DataFile:
 
 @dataclass(frozen=True)
 class Issue:
-    kind: str  # "missing" / "short" / "pending"
+    kind: str  # "missing" / "short" / "long" / "pending"
     text: str
     path: Path | None = None
+    trim_to: int | None = None  # "long" only: the expected volumes
 
 
 @dataclass
@@ -165,14 +176,45 @@ def sidecar_note(data: DataFile) -> str:
     return ", ".join(f"{key} {sidecar[key]}" for key in keys if key in sidecar)
 
 
-def short_issue(data: DataFile, peers: list[DataFile]) -> Issue | None:
-    """Compare data with the same scan elsewhere (needs at least one other copy)."""
+def read_expected(bids_root: Path) -> dict[str, int]:
+    """Expected volumes per scan label, as set by the human ({} when none are set)."""
+    try:
+        saved = json.loads((bids_root / EXPECTED_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): int(v) for k, v in saved.items() if isinstance(v, int) and v > 0}
+
+
+def write_expected(bids_root: Path, expected: dict[str, int]) -> None:
+    path = bids_root / EXPECTED_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    kept = {label: n for label, n in sorted(expected.items()) if n > 0}
+    path.write_text(json.dumps(kept, indent=2) + "\n", encoding="utf-8")
+
+
+def length_issue(data: DataFile, expected: int) -> Issue | None:
+    """Compare a 4D scan with the length the human set for it."""
+    assert data.volumes is not None
+    if data.volumes < expected:
+        text = f"{data.path.name}: {data.volumes} volumes, expected {expected}"
+        return Issue("short", text, data.path)
+    if data.volumes > expected:
+        text = f"{data.path.name}: {data.volumes} volumes, expected {expected} (trim the rest)"
+        return Issue("long", text, data.path, trim_to=expected)
+    return None
+
+
+def short_issue(data: DataFile, peers: list[DataFile], expected: int | None = None) -> Issue | None:
+    """Compare data with its expected length if set, else with the same scan elsewhere
+    (needs at least one other copy)."""
     if data.events is not None:
         return (
             Issue("short", f"{data.path.name}: no events", data.path) if not data.events else None
         )
     if data.volumes is None:
         return Issue("short", f"{data.path.name}: NIfTI header unreadable", data.path)
+    if expected and data.volumes > 1:
+        return length_issue(data, expected)
     others = [p for p in peers if p.path != data.path and p.volumes is not None]
     if not others:
         return None
@@ -199,6 +241,7 @@ def short_issue(data: DataFile, peers: list[DataFile]) -> Issue | None:
 def review_bids_folder(bids_root: Path) -> list[SessionReview]:
     """Every session (plus subject-level staged logs) with the problems found in it."""
     data_files = find_data_files(bids_root)
+    expected = read_expected(bids_root)
     reviews: dict[tuple[str, str | None], SessionReview] = {}
     for session_dir in sorted(bids_root.glob("sub-*/ses-*")):  # listed even when empty
         if session_dir.is_dir():
@@ -231,7 +274,7 @@ def review_bids_folder(bids_root: Path) -> list[SessionReview]:
         for data in review.files + review.pending:
             if data.volumes is not None and not data.sidecar.exists():
                 review.issues.append(Issue("missing", f"{data.sidecar.name} (sidecar)", data.path))
-            issue = short_issue(data, by_label[data.label])
+            issue = short_issue(data, by_label[data.label], expected.get(data.label))
             if issue:
                 review.issues.append(issue)
         if review.session is None:
@@ -306,6 +349,53 @@ def keep_run(bids_root: Path, chosen: DataFile, candidates: list[DataFile]) -> P
         if other.path != chosen.path:
             delete_data_file(bids_root, other)
     return target
+
+
+def events_end_s(data: DataFile) -> float | None:
+    """When the last event of a bold run's events.tsv ends (seconds), if there is one."""
+    tsv = data.path.with_name(data.path.name.removesuffix("_bold.nii.gz") + "_events.tsv")
+    try:
+        with tsv.open(newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f, delimiter="\t"))
+        return max((float(r["onset"]) + float(r.get("duration") or 0) for r in rows), default=None)
+    except (OSError, KeyError, ValueError, csv.Error, UnicodeDecodeError):
+        return None
+
+
+def trim_run(data: DataFile, volumes: int) -> None:
+    """Keep only the first `volumes` volumes of a 4D run (the scan ran on after the task).
+
+    Refuses if its events.tsv has events after the cut. The sidecar records the original
+    length as TrimmedFromVolumes. The raw DICOMs are untouched: deleting the file and
+    converting again restores the full run.
+    """
+    image = nib.load(data.path)
+    if not isinstance(image, nib.Nifti1Image) or len(image.shape) != 4:
+        raise CrosscheckError(f"{data.path.name} is not a 4D NIfTI")
+    original = image.shape[3]
+    if original <= volumes:
+        raise CrosscheckError(f"{data.path.name} has {original} volumes; nothing to trim")
+    if data.repetition_time:
+        end = events_end_s(data)
+        if end is not None and end > volumes * data.repetition_time:
+            raise CrosscheckError(
+                f"{data.path.name}: its events run to {end:.0f} s, past the trimmed length "
+                f"({volumes * data.repetition_time:.0f} s). Check the expected length."
+            )
+    header = image.header.copy()
+    trimmed = nib.Nifti1Image(np.asarray(image.dataobj[..., :volumes]), image.affine, header)
+    trimmed.set_data_dtype(image.get_data_dtype())
+    partial_path = data.path.with_name(data.path.name.removesuffix(".nii.gz") + "_trim.nii.gz")
+    nib.save(trimmed, partial_path)
+    del image  # release the file before replacing it (Windows)
+    partial_path.replace(data.path)
+    try:
+        sidecar = json.loads(data.sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        sidecar = {}
+    sidecar.setdefault("TrimmedFromVolumes", original)
+    data.sidecar.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+    log.info("Trimmed %s: %d -> %d volumes", data.path.name, original, volumes)
 
 
 def subject_sessions(bids_root: Path, subject: str) -> list[str]:

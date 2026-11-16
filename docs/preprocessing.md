@@ -34,15 +34,18 @@ the window (panel 11).
 
 ## Before you start
 
-1. **Install Docker Desktop** and start it. The first run downloads the C-PAC image
-   (about 15 GB, once); that can take half an hour or more.
+1. **Install Docker Desktop** and start it. The installer's *Docker and tools* page can
+   install it, download the C-PAC image (about 15 GB, once) and set up the T1w defacer;
+   anything already on the PC shows as *OK*. Otherwise the first run downloads C-PAC,
+   which can take half an hour or more.
 2. **Give Docker enough memory.** Each subject needs at least 8 GB, and about 10 GB is
    safer. Docker only uses what it is allowed — see
    [Docker's memory and CPU limits](#dockers-memory-and-cpu-limits) below.
 3. **Use a fast local disk** (an SSD) for the output folder — not OneDrive or a network
    drive. C-PAC writes a lot of small files, and a slow disk slows everything down.
-4. **Check the free space.** Plan on roughly 2–5 GB of output per subject, plus about the
-   same again for C-PAC's `working/` folder while it runs.
+4. **Check the free space.** Plan on roughly 2–5 GB of output per subject in the output
+   folder. While a subject runs, C-PAC's working folder needs another 5–20 GB on the drive
+   Docker Desktop lives on (usually C:); see [C-PAC's working folder](#c-pacs-working-folder).
 
 ## The window, at a glance
 
@@ -81,17 +84,19 @@ Tick the fMRI tasks (BOLD runs) to preprocess; scroll if there are more than fit
   had (e.g. a missing scan) is simply ignored for that subject.
 - The subject list, the status icons and the previews (panels 10 and 11) follow the ticks.
 
-### 3. Subjects at once, CPUs and Memory
+### 3. Subjects at once, CPUs and Memory per subject
 
 - **Subjects** — how many subjects run side by side, each in its own container.
-- **CPUs** and **Memory** — what *each* subject may use.
+- **CPUs per subject** and **Memory per subject** — what *each* subject may use.
 
 So "2 at once, 16 CPUs, 24 GB" uses 32 CPUs and 48 GB in total. Many C-PAC steps only use
 one CPU, so several subjects with a few CPUs each finish a batch sooner than one subject
 with all of them.
 
-**Suggest** fills in all three from Docker's limits: about 10 GB and at least 2 CPUs per
-subject, and never more subjects than you've ticked.
+**Suggest** re-reads Docker's limits (so it picks up a `.wslconfig` change made while the
+window is open) and fills in all three: about 10 GB and at least 2 CPUs per subject, and
+never more subjects than you've ticked. For example, with 24 GB and 16 CPUs for Docker it
+suggests 2 at once × 8 CPUs × 10 GB.
 
 The coloured line below explains what you've chosen:
 
@@ -120,6 +125,26 @@ Shows whether Docker is running; it is re-checked every 30 seconds.
 | **Resume all (reuse finished steps)** | Runs every ticked subject again, but reuses what C-PAC already finished. |
 | **Rerun from scratch (delete previous results)** | Deletes each ticked subject's earlier output and working folders first (it asks before deleting). Use it after changing the pipeline. Logs are kept. |
 
+**If stuck for … then …** — C-PAC sometimes stops making progress without failing: it waits
+forever for a step that isn't running. A subject counts as stuck when no step starts or
+finishes **and** its CPU stays near idle for this long (default 30 min; **Off** never checks).
+Long real steps such as registration keep a CPU busy, so they never count. Then:
+
+| Choice | What happens |
+| --- | --- |
+| **Restart it (finished steps are reused)** | The default. Stops the container and starts it again; C-PAC picks up from its last finished step. After **up to N times** it counts as failed (✗). |
+| **Stop it (counts as failed)** | Frees its CPU and memory and marks it ✗. Run it again later to resume. |
+| **Only warn** | Writes a red line in the Activity Log and leaves it running. |
+
+**If Docker itself goes away** mid-run (Docker Desktop restarts, its Linux VM crashes, or
+someone runs `wsl --shutdown`), the window waits up to 20 minutes for Docker to come back,
+then resumes each affected subject from its last finished step (up to 3 times per subject).
+This is always on; **Stop now** cancels the wait.
+
+**Keep C-PAC's working folder after a subject finishes** — off by default: once a subject is
+✓ done, its working folder is deleted. Tick it to keep them, e.g. if you will run more tasks
+for the same subjects later and want to reuse their anatomical steps.
+
 !!! tip "Keep the CPUs the same when resuming"
     C-PAC only reuses finished steps when the settings match. Change the CPUs between runs
     and it may redo the functional steps.
@@ -138,7 +163,7 @@ What C-PAC writes there:
 | --- | --- |
 | `output/pipeline_cpac_preproc/sub-<id>/ses-<n>/` | The results: preprocessed scans, masks, QC figures, motion tables. |
 | `log/` | C-PAC's logs, plus `fmri_preprocess_sub-<id>.txt`: everything C-PAC printed for that subject. |
-| `working/` | C-PAC's finished steps. This is what lets a stopped or crashed subject resume. It is large; once a subject is ✓ done, its folder here can be deleted to save space. |
+| `working/` | Empty (or left over from older versions). C-PAC's working folder now lives inside Docker; see [C-PAC's working folder](#c-pacs-working-folder). |
 
 ### 7. Summary
 
@@ -240,6 +265,30 @@ minutes, at most about an hour).
 - **Stop C-PAC and close** — the same as Stop now, then closes.
 - **Leave running and close** — the running subjects carry on in Docker; no new ones start.
 
+## C-PAC's working folder
+
+C-PAC keeps every intermediate step of a subject in a *working folder*: thousands of files,
+5–20 GB per subject. That is what lets a stopped, crashed or stuck subject resume instead of
+starting over.
+
+This folder lives **inside Docker** (a Docker *volume* named
+`fmri_cpac_working_<code>`, one per output folder), not in your output folder. Windows folders
+shared into Docker sometimes fail when C-PAC renames its small files, which made subjects
+crash or hang overnight; Docker's own disk doesn't have that problem, and it is faster.
+
+What that means for you:
+
+- You won't see it in Explorer, and you don't need to. The results still go to
+  `output/` and `log/` in your output folder, as before.
+- It takes space on the drive Docker Desktop is installed on (usually C:). Finished
+  subjects' working folders are deleted automatically (unless you tick **Keep C-PAC's
+  working folder**), so only running or unfinished subjects use space.
+- A `working/` folder left in the output folder by an older version is moved into Docker
+  the first time that subject runs again (the Activity Log says so; a large one takes a few
+  minutes), so its finished steps are still reused.
+- To see how much space it uses: `docker system df -v`. To delete all of it for an output
+  folder (unfinished subjects then start over): `docker volume rm fmri_cpac_working_<code>`.
+
 ## Docker's memory and CPU limits
 
 Docker Desktop on Windows only lets C-PAC use part of the PC: by default about **half the
@@ -307,6 +356,8 @@ fmri_preprocess D:\philani_bids D:\philani_cpac --parallel 3 --n-cpus 4 --mem-gb
 | `--task Rest` | Only this task; repeat for several (`--task Rest --task Matching`). |
 | `--parallel N` | Subjects at once (prints a warning and a suggestion if it doesn't fit Docker's limits). |
 | `--n-cpus`, `--mem-gb` | CPUs and memory per subject. |
+| `--hang-minutes`, `--on-hang`, `--max-restarts` | The stuck check: minutes (0: off), then `restart`, `stop` or `warn`, and restarts per subject (defaults: 30, restart, 2). |
+| `--keep-working` | Keep finished subjects' working folders in Docker. |
 | `--rerun` | Also run subjects that are already done (reuses finished steps). |
 
 Run `fmri_preprocess --help` for the full list.

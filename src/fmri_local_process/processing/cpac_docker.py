@@ -5,11 +5,13 @@ container does the work; this module only builds the `docker run` call and check
 """
 
 import fnmatch
+import hashlib
 import logging
 import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -24,6 +26,11 @@ CPAC_IMAGE = "fcpindi/c-pac:release-v1.8.7"
 CPAC_PRECONFIG = "preproc"
 BIDS_MOUNT = "/bids_dataset"
 OUTPUT_MOUNT = "/outputs"
+# C-PAC's working folder (its cache of finished steps) is a Docker volume mounted over
+# OUTPUT/working, not the Windows folder: nipype renames thousands of small files there,
+# and on a Windows bind mount some renames fail, crashing or (worse) silently hanging a
+# step. A volume lives on Docker's own Linux disk, so that can't happen (and it's faster).
+WORKING_MOUNT = f"{OUTPUT_MOUNT}/working"
 
 
 # C-PAC refuses to start ('Insufficient resources available for job') when --mem_gb is below
@@ -343,15 +350,123 @@ def read_expected_outputs(path: Path) -> dict[str, list[str]]:
 
 
 def clear_subject_results(output_root: Path, subject: str) -> list[Path]:
-    """Delete this subject's C-PAC working and output folders (so a rerun starts from
-    scratch), returning what was deleted. Logs are kept: they explain earlier failures."""
-    targets = [
-        *(output_root / "working").glob(f"pipeline_*/cpac_sub-{subject}_ses-*"),
-        *(output_root / "output").glob(f"pipeline_*/sub-{subject}"),
-    ]
+    """Delete this subject's C-PAC output folders (so a rerun starts from scratch),
+    returning what was deleted. Logs are kept: they explain earlier failures. Working
+    folders (in Docker, or old ones in the output folder) are cleared by
+    clear_working_volume: they hold Linux symlinks Windows can't delete."""
+    targets = list((output_root / "output").glob(f"pipeline_*/sub-{subject}"))
     for target in targets:
         shutil.rmtree(target)
     return targets
+
+
+def working_volume(output_root: Path) -> str:
+    """Name of the Docker volume holding C-PAC's working folder for this output folder.
+
+    One per output folder, so two datasets with the same subject labels never share
+    cached steps. Windows paths ignore case, hence lower().
+    """
+    key = str(output_root.resolve()).lower().encode()
+    return f"fmri_cpac_working_{hashlib.sha1(key).hexdigest()[:12]}"
+
+
+VOLUME_MOUNT = "/volume"
+HOST_WORKING_MOUNT = "/host_working"
+
+
+def volume_command(
+    docker: Path, image: str, output_root: Path, script: str, *args: str, host_working=False
+) -> list[str]:
+    """`docker run` of a bash script on the working volume (at /volume; the old Windows
+    working folder at /host_working too, if asked). args become $1, $2, ... so subject
+    labels are never pasted into the script. The C-PAC image runs it: it's already here."""
+    cmd = [str(docker), "run", "--rm", "--entrypoint", "/bin/bash"]
+    cmd += ["-v", f"{working_volume(output_root)}:{VOLUME_MOUNT}"]
+    if host_working:
+        cmd += ["-v", f"{(output_root / 'working').resolve()}:{HOST_WORKING_MOUNT}"]
+    return [*cmd, image, "-c", script, "bash", *args]
+
+
+# Copy each of the subject's old working folders into the volume (via '.partial', so a
+# copy cut short is redone rather than half-used), skipping any the volume already has,
+# then delete the old copy. Deleting happens here, not in Python: the folders hold Linux
+# symlinks Windows can't touch (WinError 1920). A failed delete is only reported: the
+# next run skips the copy and tries again.
+MIGRATE_SCRIPT = f"""set -e
+cd {HOST_WORKING_MOUNT}
+for dir in pipeline_*/cpac_sub-"$1"_ses-*; do
+  [ -d "$dir" ] || continue
+  if [ ! -e "{VOLUME_MOUNT}/$dir" ]; then
+    mkdir -p "{VOLUME_MOUNT}/$(dirname "$dir")"
+    rm -rf "{VOLUME_MOUNT}/$dir.partial"
+    cp -a "$dir" "{VOLUME_MOUNT}/$dir.partial"
+    mv "{VOLUME_MOUNT}/$dir.partial" "{VOLUME_MOUNT}/$dir"
+  fi
+  rm -rf "$dir" || echo "couldn't delete the old copy of $dir" >&2
+done
+"""
+# Both the volume's and any old copy in the Windows output folder (deleted from Linux
+# for the same symlink reason).
+CLEAR_SCRIPT = f"""for dir in {VOLUME_MOUNT}/pipeline_*/cpac_sub-"$1"_ses-* \
+           {HOST_WORKING_MOUNT}/pipeline_*/cpac_sub-"$1"_ses-*; do
+  [ -e "$dir" ] || continue
+  rm -rf "$dir" && echo "$dir"
+done
+"""
+
+
+def host_working_dirs(output_root: Path, subject: str) -> list[Path]:
+    """This subject's working folders in the Windows output folder (older versions kept
+    them there)."""
+    return sorted((output_root / "working").glob(f"pipeline_*/cpac_sub-{subject}_ses-*"))
+
+
+def folder_size_gb(folder: Path) -> float:
+    """Total size of the regular files under folder. lstat, and unreadable entries
+    skipped: C-PAC's working folders hold Linux symlinks that Windows can't open
+    (WinError 1920)."""
+    total = 0
+    for file in folder.rglob("*"):
+        try:
+            info = file.lstat()
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            total += info.st_size
+    return total / 1024**3
+
+
+def migrate_working(
+    docker: Path, image: str, output_root: Path, subject: str, tell: Callable[[str], None]
+) -> str | None:
+    """Move this subject's old working folder (in the Windows output folder) into the
+    working volume, so a resumed run still reuses its finished steps. None when done (or
+    nothing to move), else why not."""
+    old = host_working_dirs(output_root, subject)
+    if not old:
+        return None
+    size = sum(map(folder_size_gb, old))
+    tell(
+        f"sub-{subject}: moving its working folder ({size:.1f} GB) from the output folder into "
+        "Docker, so finished steps are reused; this can take several minutes..."
+    )
+    cmd = volume_command(docker, image, output_root, MIGRATE_SCRIPT, subject, host_working=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return f"couldn't move the working folder into Docker: {result.stderr.strip()}"
+    if result.stderr.strip():
+        log.warning("sub-%s: %s", subject, result.stderr.strip())
+    return None
+
+
+def clear_working_volume(docker: Path, image: str, output_root: Path, subject: str) -> list[str]:
+    """Delete this subject's working folders from the volume, returning which."""
+    (output_root / "working").mkdir(parents=True, exist_ok=True)  # else docker makes it
+    cmd = volume_command(docker, image, output_root, CLEAR_SCRIPT, subject, host_working=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        log.warning("Couldn't clear sub-%s's working folder: %s", subject, result.stderr.strip())
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
 def short_output_name(pattern: str) -> str:
@@ -435,10 +550,11 @@ def build_cpac_command(
         ),
         (output_root, OUTPUT_MOUNT, ""),
     ]
+    volume = ["-v", f"{working_volume(output_root)}:{WORKING_MOUNT}"]
     cmd = [str(docker), "run", "--rm", "--name", container_name(subject)]
     for host, container, mode in mounts:
         cmd += ["-v", f"{host.resolve()}:{container}{mode}"]
-    cmd += [image, BIDS_MOUNT, OUTPUT_MOUNT, "participant"]
+    cmd += [*volume, image, BIDS_MOUNT, OUTPUT_MOUNT, "participant"]
     cmd += ["--preconfig", CPAC_PRECONFIG, "--participant_label", subject]
     cmd += ["--n_cpus", str(n_cpus), "--mem_gb", str(mem_gb), "--tracking_opt-out"]
     if labels := as_tasks(tasks):
@@ -522,17 +638,140 @@ def finished_node(line: str) -> str | None:
     return None
 
 
+# ---- hang watch ----------------------------------------------------------------------------
+# nipype's scheduler can lose track of a step (seen when a file operation on the Windows
+# output folder failed inside it): it then waits forever for a step that isn't running.
+# The signs: no step starts or finishes, and the container's CPU sits near zero. Real
+# long steps (ANTs registration: an hour or more without a line) keep a core busy.
+
+HANG_ACTIONS = {
+    "restart": "Restart it (finished steps are reused)",
+    "stop": "Stop it (counts as failed)",
+    "warn": "Only warn",
+}
+HANG_CPU_PERCENT = 25.0  # a working step keeps a core at ~100%; a hung run idles at ~5%
+HANG_POLL_S = 60.0
+NODE_ACTIVITY = re.compile(r"\[Node\] |\[Job \d+\] ")
+RUNNING_HEADER = "Currently running:"
+RUNNING_NODE = re.compile(r"^\s+\* (\S+)\s*$")
+RESTART_MARKER = "[fmri_preprocess] Restarting C-PAC (finished steps are reused)."
+HUNG_MARKER = "[fmri_preprocess] C-PAC hung and was stopped"  # + ": why."
+
+
+@dataclass(frozen=True)
+class HangPolicy:
+    minutes: float = 30.0  # quiet this long counts as hung; 0 turns the check off
+    action: str = "restart"  # a HANG_ACTIONS key
+    max_restarts: int = 2  # per subject, for "restart"; then it counts as failed
+    cpu_percent: float = HANG_CPU_PERCENT
+
+
+def container_cpu_percent(docker: Path, name: str) -> float | None:
+    """The container's CPU use now (100 = one core), or None if docker can't tell (e.g.
+    the container hasn't started yet)."""
+    try:
+        result = subprocess.run(
+            [str(docker), "stats", "--no-stream", "--format", "{{.CPUPerc}}", name],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    try:
+        return float(result.stdout.strip().rstrip("%"))
+    except ValueError:
+        return None
+
+
+class HangWatch:
+    """Watches one C-PAC container on a background thread and calls on_hang once it has
+    been quiet for policy.minutes: no nipype step started or finished, and every CPU
+    reading below policy.cpu_percent. After on_hang the clock restarts, so 'warn' repeats
+    once per quiet period rather than every poll."""
+
+    def __init__(
+        self,
+        docker: Path,
+        subject: str,
+        policy: HangPolicy,
+        on_hang: Callable[["HangWatch"], None],
+        read_cpu: Callable[[Path, str], float | None] = container_cpu_percent,
+        poll_s: float = HANG_POLL_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.docker, self.subject, self.policy = docker, subject, policy
+        self.on_hang, self.read_cpu, self.poll_s, self.clock = on_hang, read_cpu, poll_s, clock
+        self.lock = threading.Lock()
+        self.last_activity = self.last_busy = clock()
+        self.running_nodes: list[str] = []  # nipype's latest "Currently running" list
+        self.in_running_list = False
+        self.hung = False
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+
+    def see_line(self, line: str) -> None:
+        """Feed every console line: steps starting / finishing count as activity."""
+        with self.lock:
+            if NODE_ACTIVITY.search(line):
+                self.last_activity = self.clock()
+            if RUNNING_HEADER in line:
+                self.in_running_list, self.running_nodes = True, []
+            elif self.in_running_list and (match := RUNNING_NODE.match(line)):
+                self.running_nodes.append(match.group(1))
+            else:
+                self.in_running_list = False
+
+    def quiet_minutes(self) -> float:
+        with self.lock:
+            return (self.clock() - max(self.last_activity, self.last_busy)) / 60
+
+    def stuck_on(self) -> str:
+        """The step(s) nipype says are running, for messages."""
+        with self.lock:
+            nodes = [node.split(".", 1)[-1] for node in self.running_nodes]
+        return ", ".join(nodes) or "an unknown step"
+
+    def check(self) -> bool:
+        """One poll: read the CPU; call on_hang (and return True) if quiet long enough."""
+        cpu = self.read_cpu(self.docker, container_name(self.subject))
+        with self.lock:
+            if cpu is None or cpu >= self.policy.cpu_percent:
+                self.last_busy = self.clock()
+        if self.quiet_minutes() < self.policy.minutes:
+            return False
+        self.hung = True
+        self.on_hang(self)
+        with self.lock:
+            self.last_busy = self.clock()
+        return True
+
+    def _loop(self) -> None:
+        while not self.stop_event.wait(self.poll_s):
+            self.check()
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+
+
 def run_cpac(
-    cmd: list[str], console_log: Path, on_line: Callable[[str], None] | None = None
+    cmd: list[str],
+    console_log: Path,
+    on_line: Callable[[str], None] | None = None,
+    append: bool = False,
 ) -> int:
-    """Run one C-PAC container, writing its (long) console output to console_log.
+    """Run one C-PAC container, writing its (long) console output to console_log (added
+    to the end of it with append, e.g. for a restart).
 
     on_line is called with every console line as it arrives, e.g. to drive a progress display.
     """
     log.debug("Running %s", " ".join(cmd))
     console_log.parent.mkdir(parents=True, exist_ok=True)
     with (
-        console_log.open("w", encoding="utf-8") as out,
+        console_log.open("a" if append else "w", encoding="utf-8") as out,
         subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -587,6 +826,16 @@ def explain_failure(console_log: Path, output_root: Path) -> str | None:
         lines = read_plain_lines(console_log)
     except OSError:
         return None
+    # After a hang restart, only the last attempt counts.
+    restarts = [index for index, line in enumerate(lines) if line == RESTART_MARKER]
+    if restarts:
+        lines = lines[restarts[-1] + 1 :]
+    hung = [line for line in lines if line.startswith(HUNG_MARKER)]
+    if hung:
+        return (
+            f"Stopped because C-PAC hung{hung[-1].removeprefix(HUNG_MARKER)} Run it again "
+            "(Run mode 'Skip done, resume the rest') to resume: finished steps are reused."
+        )
     for index, line in enumerate(lines):
         if INSUFFICIENT_MEMORY in line:
             needed = [
@@ -603,6 +852,11 @@ def explain_failure(console_log: Path, output_root: Path) -> str | None:
         return (
             "Stopped by you before it finished. Run it again (Run mode 'Skip done, resume "
             "the rest') to pick up where it stopped: finished steps are reused."
+        )
+    if any(marker in line for line in lines[-20:] for marker in DOCKER_LOST):
+        return (
+            "Lost contact with Docker mid-run (its engine stopped or crashed) and it didn't "
+            "come back in time. Start Docker, then run again: finished steps are reused."
         )
     if any(NAME_IN_USE in line for line in lines):
         return (
@@ -639,6 +893,98 @@ def subject_console_log(output_root: Path, subject: str) -> Path:
     return output_root / "log" / f"fmri_preprocess_sub-{subject}.txt"
 
 
+# Docker's engine can go away mid-run (Docker Desktop restarting, its Linux VM crashing,
+# `wsl --shutdown`); then the docker client prints one of these. Unlike a pipeline error,
+# waiting for Docker and resuming fixes it.
+DOCKER_LOST = (
+    "error waiting for container",
+    "Cannot connect to the Docker daemon",
+    "error during connect",
+)
+DOCKER_WAIT_S = 20 * 60
+DOCKER_RECOVERIES = 3  # per subject: more means something is badly wrong
+
+
+def lost_docker(console_log: Path) -> bool:
+    """True when the last run in console_log ended because Docker went away (reads only
+    the tail: these logs reach many MB)."""
+    try:
+        with console_log.open("rb") as log_file:
+            log_file.seek(max(0, console_log.stat().st_size - 2048))
+            tail = log_file.read().decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(marker in tail for marker in DOCKER_LOST)
+
+
+def wait_for_docker(
+    docker: Path,
+    keep_waiting: Callable[[], bool] = lambda: True,
+    timeout_s: float = DOCKER_WAIT_S,
+    poll_s: float = 15.0,
+) -> bool:
+    """Wait until Docker's engine answers again: True when it does, False on timeout or
+    when keep_waiting() turns False (e.g. the user pressed Stop)."""
+    deadline = time.monotonic() + timeout_s
+    while keep_waiting() and time.monotonic() < deadline:
+        try:
+            result = subprocess.run(
+                [str(docker), "version", "--format", "{{.Server.Version}}"],
+                capture_output=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                return True
+        except subprocess.TimeoutExpired:
+            pass
+        time.sleep(poll_s)
+    return False
+
+
+def run_watched(
+    cmd: list[str],
+    console_log: Path,
+    docker: Path,
+    subject: str,
+    hang: HangPolicy,
+    on_line: Callable[[str], None] | None,
+    say: Callable[[str], None],
+    append: bool = False,
+) -> tuple[int, HangWatch]:
+    """run_cpac with a HangWatch on the container; on a hang it tells the user and, unless
+    hang.action is 'warn', stops the container (so run_cpac returns)."""
+
+    def on_hang(watch: HangWatch) -> None:
+        what = {
+            "restart": "stopping it to restart",
+            "stop": "stopping it",
+            "warn": "it keeps running; 'Stop now' stops it",
+        }[hang.action]
+        say(
+            f"sub-{subject}: C-PAC looks hung - no progress and CPU under "
+            f"{hang.cpu_percent:g}% for {hang.minutes:g} min, stuck on {watch.stuck_on()}; "
+            f"{what}."
+        )
+        if hang.action != "warn":
+            error = stop_containers(docker, [subject])
+            if error is not None:
+                say(f"sub-{subject}: couldn't stop its container: {error}")
+
+    watch = HangWatch(docker, subject, hang, on_hang)
+
+    def relay(line: str) -> None:
+        watch.see_line(line)
+        if on_line is not None:
+            on_line(line)
+
+    watch.start()
+    try:
+        returncode = run_cpac(cmd, console_log, relay, append=append)
+    finally:
+        watch.stop()
+    return returncode, watch
+
+
 def preprocess_subject(
     docker: Path,
     bids_root: Path,
@@ -649,14 +995,77 @@ def preprocess_subject(
     mem_gb: float,
     task: TaskFilter = None,
     on_line: Callable[[str], None] | None = None,
+    *,
+    hang: HangPolicy | None = None,
+    tell: Callable[[str], None] | None = None,
+    may_restart: Callable[[], bool] = lambda: True,
+    keep_working: bool = False,
 ) -> str | None:
     """Run C-PAC for one subject: None when every session got a preprocessed BOLD (of each
-    task), else why not."""
+    task), else why not.
+
+    hang: watch for a hung run and handle it as hang.action says (None: no watch). A run
+    that ends because Docker went away (DOCKER_LOST) waits for Docker and resumes. A
+    restart is announced by RESTART_MARKER through on_line; may_restart() False (e.g.
+    the user pressed Stop) prevents one. tell gets notes for the user (moving the working
+    folder, hangs). Unless keep_working, a subject that finished has its working folder
+    deleted from Docker: it's only needed to resume, and runs to 10+ GB per subject.
+    """
+    say = tell or log.info
     sessions = bold_sessions(bids_root, subject, task)
-    cmd = build_cpac_command(docker, bids_root, output_root, subject, image, n_cpus, mem_gb, task)
     console_log = subject_console_log(output_root, subject)
-    returncode = run_cpac(cmd, console_log, on_line)
+    problem = migrate_working(docker, image, output_root, subject, say)
+    if problem is not None:
+        return problem
+    cmd = build_cpac_command(docker, bids_root, output_root, subject, image, n_cpus, mem_gb, task)
+
+    def announce_restart() -> None:
+        with console_log.open("a", encoding="utf-8") as out:
+            out.write(f"\n{RESTART_MARKER}\n")
+        if on_line is not None:
+            on_line(RESTART_MARKER)
+
+    restarts = recoveries = 0
+    while True:
+        append = restarts + recoveries > 0
+        if hang is None or hang.minutes <= 0:
+            returncode, watch = run_cpac(cmd, console_log, on_line, append=append), None
+        else:
+            returncode, watch = run_watched(
+                cmd, console_log, docker, subject, hang, on_line, say, append=append
+            )
+        if watch is not None and hang is not None and watch.hung and hang.action != "warn":
+            if hang.action == "restart" and restarts < hang.max_restarts and may_restart():
+                restarts += 1
+                announce_restart()
+                say(f"sub-{subject}: restarting C-PAC (restart {restarts} of {hang.max_restarts})")
+                continue
+            with console_log.open("a", encoding="utf-8") as out:
+                out.write(
+                    f"\n{HUNG_MARKER}: no progress for {hang.minutes:g} min, stuck on "
+                    f"{watch.stuck_on()}"
+                    f"{f', after {restarts} restart(s)' if restarts else ''}.\n"
+                )
+            break
+        if returncode != 0 and lost_docker(console_log) and recoveries < DOCKER_RECOVERIES:
+            if not may_restart():
+                break
+            recoveries += 1
+            say(
+                f"sub-{subject}: lost contact with Docker (its engine stopped or crashed); "
+                f"waiting up to {DOCKER_WAIT_S // 60} min for it to come back..."
+            )
+            if not wait_for_docker(docker, may_restart):
+                say(f"sub-{subject}: Docker didn't come back; giving up on this subject.")
+                break
+            stop_containers(docker, [subject])  # in case only the connection broke
+            announce_restart()
+            say(f"sub-{subject}: Docker is back; resuming C-PAC (finished steps are reused).")
+            continue
+        break
     if returncode == 0 and is_subject_done(bids_root, output_root, subject, task):
+        if not keep_working:
+            clear_working_volume(docker, image, output_root, subject)
         return None
     cause = explain_failure(console_log, output_root)
     if cause is None:

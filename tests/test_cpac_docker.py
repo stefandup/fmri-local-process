@@ -1,15 +1,21 @@
 """Tests for processing/cpac_docker.py on a synthetic BIDS tree (no Docker needed)."""
 
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 import pytest
 
+from fmri_local_process.processing import cpac_docker
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
+    RESTART_MARKER,
     STOPPED_MARKER,
     UNKNOWN_EXPECTED_OUTPUTS,
+    HangPolicy,
+    HangWatch,
     ParallelPlan,
     StartGate,
     bids_subjects,
@@ -34,6 +40,7 @@ from fmri_local_process.processing.cpac_docker import (
     subject_tasks,
     suggest_plan,
     was_stopped,
+    working_volume,
 )
 
 
@@ -203,8 +210,9 @@ def test_clear_subject_results_keeps_logs_and_other_subjects(tmp_path: Path) -> 
     other = out / "output" / "pipeline_cpac_preproc" / "sub-P011"
     other.mkdir()
     removed = clear_subject_results(out, "P01")
-    assert len(removed) == 2
-    assert not (working / "cpac_sub-P01_ses-1").exists()
+    assert removed == [out / "output" / "pipeline_cpac_preproc" / "sub-P01"]
+    # Working folders are cleared from Linux (clear_working_volume), never from here.
+    assert (working / "cpac_sub-P01_ses-1").exists()
     assert (working / "cpac_sub-P011_ses-1").exists() and other.exists()
     assert (out / "log" / "pipeline_cpac_preproc" / "sub-P01_ses-1").exists()
 
@@ -228,6 +236,7 @@ def test_command_mounts_only_the_subject(tmp_path: Path) -> None:
         f"{(bids / 'sub-P01').resolve()}:/bids_dataset/sub-P01:ro",
         f"{description}:/bids_dataset/dataset_description.json:ro",
         f"{out.resolve()}:/outputs",
+        f"{working_volume(out)}:/outputs/working",
     ]
     assert cmd[cmd.index("--name") + 1] == "fmri_cpac_sub-P01"  # so it can be paused
     tail = cmd[cmd.index(CPAC_IMAGE) :]
@@ -359,3 +368,248 @@ def test_stopped_marker_ends_the_log(tmp_path: Path) -> None:
     assert cause is not None and cause.startswith("Stopped by you")
     console_log.write_text("a new run started\n")  # the next run rewrites the log
     assert not was_stopped(console_log)
+
+
+# ---- working volume and hang watch --------------------------------------------------------
+
+
+def test_working_volume_is_per_output_folder(tmp_path: Path) -> None:
+    a, b = tmp_path / "out_a", tmp_path / "out_b"
+    assert working_volume(a) != working_volume(b)
+    assert working_volume(a) == working_volume(Path(str(a).upper()))  # Windows ignores case
+    assert working_volume(a).startswith("fmri_cpac_working_")
+
+
+def test_migrate_working_moves_old_folders_into_the_volume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "out"
+    old = out / "working" / "pipeline_cpac_preproc" / "cpac_sub-P01_ses-1"
+    old.mkdir(parents=True)
+    (old / "result.pklz").write_bytes(b"x")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        shutil.rmtree(old)  # what the script does, from inside the container
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(cpac_docker.subprocess, "run", fake_run)
+    notes: list[str] = []
+    assert cpac_docker.migrate_working(Path("docker"), CPAC_IMAGE, out, "P01", notes.append) is None
+    assert not old.exists() and "moving its working folder" in notes[0]
+    cmd = calls[0]
+    assert 'rm -rf "$dir"' in cmd[-3]  # the old copy is deleted from Linux
+    assert cmd[-1] == "P01"  # the subject is an argument, never pasted into the script
+    assert f"{working_volume(out)}:/volume" in cmd
+    # Nothing left to move: no docker call at all.
+    assert cpac_docker.migrate_working(Path("docker"), CPAC_IMAGE, out, "P01", notes.append) is None
+    assert len(calls) == 1
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_hang_watch_needs_quiet_steps_and_idle_cpu() -> None:
+    clock = FakeClock()
+    cpu = [90.0]
+    hangs: list[str] = []
+    watch = HangWatch(
+        Path("docker"),
+        "P01",
+        HangPolicy(minutes=30),
+        lambda w: hangs.append(w.stuck_on()),
+        read_cpu=lambda _docker, _name: cpu[0],
+        clock=clock,
+    )
+    watch.see_line("261113-20:29:14,229 nipype.workflow INFO:\n")
+    watch.see_line("                     Currently running:\n")
+    watch.see_line("                       * cpac_sub-P01_ses-1.warp_T1mask_74.interp_string\n")
+    clock.now = 40 * 60  # 40 quiet minutes, but busy (e.g. ANTs): not hung
+    assert not watch.check()
+    cpu[0] = 5.0
+    clock.now = 60 * 60
+    assert not watch.check()  # idle for only 20 min so far
+    watch.see_line('\t [Node] Finished "x", elapsed time 1s.\n')  # a step: clock restarts
+    clock.now = 85 * 60
+    assert not watch.check()
+    clock.now = 91 * 60
+    assert watch.check() and watch.hung
+    assert hangs == ["warp_T1mask_74.interp_string"]
+    assert not watch.check()  # fires once per quiet period
+
+
+def test_unknown_cpu_never_counts_as_idle() -> None:
+    clock = FakeClock()
+    watch = HangWatch(
+        Path("docker"),
+        "P01",
+        HangPolicy(minutes=1),
+        lambda _w: None,
+        read_cpu=lambda _docker, _name: None,
+        clock=clock,
+    )
+    clock.now = 600
+    assert not watch.check()
+
+
+class FakeWatch:
+    def __init__(self, hung: bool) -> None:
+        self.hung = hung
+
+    def stuck_on(self) -> str:
+        return "interp_string"
+
+
+def test_hung_subject_restarts_then_gives_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bids = make_bids(tmp_path / "bids")
+    out = tmp_path / "out"
+    attempts: list[bool] = []
+
+    def fake_run_watched(*args: object, append: bool = False) -> tuple[int, FakeWatch]:
+        attempts.append(append)
+        console_log = args[1]
+        assert isinstance(console_log, Path)
+        console_log.parent.mkdir(parents=True, exist_ok=True)
+        with console_log.open("a" if append else "w") as out:
+            out.write("Node a failed to run\n")  # stale: must not be the reported cause
+        return 137, FakeWatch(hung=True)
+
+    monkeypatch.setattr(cpac_docker, "run_watched", fake_run_watched)
+    lines: list[str] = []
+    failure = preprocess_subject(
+        Path("docker"),
+        bids,
+        out,
+        "P01",
+        CPAC_IMAGE,
+        1,
+        8.0,
+        None,
+        lines.append,
+        hang=HangPolicy(minutes=30, action="restart", max_restarts=2),
+        tell=lambda _t: None,
+    )
+    assert attempts == [False, True, True]  # first run, then 2 restarts appending the log
+    assert lines == [RESTART_MARKER, RESTART_MARKER]
+    assert failure is not None and failure.startswith("Stopped because C-PAC hung: no progress")
+    assert "interp_string, after 2 restart(s)" in failure
+
+    attempts.clear()
+    failure = preprocess_subject(
+        Path("docker"),
+        bids,
+        out,
+        "P01",
+        CPAC_IMAGE,
+        1,
+        8.0,
+        hang=HangPolicy(action="restart"),
+        tell=lambda _t: None,
+        may_restart=lambda: False,
+    )
+    assert attempts == [False]  # the user pressed Stop: no restart
+
+
+def test_explain_failure_reads_only_the_last_attempt(tmp_path: Path) -> None:
+    console_log = tmp_path / "log.txt"
+    console_log.write_text(
+        "Node a failed to run\n"
+        f"{RESTART_MARKER}\n"
+        "Insufficient resources available for job\n  x: 9.0 GB\n"
+    )
+    cause = explain_failure(console_log, tmp_path)
+    assert cause is not None and cause.startswith("Not enough memory")
+
+
+def test_folder_size_skips_files_windows_cannot_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a.nii.gz").write_bytes(b"x" * 1024)
+    (tmp_path / "link.nii.gz").write_bytes(b"")  # stands in for a Linux symlink
+    real_lstat = Path.lstat
+
+    def lstat(self: Path) -> object:
+        if self.name == "link.nii.gz":
+            raise OSError(1920, "The file cannot be accessed by the system")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    assert cpac_docker.folder_size_gb(tmp_path) == 1024 / 1024**3
+
+
+def test_lost_docker_waits_and_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bids = make_bids(tmp_path / "bids")
+    out = tmp_path / "out"
+    attempts: list[bool] = []
+
+    def fake_run_cpac(
+        cmd: list[str], console_log: Path, on_line: object = None, append: bool = False
+    ) -> int:
+        attempts.append(append)
+        console_log.parent.mkdir(parents=True, exist_ok=True)
+        with console_log.open("a" if append else "w") as log_out:
+            log_out.write(
+                'time="..." level=error msg="error waiting for container: unexpected EOF"\n'
+            )
+        return 125
+
+    waits: list[str] = []
+    monkeypatch.setattr(cpac_docker, "run_cpac", fake_run_cpac)
+    monkeypatch.setattr(cpac_docker, "wait_for_docker", lambda *_a, **_k: waits.append("w") or True)
+    monkeypatch.setattr(cpac_docker, "stop_containers", lambda *_a, **_k: None)
+    lines: list[str] = []
+    failure = preprocess_subject(
+        Path("docker"),
+        bids,
+        out,
+        "P01",
+        CPAC_IMAGE,
+        1,
+        8.0,
+        None,
+        lines.append,
+        tell=lambda _t: None,
+    )
+    # First run plus DOCKER_RECOVERIES resumes, each after waiting for Docker.
+    assert attempts == [False] + [True] * cpac_docker.DOCKER_RECOVERIES
+    assert len(waits) == cpac_docker.DOCKER_RECOVERIES
+    assert lines == [RESTART_MARKER] * cpac_docker.DOCKER_RECOVERIES
+    assert failure is not None and failure.startswith("Lost contact with Docker")
+
+    attempts.clear()
+    preprocess_subject(
+        Path("docker"),
+        bids,
+        out,
+        "P01",
+        CPAC_IMAGE,
+        1,
+        8.0,
+        tell=lambda _t: None,
+        may_restart=lambda: False,
+    )
+    assert attempts == [False]  # the user pressed Stop: no waiting, no resume
+
+
+def test_wait_for_docker_gives_up_when_told(monkeypatch: pytest.MonkeyPatch) -> None:
+    def down(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(cmd, 1)
+
+    monkeypatch.setattr(cpac_docker.subprocess, "run", down)
+    checks = iter([True, True, False])
+    assert not cpac_docker.wait_for_docker(Path("docker"), lambda: next(checks), poll_s=0)
+    up = iter([1, 0])
+
+    def comes_back(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(cmd, next(up))
+
+    monkeypatch.setattr(cpac_docker.subprocess, "run", comes_back)
+    assert cpac_docker.wait_for_docker(Path("docker"), poll_s=0)

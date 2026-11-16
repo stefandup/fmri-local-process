@@ -25,9 +25,12 @@ from rich.table import Table
 
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
+    HANG_ACTIONS,
     MIN_MEM_GB,
+    RESTART_MARKER,
     START_GAP_S,
     DockerUnavailableError,
+    HangPolicy,
     ParallelPlan,
     StartGate,
     bids_subjects,
@@ -119,6 +122,35 @@ def print_summary(summary: PreprocSummary, output_root: Path) -> None:
     help="RAM (GB) C-PAC may use per subject (C-PAC won't start below "
     f"{MIN_MEM_GB:g}). Docker Desktop's own limit must allow it.",
 )
+@click.option(
+    "--hang-minutes",
+    default=HangPolicy.minutes,
+    type=click.FloatRange(min=0),
+    show_default=True,
+    help="Treat a subject as hung when no C-PAC step starts or finishes and its CPU stays "
+    "near idle for this long (0: never check).",
+)
+@click.option(
+    "--on-hang",
+    default=HangPolicy.action,
+    type=click.Choice(list(HANG_ACTIONS)),
+    show_default=True,
+    help="What to do with a hung subject: restart it (finished steps are reused), stop it "
+    "(counts as failed), or only warn.",
+)
+@click.option(
+    "--max-restarts",
+    default=HangPolicy.max_restarts,
+    type=click.IntRange(min=0),
+    show_default=True,
+    help="With --on-hang restart: restarts per subject before it counts as failed.",
+)
+@click.option(
+    "--keep-working",
+    is_flag=True,
+    help="Keep a finished subject's C-PAC working folder (in Docker; 10+ GB each) instead "
+    "of deleting it. Only needed to rerun it later reusing its steps.",
+)
 @click.option("--image", default=CPAC_IMAGE, show_default=True, help="C-PAC Docker image to run.")
 @click.option("--verbose", "-v", is_flag=True, help="Debug logging.")
 def main(
@@ -130,6 +162,10 @@ def main(
     parallel: int,
     n_cpus: int,
     mem_gb: float,
+    hang_minutes: float,
+    on_hang: str,
+    max_restarts: int,
+    keep_working: bool,
     image: str,
     verbose: bool,
 ) -> None:
@@ -190,6 +226,7 @@ def main(
         if pull_image(docker, image) != 0:
             raise click.ClickException(f"docker pull {image} failed; see the output above.")
 
+    hang = HangPolicy(hang_minutes, on_hang, max_restarts)
     summary = PreprocSummary()
     output_folder.mkdir(parents=True, exist_ok=True)
     columns = (
@@ -214,6 +251,9 @@ def main(
             steps = progress.add_task(f"  sub-{subject}: starting container", total=None)
 
             def show_step(line: str, steps: TaskID = steps) -> None:
+                if line == RESTART_MARKER:  # the resumed run counts its steps again
+                    progress.reset(steps)
+                    return
                 node = finished_node(line)
                 if node is not None:
                     progress.advance(steps)
@@ -230,6 +270,9 @@ def main(
                     mem_gb,
                     task,
                     show_step,
+                    hang=hang,
+                    tell=log.warning,
+                    keep_working=keep_working,
                 )
             except Exception as e:  # noqa: BLE001 -- one subject's crash mustn't end the batch
                 log.exception("sub-%s crashed", subject)
