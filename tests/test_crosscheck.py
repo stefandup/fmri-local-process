@@ -268,28 +268,28 @@ def test_expected_lengths_dialog_defaults_to_median_and_saves_overrides(tmp_path
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
 
-    from fmri_local_process.gui.scan_lengths import ScanLengthsDialog
+    from fmri_local_process.gui.scan_lengths import ScanLengthsPanel
 
     _app = QApplication.instance() or QApplication([])
     for subject, volumes in (("A", 441), ("B", 441), ("C", 520)):
         write_nifti(func(tmp_path, subject, "1", "task-Rest_bold.nii.gz"), volumes)
         write_nifti(func(tmp_path, subject, "1", "task-Peer_bold.nii.gz"), 100)
 
-    dialog = ScanLengthsDialog(tmp_path, cc.find_data_files(tmp_path), None)
+    dialog = ScanLengthsPanel(tmp_path, cc.find_data_files(tmp_path), None)
     rest, peer = dialog.spins["task-Rest_bold"], dialog.spins["task-Peer_bold"]
     assert (rest.value(), rest.specialValueText()) == (0, "median (441)")
-    assert dialog.trim_button.text() == "Save and trim 1 long run(s)..."  # C: 520 > 441
+    assert dialog.trim_button.text() == "Trim 1 long run(s)..."  # C: 520 > 441
     rest.setValue(520)  # typed: nothing is too long any more
     assert not dialog.trim_button.isEnabled()
     rest.setValue(0)
     peer.setValue(90)  # a number set by hand is remembered; the median isn't stored
-    dialog.save()
+    dialog.save()  # also saves by itself once typing pauses
     assert cc.read_expected(tmp_path) == {"task-Peer_bold": 90}
 
-    reopened = ScanLengthsDialog(tmp_path, cc.find_data_files(tmp_path), None, can_trim=False)
+    reopened = ScanLengthsPanel(tmp_path, cc.find_data_files(tmp_path), None, can_trim=False)
     assert reopened.spins["task-Peer_bold"].value() == 90
     assert not reopened.trim_button.isEnabled()  # a trim is already running
-    reopened.save_and_trim()
+    reopened.trim()
     assert reopened.trim_requested
 
 
@@ -375,22 +375,74 @@ def test_keep_run_and_delete_are_logged(tmp_path: Path) -> None:
     ]
 
 
-def test_csv_export_has_a_row_per_problem_with_the_note(tmp_path: Path) -> None:
+def test_overview_table_flags_cells_like_the_old_bids_viewer(tmp_path: Path) -> None:
+    write_nifti(func(tmp_path, "A", "1", "task-Rest_bold.nii.gz"), 495)
+    write_nifti(func(tmp_path, "A", "1", "task-Matching_bold.nii.gz"), 300)
+    for run in (1, 2):
+        write_nifti(func(tmp_path, "B", "1", f"task-Rest_run-{run}_bold.nii.gz"), 495)
+    anat = tmp_path / "sub-A" / "ses-1" / "anat" / "sub-A_ses-1_T1w.nii.gz"
+    write_nifti(anat, 1, tr=None)
+    reviews = cc.review_bids_folder(tmp_path)
+
+    tasks = cc.overview_tasks(reviews)
+    assert tasks == ["Matching", "Rest"]  # the scan rules' order
+    assert cc.overview_columns(tasks) == [
+        "ID", "Session", "Date", "T1w", "Defaced",
+        "Matching runs", "Matching volumes", "Matching events", "Rest runs", "Rest volumes",
+    ]  # fmt: skip
+    a, b = (cc.overview_row(r, tasks) for r in reviews)
+    assert [(c.text, c.status) for c in a[3:]] == [
+        ("1", ""), ("no", "check"),  # T1w present, not defaced
+        ("1", ""), ("300", "short"), ("-", "missing"),  # Matching short, no events
+        ("1", ""), ("495", ""),
+    ]  # fmt: skip
+    assert [(c.text, c.status) for c in b[3:]] == [
+        ("0", "missing"), ("-", ""),
+        ("0", "missing"), ("-", ""), ("-", ""),
+        ("2", "pending"), ("495, 495", ""),
+    ]  # fmt: skip
+
+
+def test_overview_csv_has_a_row_per_session_with_problems_and_note(tmp_path: Path) -> None:
     import csv
 
     two_sessions(tmp_path)
-    write_nifti(func(tmp_path, "B", "1", "task-Rest_bold.nii.gz"), 495)
     cc.write_expected_sessions(tmp_path, 2)
-    cc.set_note(tmp_path, [review_of(tmp_path, "sub-B_ses-1")], "pilot")
+    cc.set_note(tmp_path, [review_of(tmp_path, "sub-A_ses-2")], "moved a lot")
     out = tmp_path / "out.csv"
 
-    cc.write_review_csv(cc.review_bids_folder(tmp_path), out)
+    cc.write_overview_csv(cc.review_bids_folder(tmp_path), out)
 
     with out.open(newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
-    assert [(r["subject"], r["session"], r["problem"], r["note"]) for r in rows] == [
-        ("A", "ses-1", "ok", ""),
-        ("A", "ses-2", "ok", ""),
-        ("B", "ses-1", "ok", "pilot"),
+    assert [(r["ID"], r["Session"], r["Rest volumes"], r["Note"]) for r in rows] == [
+        ("A", "ses-1", "495", ""),
+        ("A", "ses-2", "495", "moved a lot"),
     ]
-    assert rows[0]["source_folder"] == "20241014_1341_A"
+    assert rows[0]["Source folder"] == "20241014_1341_A"
+    assert rows[0]["Problems"] == ""
+
+
+def test_scan_lengths_save_themselves_once_typing_pauses(tmp_path: Path) -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    from fmri_local_process.gui.scan_lengths import AUTOSAVE_DELAY_MS, ScanLengthsPanel
+
+    _app = QApplication.instance() or QApplication([])
+    for subject in "AB":
+        write_nifti(func(tmp_path, subject, "1", "task-Rest_bold.nii.gz"), 495)
+    panel = ScanLengthsPanel(tmp_path, cc.find_data_files(tmp_path), None)
+    saved: list[bool] = []
+    panel.saved.connect(lambda: saved.append(True))
+
+    panel.spins["task-Rest_bold"].setValue(4)  # typing 441: three changes...
+    panel.spins["task-Rest_bold"].setValue(44)
+    panel.spins["task-Rest_bold"].setValue(441)
+    assert cc.read_expected(tmp_path) == {} and panel.saved_label.text() == "Saving..."
+    QTest.qWait(AUTOSAVE_DELAY_MS + 300)
+
+    assert cc.read_expected(tmp_path) == {"task-Rest_bold": 441}  # ...saved once
+    assert saved == [True] and panel.saved_label.text() == "Lengths saved"
+    assert [a["detail"] for a in read_actions(tmp_path)] == ["automatic -> 441"]

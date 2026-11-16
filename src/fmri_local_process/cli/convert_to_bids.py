@@ -57,6 +57,7 @@ def print_report(report: ConversionReport) -> None:
     table.add_row("[yellow]converted from incomplete data", f"[yellow]{len(report.flagged)}")
     table.add_row("skipped sessions (>1 GB)", str(len(report.skipped)))
     table.add_row("sessions left out (deleted at crosscheck)", str(len(report.excluded)))
+    table.add_row("[yellow]sessions with no recognised scans", f"[yellow]{len(report.no_scans)}")
     table.add_row("[yellow]missing behavioural logs", f"[yellow]{len(report.missing)}")
     table.add_row("[red]failed", f"[red]{len(report.failures)}")
     console.print(table)
@@ -64,6 +65,10 @@ def print_report(report: ConversionReport) -> None:
         console.print(f"[yellow]INCOMPLETE[/yellow] {what}: {why}")
     for change in report.renumbered:
         console.print(f"[yellow]RENUMBERED[/yellow] {change} (a session was added or deleted)")
+    for folder, found in report.no_scans:
+        console.print(
+            f"[yellow]NO SCANS[/yellow] {folder}: no series matches a scan rule ({found})"
+        )
     for folder in report.excluded:
         console.print(f"LEFT OUT {folder} (deleted at crosscheck: code/excluded_sessions.json)")
     for log_key, why in report.unplaced:

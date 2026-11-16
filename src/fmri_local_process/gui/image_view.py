@@ -133,11 +133,16 @@ class Previewable(Protocol):
 class HelpToggle:
     """A checkable '?' button and the help box it opens; the box text is set by the owner."""
 
-    def __init__(self) -> None:
-        self.button = QPushButton("?")
+    def __init__(
+        self,
+        label: str = "?",
+        tooltip: str = "Help: what this output shows and what to look for.",
+    ) -> None:
+        self.button = QPushButton(label)
         self.button.setCheckable(True)
-        self.button.setFixedWidth(28)
-        self.button.setToolTip("Help: what this output shows and what to look for.")
+        if label == "?":
+            self.button.setFixedWidth(28)
+        self.button.setToolTip(tooltip)
         self.box = QLabel()
         self.box.setWordWrap(True)
         self.box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)

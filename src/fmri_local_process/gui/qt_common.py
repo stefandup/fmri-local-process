@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QSizePolicy
 
 SETTINGS_ORGANIZATION = "MooiToolbox"  # same as vr_lab_toolbox
 TOOLTIP_WRAP_WIDTH = 68
@@ -19,6 +19,8 @@ PRIMARY_BUTTON_DISABLED_BG = "#555555"
 PRIMARY_BUTTON_DISABLED_FG = "#999999"
 HOME_BASE_ACCENT_COLOR = "#5b9bd5"
 HOME_BASE_NAME_EXTRA_POINT_INCREASE = 2
+# Border of the raw-data panels (read only, the converter's input), beside the blue BIDS ones.
+RAW_ACCENT_COLOR = "#27ae60"
 # "Run the pipeline" accent, the same teal as vr_lab_toolbox's "Process BIDS Folder".
 PROCESS_ACCENT_COLOR = "#16a085"
 PROCESS_ACCENT_HOVER_COLOR = "#128f76"
@@ -28,6 +30,16 @@ RUNNING_COLOR = "#3498db"
 WARNING_COLOR = "#f39c12"
 ERROR_COLOR = "#e74c3c"
 UNKNOWN_COLOR = "#9aa0a6"
+
+
+def apply_app_style(app: QApplication) -> None:
+    """vr_lab_toolbox's look: Qt's Fusion style (crisper contrast than Windows' native one,
+    and it follows the stylesheets fully) and black-on-white tooltips."""
+    app.setStyle("Fusion")
+    app.setStyleSheet(
+        app.styleSheet() + "QToolTip { color: black; background-color: white; "
+        "border: 1px solid black; }"
+    )
 
 
 def default_browse_dir(preferred: Path | None = None) -> str:
@@ -47,6 +59,14 @@ def wrap_tooltip(text: str, width: int = TOOLTIP_WRAP_WIDTH) -> str:
 
 def style_secondary_label(label: QLabel) -> None:
     label.setStyleSheet(f"color: {SECONDARY_TEXT_COLOR};")
+
+
+def shrinkable(label: QLabel) -> QLabel:
+    """Let a label with a long unbreakable text (a path) shrink with the window instead of
+    widening it; the whole text stays in its tooltip."""
+    label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+    label.setMinimumWidth(1)
+    return label
 
 
 def style_name_label(label: QLabel, extra_points: int = 0) -> None:

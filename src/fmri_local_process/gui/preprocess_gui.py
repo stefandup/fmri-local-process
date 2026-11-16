@@ -10,7 +10,6 @@ responsive through hours of C-PAC.
 import html
 import logging
 import os
-import sys
 import threading
 import time
 import zlib
@@ -412,8 +411,15 @@ def read_log_tail(path: Path, n_lines: int = LOG_TAIL_LINES) -> str:
 
 
 class PreprocessWindow(QMainWindow):
+    """Also the toolbox's Preprocess (C-PAC) tab: it reports when C-PAC runs and which
+    folders were picked here, and takes a lock while another tab changes the BIDS folder."""
+
+    running_changed = Signal(bool)  # C-PAC started (True) / the batch ended (False)
+    folder_chosen = Signal(str, object)  # "bids" / "output", Path
+
     def __init__(self) -> None:
         super().__init__()
+        self.external_lock = ""  # why another tab keeps Preprocess from starting ("" if not)
         self.setWindowTitle("fMRI Preprocess (C-PAC)")
         self.resize(1300, 850)
         self.settings = QSettings(SETTINGS_ORGANIZATION, SETTINGS_APP)
@@ -937,6 +943,7 @@ class PreprocessWindow(QMainWindow):
         set_path_display(self.bids_path_label, self.bids_name_label, folder)
         self.bids_reveal_button.setEnabled(True)
         self.settings.setValue("bids", str(folder))
+        self.folder_chosen.emit("bids", folder)
         self.task_list.blockSignals(True)
         self.task_list.clear()
         for label in bids_tasks(folder):
@@ -951,6 +958,23 @@ class PreprocessWindow(QMainWindow):
         set_path_display(self.output_path_label, self.output_name_label, folder)
         self.output_reveal_button.setEnabled(True)
         self.settings.setValue("output", str(folder))
+        self.folder_chosen.emit("output", folder)
+
+    def use_folders(self, bids: Path | None, output: Path | None) -> None:
+        """Show these folders (chosen on another tab); unchanged ones are left alone."""
+        changed = False
+        if output is not None and output != self.output_folder:
+            self._set_output_folder(output)
+            changed = True
+        if bids is not None and bids != self.bids_folder:
+            self._set_bids_folder(bids)
+            changed = True
+        if changed:
+            self._refresh_roster()
+
+    def set_external_lock(self, reason: str) -> None:
+        self.external_lock = reason
+        self._update_buttons()
 
     def _reveal(self, which: str) -> None:
         folder = self.bids_folder if which == "bids" else self.output_folder
@@ -1247,7 +1271,12 @@ class PreprocessWindow(QMainWindow):
         self.subject_table.blockSignals(False)
         n_ticked = len(self._ticked_subjects())
         self.process_button.setText(f"Preprocess {n_ticked} ticked subject(s)")
-        self.process_button.setEnabled(idle and n_ticked > 0 and self.output_folder is not None)
+        self.process_button.setEnabled(
+            idle and n_ticked > 0 and self.output_folder is not None and not self.external_lock
+        )
+        self.process_button.setToolTip(
+            f"Locked: {self.external_lock}." if self.external_lock else ""
+        )
         self._update_memory_label()  # the suggestion depends on how many are ticked
 
     # ---- detail pane -------------------------------------------------------------------------
@@ -1573,6 +1602,7 @@ class PreprocessWindow(QMainWindow):
         self._update_run_title()
         self._update_buttons()
         self.worker.start()
+        self.running_changed.emit(True)
 
     def _hang_policy(self) -> HangPolicy:
         return HangPolicy(
@@ -1692,6 +1722,7 @@ class PreprocessWindow(QMainWindow):
         self.spinner_timer.stop()
         self.run_group.setVisible(False)
         self._update_buttons()
+        self.running_changed.emit(False)
         if isinstance(result, str):
             QMessageBox.warning(self, "Preprocessing not started", result)
             self._log_activity(result, is_error=True)
@@ -1786,11 +1817,10 @@ class PreprocessWindow(QMainWindow):
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    app = QApplication(sys.argv)
-    window = PreprocessWindow()
-    window.show()
-    sys.exit(app.exec())
+    """The toolbox (with its splash), opened on the Preprocess BIDS (C-PAC) tab."""
+    from fmri_local_process.gui.launcher import preprocess
+
+    preprocess()
 
 
 if __name__ == "__main__":

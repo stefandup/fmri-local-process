@@ -24,6 +24,7 @@ import math
 import re
 import statistics
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from fmri_local_process.processing.behav_logs import (
     read_log_lines,
     task_for_log,
 )
+from fmri_local_process.processing.records import write_json_atomic
 
 log = logging.getLogger(__name__)
 
@@ -134,7 +136,7 @@ def write_corrections(bids_root: Path, corrections: dict[str, Correction]) -> No
             entry["note"] = c.note
         if entry:
             raw[key] = entry
-    path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+    write_json_atomic(path, raw)
 
 
 def filename_time(name: str) -> dt.datetime | None:
@@ -271,12 +273,20 @@ def inspect_log(log_file: Path, root: Path, correction: Correction | None = None
     return info
 
 
-def inspect_logs(behav_root: Path, corrections: dict[str, Correction]) -> list[LogInfo]:
-    """Every .log below behav_root, with its corrections applied."""
+def inspect_logs(
+    behav_root: Path,
+    corrections: dict[str, Correction],
+    progress: Callable[[int, int], None] | None = None,
+) -> list[LogInfo]:
+    """Every .log below behav_root, with its corrections applied. progress, if given, is
+    called with (logs read, total) as it goes."""
     infos = []
-    for log_file in find_logs(behav_root):
+    logs = list(find_logs(behav_root))
+    for n, log_file in enumerate(logs, start=1):
         key = log_file.relative_to(behav_root).as_posix()
         infos.append(inspect_log(log_file, behav_root, corrections.get(key)))
+        if progress is not None:
+            progress(n, len(logs))
     return infos
 
 

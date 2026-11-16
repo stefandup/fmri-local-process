@@ -55,7 +55,8 @@ Open a terminal and type:
 fmri_preprocess_gui
 ```
 
-The window remembers your folders and settings, so after the first time it opens where you
+This opens the [toolbox window](toolbox.md) on its **Preprocess BIDS (C-PAC)** tab; the BIDS folder is the one chosen on the first tab
+(Setup & Convert to BIDS), and the output folder is chosen here. The window remembers your folders and settings, so after the first time it opens where you
 left off.
 
 Everything the window does lives in one of the 11 numbered panels below. The screenshot is

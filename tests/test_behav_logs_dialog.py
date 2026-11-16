@@ -2,14 +2,24 @@
 
 import datetime as dt
 import os
+from datetime import date
 from pathlib import Path
+
+import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication  # noqa: E402 -- needs QT_QPA_PLATFORM set first
+from PySide6.QtTest import QTest  # noqa: E402 -- needs QT_QPA_PLATFORM set first
+from PySide6.QtWidgets import QApplication  # noqa: E402
 from test_behav_match import emo_log  # noqa: E402 -- synthetic Presentation logs
 
-from fmri_local_process.gui.behav_logs_dialog import BehavLogsDialog  # noqa: E402
+from fmri_local_process.gui.behav_logs_dialog import (  # noqa: E402
+    S_LOGS,
+    S_NOTES,
+    S_RESOLVED,
+    S_SESSION,
+    BehavLogsPanel,
+)
 from fmri_local_process.processing import behav_match as bm  # noqa: E402
 
 SESSION_DIRS = ("20240403_X_P001", "20240505_X_P002")
@@ -31,10 +41,10 @@ def make_folders(tmp_path: Path) -> tuple[Path, Path, Path]:
     return bids, dicoms, behav
 
 
-def open_dialog(tmp_path: Path) -> tuple[BehavLogsDialog, Path, dict[str, int]]:
+def open_dialog(tmp_path: Path) -> tuple[BehavLogsPanel, Path, dict[str, int]]:
     _app = QApplication.instance() or QApplication([])
     bids, dicoms, behav = make_folders(tmp_path)
-    dialog = BehavLogsDialog(bids, behav, dicoms, None)
+    dialog = BehavLogsPanel(bids, behav, dicoms, None)
     return dialog, bids, {info.key: n for n, info in enumerate(dialog.infos)}
 
 
@@ -106,7 +116,7 @@ def test_scan_sessions_tab_shows_scan_times_and_corrects_a_folder_id(tmp_path: P
     (behav / twin2).parent.mkdir(parents=True)
     (behav / twin2).write_text(emo_log(), encoding="utf-8")
 
-    dialog = BehavLogsDialog(bids, behav, dicoms, None)
+    dialog = BehavLogsPanel(bids, behav, dicoms, None)
     table = dialog.session_table
 
     def cell(row: int, column: int) -> str:
@@ -118,17 +128,106 @@ def test_scan_sessions_tab_shows_scan_times_and_corrects_a_folder_id(tmp_path: P
         "2024-10-14 14:48",
         "12345 2",
     ]
-    assert cell(1, 4) == "12345 2 -> 123452" and "typo" in cell(1, 8)
+    assert cell(1, S_RESOLVED) == "12345 2 -> 123452" and "typo" in cell(1, S_NOTES)
     assert dialog.matches[0].status == bm.UNKNOWN_ID  # the log says twin 2; no folder does yet
 
     dialog.session_edits["20241014_1448_12345 2"].setText("12345-2")
     dialog.recheck()
     assert dialog.matches[0].status == bm.MATCHED
-    assert cell(1, 4) == "12345 2 -> 12345T2" and cell(1, 7).startswith(
+    assert cell(1, S_RESOLVED) == "12345 2 -> 12345T2" and cell(1, S_LOGS).startswith(
         "Matching: 2024-10-14 15:10"
     )
-    assert "no Matching log" in cell(0, 8)  # twin 1 still has no log
+    assert "no Matching log" in cell(0, S_NOTES)  # twin 1 still has no log
     dialog.save()
     from fmri_local_process.processing.philani_bids import read_dicom_corrections
 
     assert read_dicom_corrections(bids) == {"20241014_1448_12345 2": "12345-2"}
+
+
+def test_page_loads_the_logs_and_shows_how_many_need_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtCore import QSettings
+
+    from fmri_local_process.gui import toolbox_state
+    from fmri_local_process.gui.behav_logs_dialog import BehavLogsPage
+
+    _app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(
+        toolbox_state,
+        "make_settings",
+        lambda app: QSettings(str(tmp_path / f"{app}.ini"), QSettings.Format.IniFormat),
+    )
+    bids, dicoms, behav = make_folders(tmp_path)
+    state = toolbox_state.ToolboxState()
+    page = BehavLogsPage(state)
+    badges: list[str] = []
+    page.badge_changed.connect(badges.append)
+    assert not page.load_button.isEnabled()  # folders not chosen yet
+
+    for key, folder in (("bids", bids), ("dicom", dicoms), ("behav", behav)):
+        state.set_folder(key, folder)
+    page.show_page()  # already reading in the background since the last folder was set
+    assert page.loader is not None and not page.progress_bar.isHidden()
+    page.wait()
+
+    assert page.panel is not None and len(page.panel.infos) == 3
+    assert page.load_button.text() == "Reload logs"
+    assert badges[-1].endswith("to review")
+
+
+def test_scan_sessions_tab_corrects_a_folder_date_and_sets_a_session(tmp_path: Path) -> None:
+    from fmri_local_process.processing import philani_bids as pb
+
+    dialog, bids, _ = open_dialog(tmp_path)  # P001 scanned 2024-04-03, P002 2024-05-05
+    table = dialog.session_table
+    p002 = "20240505_X_P002"
+    row = [folder.name for folder, _ in dialog.scanned].index(p002)
+
+    date_edit, session_edit = dialog.folder_date_edits[p002], dialog.folder_session_edits[p002]
+    QTest.keyClicks(date_edit, "x2024/-05-31")  # letters and slashes can't be typed
+    assert date_edit.text() == "2024-05-31"
+    date_edit.clear()
+    QTest.keyClicks(date_edit, "2024-02-30")  # no such day: the last digit is refused
+    assert date_edit.text() == "2024-02-3"
+    dialog.recheck()
+    assert date_edit.styleSheet()  # unfinished: marked red, nothing rechecked
+    QTest.keyClicks(session_edit, "ses-0")  # only a session number from 1
+    assert session_edit.text() == "0" and not session_edit.hasAcceptableInput()
+
+    date_edit.setText("2024-05-06")
+    session_edit.setText("2")  # e.g. the first visit is missing
+    dialog.recheck()
+    session = next(s for s in dialog.sessions if s.folder == p002)
+    assert (session.date.isoformat(), session.label) == ("2024-05-06", "2")
+    assert table.item(row, S_SESSION).text() == session.name  # pyright: ignore[reportOptionalMemberAccess]
+
+    dialog.save()
+    assert pb.read_dicom_date_corrections(bids) == {p002: date(2024, 5, 6)}
+    assert pb.read_dicom_session_corrections(bids) == {p002: "2"}
+
+
+def test_export_logs_one_folder_or_bids_layout(tmp_path: Path) -> None:
+    from fmri_local_process.processing.behav_export import (
+        BIDS_LAYOUT,
+        ONE_FOLDER,
+        export_events,
+    )
+
+    dialog, _bids, row_of = open_dialog(tmp_path)
+    dialog.table.selectRow(row_of[GOOD])
+    dialog.use_this_one()  # verdicts apply: GOOD used, RESTART "not used"
+
+    flat = export_events(dialog.matches, tmp_path / "flat", ONE_FOLDER)
+
+    assert [p.name for p in flat.written] == ["sub-P001_ses-1_task-Matching_events.tsv"]
+    assert flat.left_out == [(RESTART, "marked 'not used'")]
+    assert [log for log, _ in flat.failed] == [TYPO]  # not a Presentation log: reported
+    sidecar = tmp_path / "flat" / "sub-P001_ses-1_task-Matching_events.json"
+    assert "P001-emolabeling_scan-20240403-101500" in sidecar.read_text()
+
+    nested = export_events(dialog.matches, tmp_path / "bids_out", BIDS_LAYOUT)
+    assert (
+        tmp_path / "bids_out" / "sub-P001" / "ses-1" / "func"
+        / "sub-P001_ses-1_task-Matching_events.tsv"
+    ) in nested.written  # fmt: skip
