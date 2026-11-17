@@ -292,6 +292,24 @@ def test_deface_is_greyed_out_with_a_warning_when_no_defacer(
     assert not page.deface_box.isEnabled() and not page.deface_wanted()
     assert not page.deface_warning.isHidden()
     assert "No defacer found (test)" in page.deface_warning.toolTip()
+    assert not page.recheck_button.isHidden() and page.start_docker_button.isHidden()
+
+
+def test_docker_not_running_says_so_and_offers_to_start_it(
+    window: toolbox.ToolboxWindow,
+) -> None:
+    page = window.convert
+    if page.defacer_probe is not None:
+        page.defacer_probe.wait()
+    QApplication.processEvents()
+
+    page.on_defacer_checked("The Docker daemon isn't answering", convert_page.DOCKER_STOPPED)
+
+    assert "Docker isn't running" in page.deface_warning.text()
+    assert not page.start_docker_button.isHidden() and not page.recheck_button.isHidden()
+    page.on_defacer_checked("docker not found on PATH", convert_page.DOCKER_MISSING)
+    assert "not installed" in page.deface_warning.text()
+    assert page.start_docker_button.isHidden()  # nothing to start
 
 
 def test_backup_box_saves_outside_the_bids_folder(

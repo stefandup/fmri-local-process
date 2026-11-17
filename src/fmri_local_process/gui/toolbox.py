@@ -51,6 +51,7 @@ from fmri_local_process.gui.toolbox_state import (
     ToolboxState,
 )
 from fmri_local_process.gui.trimming import Trimmer
+from fmri_local_process.processing.review_mode import package_name
 
 SETUP = "Setup & Convert to BIDS"
 BEHAV = "ID & Behaviour Logs"
@@ -86,7 +87,10 @@ def tab_text(number: int, name: str, badge: str = "") -> str:
 class ToolboxWindow(QMainWindow):
     def __init__(self, start_tab: str = SETUP) -> None:
         super().__init__()
-        self.setWindowTitle("Philani fMRI toolbox")
+        review = package_name()
+        self.setWindowTitle(
+            "Philani fMRI toolbox" + (f"  —  review package: {review}" if review else "")
+        )
         self.resize(1400, 900)
         self.state = ToolboxState()
         self.trimmer = Trimmer(self.state)
@@ -239,7 +243,11 @@ class ToolboxWindow(QMainWindow):
                 event.ignore()
                 return
         self.preprocess.closeEvent(event)  # asks about a running C-PAC, stops its threads
-        threads = self.behav.loader is not None or self.convert.defacer_probe is not None
+        threads = (
+            self.behav.loader is not None
+            or self.convert.defacer_probe is not None
+            or self.convert.docker_thread is not None
+        )
         if event.isAccepted() and (working or threads):
             # A QThread destroyed while running aborts with a crash dialog: leave at once.
             os._exit(0)

@@ -2,8 +2,9 @@
 philaniBIDSspreadsheet.py): counts for the whole BIDS folder, then one table to scroll
 through -- a row per session, per scan how many runs and how long -- with the cells that need
 a look coloured (red: missing, yellow: short, orange: several runs or not defaced, blue: too
-long). Export CSV writes the same table. A second tab lists the action log: every change
-made to the BIDS folder, newest first, with a search box."""
+long; green: trimmed to the expected length, done). Export CSV writes the same table. A
+second tab lists the action log: every change made to the BIDS folder, newest first, with a
+search box."""
 
 from collections import Counter
 from pathlib import Path
@@ -60,12 +61,14 @@ CELL_COLORS = {
     "check": "#f5cba7",
     "long": "#aed6f1",
     "extra": "#a3e4d7",
+    "trimmed": "#abebc6",
 }
 CELL_LEGEND = (
     "Red: missing (no scan, no events, no T1w)\n"
     "Yellow: shorter than expected, or no events\n"
     "Orange: several runs to pick from, or a T1w not defaced\n"
-    "Blue: longer than expected (trim it)"
+    "Blue: longer than expected (trim it)\n"
+    "Green ✂: trimmed, now the expected length (done)"
 )
 SUMMARY_MAX_LINES = 14
 SESSION_KINDS = {

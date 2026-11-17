@@ -126,6 +126,7 @@ from fmri_local_process.processing.cpac_outputs import (
     qc_figures,
     read_tsv,
 )
+from fmri_local_process.processing.review_mode import package_root, settings_dir
 from fmri_local_process.processing.session_sync import (
     SessionChange,
     adopt_sessions,
@@ -422,7 +423,13 @@ class PreprocessWindow(QMainWindow):
         self.external_lock = ""  # why another tab keeps Preprocess from starting ("" if not)
         self.setWindowTitle("fMRI Preprocess (C-PAC)")
         self.resize(1300, 850)
-        self.settings = QSettings(SETTINGS_ORGANIZATION, SETTINGS_APP)
+        # In a review package, its own settings file: never the computer's real settings.
+        root = package_root()
+        self.settings = (
+            QSettings(str(settings_dir(root) / f"{SETTINGS_APP}.ini"), QSettings.Format.IniFormat)
+            if root is not None
+            else QSettings(SETTINGS_ORGANIZATION, SETTINGS_APP)
+        )
         self.bids_folder: Path | None = None
         self.output_folder: Path | None = None
         self.subjects: list[str] = []

@@ -2,7 +2,10 @@
 param(
     [switch]$Full,
     [switch]$Exe,
-    [switch]$Inno
+    [switch]$Inno,
+    [switch]$Review,
+    # -Review only: build from this saved plan instead of opening the picker.
+    [string]$Plan
 )
 
 Set-StrictMode -Version Latest
@@ -47,7 +50,7 @@ function Assert-Success($What) {
 
 function Show-Help {
     @"
-Usage: .\build.ps1 -Full | -Exe | -Inno
+Usage: .\build.ps1 -Full | -Exe | -Inno | -Review [-Plan <plan.json>]
 
   -Full   Build the exe with PyInstaller, assemble build_output/payload/,
           then compile the installer.
@@ -57,6 +60,13 @@ Usage: .\build.ps1 -Full | -Exe | -Inno
 
   -Inno   Skip the PyInstaller build. Reuses build_output/dist/<app>/
           from a previous build and (re)compiles the installer.
+
+  -Review Build a review package: the toolbox window plus a chosen part of the data,
+          for someone else to check the processing. Opens a picker (subjects, sessions,
+          scans, C-PAC outputs, behavioural logs, raw DICOMs or not), builds
+          fmri_toolbox.exe, then packs both into build_output/review/<name>/ (+ .zip).
+          The picker remembers its last choices in build_output/review/plan.json.
+          Add -Plan <file> to rebuild from a saved plan without the picker.
 
 No option given: prints this help and exits without building anything.
 "@ | Write-Host
@@ -122,7 +132,44 @@ function Build-Installer {
     Assert-Success "ISCC.exe"
 }
 
-if ($Full) {
+$ToolboxApp = "fmri_toolbox"
+$ReviewPath = Join-Path $BuildOutput "review"
+
+function Build-ToolboxExe {
+    # The toolbox window (all tabs), windowed: no console behind it. Its splash image and
+    # other package data travel with it. pip only refreshes the version the app shows; it
+    # fails while a toolbox started from .venv is open (its exe is locked), so carry on then.
+    & $Python -m pip install -e . --no-deps
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "pip install -e . failed (a toolbox from .venv still open?); the app's version number may be stale."
+    }
+    $assets = Join-Path $PSScriptRoot "src\fmri_local_process\gui\assets"
+    & $Python -m PyInstaller --noconfirm --workpath $WorkPath --distpath $DistPath `
+        --specpath $WorkPath --name $ToolboxApp --onedir --windowed `
+        --copy-metadata $PackageName --add-data "$assets;fmri_local_process\gui\assets" `
+        (Join-Path $PSScriptRoot "packaging\fmri_toolbox.py")
+    Assert-Success "PyInstaller build of $ToolboxApp"
+}
+
+function Build-Review {
+    New-Item -ItemType Directory -Force -Path $ReviewPath | Out-Null
+    $planFile = if ($Plan) { (Resolve-Path $Plan).Path } else { Join-Path $ReviewPath "plan.json" }
+    if (-not $Plan) {
+        # The picker: exit code 0 = plan saved, 2 = cancelled.
+        & $Python -m fmri_local_process.gui.review_package_dialog --plan $planFile
+        if ($LASTEXITCODE -eq 2) { Write-Host "Cancelled: nothing built."; return }
+        Assert-Success "Review package picker"
+    }
+    Build-ToolboxExe
+    & $Python -m fmri_local_process.cli.review_package $planFile `
+        --app (Join-Path $DistPath $ToolboxApp) --out $ReviewPath
+    Assert-Success "Assembling the review package"
+}
+
+if ($Review) {
+    Build-Review
+}
+elseif ($Full) {
     Build-Exes
     Build-Installer
 }

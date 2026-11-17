@@ -20,6 +20,8 @@ import numpy as np
 from nibabel.filebasedimages import ImageFileError
 from scipy.ndimage import map_coordinates
 
+from fmri_local_process.processing.review_mode import atlas_dir
+
 FSL_ATLASES = "/usr/share/fsl/6.0/data/atlases"
 FSL_STANDARD = "/usr/share/fsl/6.0/data/standard"
 TEMPLATE_FILE = "MNI152_T1_2mm_brain.nii.gz"
@@ -76,7 +78,10 @@ ATLAS_BY_KEY = {spec.key: spec for spec in ATLASES}
 
 
 def default_cache() -> Path:
-    """Per-user cache for the copied atlases (outside the repo and the data folders)."""
+    """Per-user cache for the copied atlases (outside the repo and the data folders); in a
+    review package, the atlases packed with it."""
+    if (packaged := atlas_dir()) is not None:
+        return packaged
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".cache")
     return Path(base) / "fmri_local_process" / "atlases"
 

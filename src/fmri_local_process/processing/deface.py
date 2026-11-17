@@ -11,6 +11,7 @@ mri_deface is a Linux binary, so on Windows a folder from 1./2. runs inside a co
 
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -52,6 +53,15 @@ NO_DEFACER_HELP = (
 
 class DefaceUnavailableError(RuntimeError):
     pass
+
+
+class DockerNeededError(DefaceUnavailableError):
+    """Defacing runs in Docker here, and Docker isn't installed or its daemon isn't running,
+    so whether a defacer is set up can't even be checked."""
+
+    def __init__(self, message: str, installed: bool) -> None:
+        super().__init__(message)
+        self.installed = installed  # False: no docker on PATH; True: daemon not answering
 
 
 class DefaceFailedError(OSError):
@@ -159,7 +169,9 @@ def docker_or_raise() -> Path:
     try:
         return find_docker()
     except DockerUnavailableError as e:
-        raise DefaceUnavailableError(f"Defacing runs in Docker here, but: {e}") from e
+        raise DockerNeededError(
+            f"Defacing runs in Docker here, but: {e}", installed=shutil.which("docker") is not None
+        ) from e
 
 
 def make_deface(freesurfer: Path | None = None) -> DefaceFn:
