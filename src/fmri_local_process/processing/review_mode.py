@@ -5,6 +5,7 @@ the exe (or in the folder FMRI_REVIEW_PACKAGE names, for trying a package from s
 * the folders start on the packaged data; one chosen in the app wins while it exists
 * the app's settings live in the package (review_data/settings), not in the registry
 * the first-level atlases come from the package (review_data/atlases): no Docker needed
+* a view-only package hides Setup and Preprocess and locks every changing action
 
 Kept free of heavy imports: the settings and the atlas cache ask it at startup.
 """
@@ -62,6 +63,12 @@ def atlas_dir(root: Path | None = None) -> Path | None:
         return None
     folder = root / DATA_DIR / "atlases"
     return folder if folder.is_dir() else None
+
+
+def view_only(root: Path | None = None) -> bool:
+    """A view-only package: the toolbox hides Setup and Preprocess and locks changes."""
+    root = root or package_root()
+    return bool(read_manifest(root).get("view_only", False)) if root else False
 
 
 def package_name(root: Path | None = None) -> str:

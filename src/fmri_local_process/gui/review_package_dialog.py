@@ -108,6 +108,7 @@ class ReviewPackageDialog(QDialog):
             self.name_edited = True
             self.dicom_box.setChecked(previous.include_dicom)
             self.zip_box.setChecked(previous.make_zip)
+            self.view_only_box.setChecked(previous.view_only)
             self.atlas_box.setChecked(previous.include_atlases and self.atlas_box.isEnabled())
             for i in range(self.output_list.count()):
                 item = self.output_list.item(i)
@@ -193,6 +194,15 @@ class ReviewPackageDialog(QDialog):
                 "No atlases fetched yet (First-level stats tab fetches them)."
             )
         options_layout.addWidget(self.atlas_box)
+        self.view_only_box = QCheckBox("View only (hide Setup and Preprocess, lock changes)")
+        self.view_only_box.setToolTip(
+            wrap_tooltip(
+                "The reviewer can look at everything but not convert, preprocess, trim, "
+                "delete or save log corrections. Crosscheck marks and notes still work."
+            )
+        )
+        self.view_only_box.setChecked(True)
+        options_layout.addWidget(self.view_only_box)
         self.zip_box = QCheckBox("Also make a .zip of the package")
         self.zip_box.setChecked(True)
         options_layout.addWidget(self.zip_box)
@@ -340,6 +350,7 @@ class ReviewPackageDialog(QDialog):
             behav_logs=self.chosen_logs(),
             include_dicom=self.dicom_box.isChecked(),
             include_atlases=self.atlas_box.isChecked(),
+            view_only=self.view_only_box.isChecked(),
             make_zip=self.zip_box.isChecked(),
         )
 

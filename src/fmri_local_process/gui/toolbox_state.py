@@ -30,10 +30,12 @@ OLD_SETTINGS = {
 CONVERTING = "converting"
 TRIMMING = "trimming"
 PREPROCESSING = "preprocessing"
+VIEW_ONLY = "view only"  # never ends: a view-only review package (review_mode.view_only)
 JOB_TEXT = {
     CONVERTING: "Converting DICOMs to BIDS",
     TRIMMING: "Trimming runs",
     PREPROCESSING: "C-PAC is preprocessing",
+    VIEW_ONLY: "View-only review package",
 }
 
 

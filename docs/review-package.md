@@ -29,6 +29,9 @@ A window opens to pick what goes in:
       series the shared scans were converted from, never other scans or sessions. You are
       asked to confirm, because DICOM headers can hold identifying details.
     - **Include the atlases**, so first-level stats work without Docker.
+    - **View only** (on by default): the app hides Setup & Convert and Preprocess, and
+      locks converting, trimming, deleting and saving log corrections. Crosscheck marks
+      and notes still work.
     - **Also make a .zip**.
 
 The line at the bottom adds up what the package will hold. **Build package** saves the

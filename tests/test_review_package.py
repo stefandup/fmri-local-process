@@ -3,6 +3,7 @@ keep only what is about the shared sessions."""
 
 import json
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -244,7 +245,29 @@ def test_preprocess_keeps_its_settings_in_the_package(
 def test_plan_round_trips_through_json(tmp_path: Path) -> None:
     plan = make_study(tmp_path)
     plan.include_dicom = True
+    plan.view_only = False
     assert rp.Plan.from_json(plan.to_json()) == plan
+
+
+def test_rebuilding_replaces_a_package_with_read_only_files(tmp_path: Path) -> None:
+    plan = make_study(tmp_path)
+    plan.make_zip = False
+    package = rp.assemble(plan, tmp_path / "review", progress=lambda _text: None)
+    for path in package.rglob("*"):  # like C-PAC's logs, copied with their read-only flag
+        if path.is_file():
+            path.chmod(stat.S_IREAD)
+    rp.assemble(plan, tmp_path / "review", progress=lambda _text: None)  # no PermissionError
+    assert (package / MANIFEST).is_file()
+
+
+def test_the_manifest_says_whether_the_package_is_view_only(tmp_path: Path) -> None:
+    plan = make_study(tmp_path)
+    plan.make_zip = False
+    package = rp.assemble(plan, tmp_path / "review", progress=lambda _text: None)
+    assert review_mode.view_only(package)  # the default
+    plan.view_only = False
+    package = rp.assemble(plan, tmp_path / "review", progress=lambda _text: None)
+    assert not review_mode.view_only(package)
 
 
 def test_the_app_opens_on_the_packaged_data(

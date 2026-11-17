@@ -23,6 +23,7 @@ import json
 import logging
 import re
 import shutil
+import stat
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -79,6 +80,7 @@ class Plan:
     behav_logs: list[str] = field(default_factory=list)  # paths relative to behav_root
     include_dicom: bool = False
     include_atlases: bool = True
+    view_only: bool = True  # the app hides Setup and Preprocess, locks changing actions
     make_zip: bool = True
 
     @property
@@ -116,6 +118,7 @@ class Plan:
                 "behav_logs": self.behav_logs,
                 "include_dicom": self.include_dicom,
                 "include_atlases": self.include_atlases,
+                "view_only": self.view_only,
                 "make_zip": self.make_zip,
             },
             indent=2,
@@ -139,6 +142,7 @@ class Plan:
             behav_logs=list(raw.get("behav_logs", [])),
             include_dicom=bool(raw.get("include_dicom", False)),
             include_atlases=bool(raw.get("include_atlases", True)),
+            view_only=bool(raw.get("view_only", True)),
             make_zip=bool(raw.get("make_zip", True)),
         )
 
@@ -485,6 +489,17 @@ def write_outputs(plan: Plan, target: Path) -> None:
             )
 
 
+def remove_tree(folder: Path) -> None:
+    """shutil.rmtree that also deletes read-only files (C-PAC writes its logs read-only, and
+    copying keeps that; Windows then refuses to delete them)."""
+
+    def make_writable(func: Callable[[str], object], path: str, _error: BaseException) -> None:
+        Path(path).chmod(stat.S_IWRITE)
+        func(path)
+
+    shutil.rmtree(folder, onexc=make_writable)
+
+
 def manifest(plan: Plan, folders: dict[str, str]) -> dict:
     return {
         "name": plan.name,
@@ -494,6 +509,7 @@ def manifest(plan: Plan, folders: dict[str, str]) -> dict:
         "outputs": plan.outputs,
         "behav_logs": plan.behav_logs,
         "raw_dicom": plan.include_dicom,
+        "view_only": plan.view_only,
         "folders": folders,
     }
 
@@ -524,7 +540,7 @@ def assemble(
     if target.exists():
         if not (target / MANIFEST).is_file():
             raise ReviewPackageError(f"{target} exists and isn't a review package: not replaced.")
-        shutil.rmtree(target)
+        remove_tree(target)
     if app_dir is not None:
         progress(f"Copying the app from {app_dir}")
         shutil.copytree(app_dir, target)
