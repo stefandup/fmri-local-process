@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from fmri_local_process.gui.backup_box import BackupBox
 from fmri_local_process.gui.folder_panel import FolderPanel
 from fmri_local_process.gui.image_view import HelpToggle
+from fmri_local_process.gui.preprocess_gui import DockerControlThread
 from fmri_local_process.gui.qt_common import (
     ERROR_COLOR,
     HOME_BASE_ACCENT_COLOR,
@@ -57,7 +58,11 @@ from fmri_local_process.processing.dcm2niix import (
     find_dcm2niix,
     run_dcm2niix,
 )
-from fmri_local_process.processing.deface import DefaceUnavailableError, make_deface
+from fmri_local_process.processing.deface import (
+    DefaceUnavailableError,
+    DockerNeededError,
+    make_deface,
+)
 from fmri_local_process.processing.philani_bids import ConversionReport, convert_dicom_root
 
 PACKAGE_LOGGER = "fmri_local_process"
@@ -83,15 +88,26 @@ class QtLogHandler(logging.Handler):
 class DefacerProbe(QThread):
     """Looks for a defacer (make_deface finds one or says why not) off the GUI thread."""
 
-    done = Signal(str)  # "" when one was found, else why not
+    done = Signal(str, str)  # why not ("" when one was found), DOCKER_* when Docker is why
 
     def run(self) -> None:
         try:
             make_deface()
-        except (DefaceUnavailableError, OSError) as e:
-            self.done.emit(str(e))
+        except DockerNeededError as e:
+            self.done.emit(str(e), DOCKER_STOPPED if e.installed else DOCKER_MISSING)
             return
-        self.done.emit("")
+        except (DefaceUnavailableError, OSError) as e:
+            self.done.emit(str(e), "")
+            return
+        self.done.emit("", "")
+
+
+DOCKER_STOPPED, DOCKER_MISSING = "stopped", "missing"
+DEFACER_WARNINGS = {
+    DOCKER_STOPPED: "⚠ Docker isn't running: can't check for the defacer",
+    DOCKER_MISSING: "⚠ Docker not installed: T1w won't be defaced",
+    "": "⚠ No defacer: T1w won't be defaced",
+}
 
 
 class ConvertThread(QThread):
@@ -259,12 +275,25 @@ class ConvertPage(QWidget):
         self.deface_box.toggled.connect(lambda on: state.settings.setValue("deface", on))
         self.deface_box.setEnabled(False)  # until the defacer check below has run
         options_layout.addWidget(self.deface_box)
-        self.deface_warning = QPushButton("⚠ No defacer")
-        self.deface_warning.setFlat(True)
+        self.deface_warning = QLabel()
         self.deface_warning.setStyleSheet(f"color: {WARNING_COLOR}; font-weight: bold;")
         self.deface_warning.setVisible(False)
-        self.deface_warning.clicked.connect(self.check_defacer)
         options_layout.addWidget(self.deface_warning)
+        self.start_docker_button = QPushButton("Start Docker")
+        self.start_docker_button.setToolTip(
+            wrap_tooltip("Start Docker Desktop (can take a minute), then check for the defacer.")
+        )
+        self.start_docker_button.setVisible(False)
+        self.start_docker_button.clicked.connect(self.start_docker)
+        options_layout.addWidget(self.start_docker_button)
+        self.recheck_button = QPushButton("Check again")
+        self.recheck_button.setToolTip(
+            wrap_tooltip("Look for the defacer again, e.g. after starting Docker yourself.")
+        )
+        self.recheck_button.setVisible(False)
+        self.recheck_button.clicked.connect(self.check_defacer)
+        options_layout.addWidget(self.recheck_button)
+        self.docker_thread: DockerControlThread | None = None
         options_layout.addStretch(1)
         self.help = HelpToggle("Help ?", "What this tab does, step by step.")
         self.help.set_text(HELP_TEXT)
@@ -396,21 +425,43 @@ class ConvertPage(QWidget):
             return
         self.deface_warning.setText("Checking for a defacer...")
         self.deface_warning.setVisible(True)
+        self.recheck_button.setVisible(False)
+        self.start_docker_button.setVisible(False)
         self.defacer_probe = DefacerProbe()
         self.defacer_probe.done.connect(self.on_defacer_checked)
         self.defacer_probe.start()
         self.update_controls()
 
-    def on_defacer_checked(self, error: str) -> None:
+    def start_docker(self) -> None:
+        if self.docker_thread is not None:
+            return
+        self.deface_warning.setText("Starting Docker...")
+        self.start_docker_button.setEnabled(False)
+        self.recheck_button.setEnabled(False)
+        self.docker_thread = DockerControlThread("start")
+        self.docker_thread.done.connect(self.on_docker_started)
+        self.docker_thread.start()
+
+    def on_docker_started(self, _action: str, error: str) -> None:
+        if self.docker_thread is not None:
+            self.docker_thread.wait()
+        self.docker_thread = None
+        self.start_docker_button.setEnabled(True)
+        self.recheck_button.setEnabled(True)
+        if error:
+            self.log_line(f"Couldn't start Docker: {error}")
+        self.check_defacer()
+
+    def on_defacer_checked(self, error: str, docker: str = "") -> None:
         if self.defacer_probe is not None:
             self.defacer_probe.wait()
         self.defacer_probe = None
         self.defacer_error = error
         self.deface_warning.setVisible(bool(error))
-        self.deface_warning.setText("⚠ No defacer: T1w won't be defaced")
-        self.deface_warning.setToolTip(
-            wrap_tooltip(f"{error}\n\nClick to check again (e.g. once Docker is running).")
-        )
+        self.recheck_button.setVisible(bool(error))
+        self.start_docker_button.setVisible(bool(error) and docker == DOCKER_STOPPED)
+        self.deface_warning.setText(DEFACER_WARNINGS[docker])
+        self.deface_warning.setToolTip(wrap_tooltip(error))
         self.deface_box.setToolTip(
             wrap_tooltip(
                 "Uses mri_deface from $FREESURFER_HOME, else the defacer the installer set up "

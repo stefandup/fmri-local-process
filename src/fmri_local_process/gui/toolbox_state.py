@@ -3,7 +3,8 @@ last changed.
 
 * Folders (DICOM sessions, behavioural logs, BIDS, C-PAC output) are chosen once, on the
   Setup tab, and remembered. The first time, they are taken over from the separate
-  crosscheck and preprocess windows' remembered folders.
+  crosscheck and preprocess windows' remembered folders. In a review package they start on
+  its own data (processing/review_mode.py).
 * A job that changes the BIDS folder (converting, trimming, C-PAC reading it) is registered
   as busy; the other tabs lock their own changing actions until it ends.
 * Every change to the BIDS folder bumps a generation number, so a tab refreshes when it is
@@ -15,6 +16,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QSettings, Signal
 
 from fmri_local_process.gui.qt_common import SETTINGS_ORGANIZATION
+from fmri_local_process.processing.review_mode import package_folders, package_root, settings_dir
 
 SETTINGS_APP = "FmriToolbox"
 FOLDER_KEYS = ("dicom", "behav", "bids", "output")
@@ -28,15 +30,20 @@ OLD_SETTINGS = {
 CONVERTING = "converting"
 TRIMMING = "trimming"
 PREPROCESSING = "preprocessing"
+VIEW_ONLY = "view only"  # never ends: a view-only review package (review_mode.view_only)
 JOB_TEXT = {
     CONVERTING: "Converting DICOMs to BIDS",
     TRIMMING: "Trimming runs",
     PREPROCESSING: "C-PAC is preprocessing",
+    VIEW_ONLY: "View-only review package",
 }
 
 
 def make_settings(app: str) -> QSettings:
-    """The settings store for app (a function, so tests can point it at a temp file)."""
+    """The settings store for app (a function, so tests can point it at a temp file). In a
+    review package it is a file in the package, so the reviewer's choices stay with it."""
+    if (root := package_root()) is not None:
+        return QSettings(str(settings_dir(root) / f"{app}.ini"), QSettings.Format.IniFormat)
     return QSettings(SETTINGS_ORGANIZATION, app)
 
 
@@ -49,9 +56,13 @@ class ToolboxState(QObject):
         super().__init__()
         self.settings = make_settings(SETTINGS_APP)
         self.folders: dict[str, Path | None] = {}
+        packaged = package_folders()  # a review package: start on its data
         for key in FOLDER_KEYS:
             saved = str(self.settings.value(key, "") or "") or self._old_folder(key)
-            self.folders[key] = Path(saved) if saved and Path(saved).is_dir() else None
+            if saved and Path(saved).is_dir():
+                self.folders[key] = Path(saved)
+            else:  # e.g. a package unzipped elsewhere: its own data again
+                self.folders[key] = packaged.get(key)
         self.busy: dict[str, str] = {}  # job -> text
         self.generation = 0
 
@@ -73,6 +84,7 @@ class ToolboxState(QObject):
             return
         self.folders[key] = folder
         self.settings.setValue(key, str(folder) if folder else "")
+        self.settings.sync()  # on disk now (a review package's settings file, too)
         self.folder_changed.emit(key)
         if key == "bids":
             self.bump()

@@ -449,6 +449,20 @@ def test_overview_table_flags_cells_like_the_old_bids_viewer(tmp_path: Path) -> 
     ]  # fmt: skip
 
 
+def test_overview_marks_a_run_trimmed_to_length_as_done(tmp_path: Path) -> None:
+    path = write_bold(func(tmp_path, "A", "1", "task-Rest_bold.nii.gz"), 10)
+    cc.write_expected(tmp_path, {"task-Rest_bold": 6})
+    data = next(d for d in cc.find_data_files(tmp_path) if d.path == path)
+    [review] = cc.review_bids_folder(tmp_path)
+    tasks = cc.overview_tasks([review])
+    assert cc.overview_row(review, tasks)[-1] == cc.Cell("10", "long")
+
+    cc.trim_run(tmp_path, data, 6)
+
+    [review] = cc.review_bids_folder(tmp_path)
+    assert cc.overview_row(review, tasks)[-1] == cc.Cell("6 ✂ (was 10)", "trimmed")
+
+
 def test_overview_csv_has_a_row_per_session_with_problems_and_note(tmp_path: Path) -> None:
     import csv
 

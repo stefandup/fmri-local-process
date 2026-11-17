@@ -20,6 +20,7 @@ nav:
   - Preprocessing: preprocessing.md
   - First-level stats: first-level-stats.md
   - Sequence overview: sequence-overview.md
+  - Review packages: review-package.md
   - Roadmap: roadmap.md
   - For Contributors:
       - Golden Rules: golden-rules.md

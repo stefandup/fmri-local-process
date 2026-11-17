@@ -40,6 +40,22 @@ def test_explicit_folder_without_files_is_an_error(tmp_path: Path) -> None:
         df.make_deface(tmp_path)
 
 
+@pytest.mark.parametrize("installed", [True, False])
+def test_docker_down_is_told_apart_from_no_defacer(
+    monkeypatch: pytest.MonkeyPatch, installed: bool
+) -> None:
+    def down() -> Path:
+        raise df.DockerUnavailableError("The Docker daemon isn't answering")
+
+    monkeypatch.delenv("FREESURFER_HOME", raising=False)
+    monkeypatch.setattr(df, "find_docker", down)
+    monkeypatch.setattr(df.shutil, "which", lambda _name: "docker" if installed else None)
+    with pytest.raises(df.DockerNeededError) as caught:
+        df.make_deface()
+    assert caught.value.installed is installed
+    assert isinstance(caught.value, df.DefaceUnavailableError)  # callers catching it still do
+
+
 def test_docker_command_with_image_mri_deface(tmp_path: Path) -> None:
     t1w = tmp_path / "sub-1_T1w.nii.gz"
     cmd = df.build_docker_deface_command(Path("docker"), "img", t1w, df.MRI_DEFACE)

@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 
 from fmri_local_process.gui.image_view import HelpToggle
 from fmri_local_process.gui.qt_common import paths_conflict
-from fmri_local_process.gui.toolbox_state import ToolboxState
+from fmri_local_process.gui.toolbox_state import VIEW_ONLY, ToolboxState
 from fmri_local_process.processing.behav_export import (
     BIDS_LAYOUT,
     ONE_FOLDER,
@@ -950,6 +950,9 @@ class BehavLogsPage(QWidget):
             return
         self.panel = BehavLogsPanel(*folders, self, data=result)
         self.panel.saved.connect(self.on_saved)
+        if VIEW_ONLY in self.state.busy:  # corrections feed Convert to BIDS
+            self.panel.save_button.setEnabled(False)
+            self.panel.save_button.setToolTip("Locked: view-only review package.")
         self.filler.hide()
         self.layout_.addWidget(self.panel, 1)
         self.update_status()

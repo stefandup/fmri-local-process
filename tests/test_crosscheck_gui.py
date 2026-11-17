@@ -32,8 +32,12 @@ def no_docker() -> Path:
 
 
 @pytest.fixture
-def window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[toolbox.ToolboxWindow]:
+def window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> Iterator[toolbox.ToolboxWindow]:
+    """The toolbox; parametrize it indirectly with True for a view-only review package."""
     _app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(toolbox, "view_only", lambda: getattr(request, "param", False))
 
     def settings(app: str, *_rest: object) -> QSettings:  # one temp file per app
         return QSettings(str(tmp_path / f"{app}.ini"), QSettings.Format.IniFormat)
@@ -119,6 +123,24 @@ def test_a_running_job_locks_the_other_tabs(window: toolbox.ToolboxWindow, tmp_p
     window.state.set_busy(toolbox_state.CONVERTING, False)
     assert window.preprocess.external_lock == ""
     assert window.crosscheck.delete_ticked_button.isEnabled()
+
+
+@pytest.mark.parametrize("window", [True], indirect=True)
+def test_a_view_only_package_hides_setup_and_preprocess(
+    window: toolbox.ToolboxWindow, tmp_path: Path
+) -> None:
+    hidden = {toolbox.TAB_ORDER.index(n) for n in toolbox.HIDDEN_WHEN_VIEW_ONLY}
+    for index in range(window.tabs.count()):
+        assert window.tabs.isTabVisible(index) == (index not in hidden)
+    assert window.tabs.currentIndex() not in hidden  # opens on the first tab it shows
+    assert "(view only)" in window.windowTitle()
+    assert window.busy_label.text() == ""  # nothing is running
+
+    two_session_subject(tmp_path / "bids")
+    open_crosscheck(window, tmp_path / "bids")
+    window.crosscheck.table.item(0, 0).setCheckState(Qt.CheckState.Checked)  # pyright: ignore[reportOptionalMemberAccess]
+    assert not window.crosscheck.delete_ticked_button.isEnabled()
+    assert window.crosscheck.note_ticked_button.isEnabled()  # notes change no data files
 
 
 def test_progress_panel_follows_the_converter(window: toolbox.ToolboxWindow) -> None:
@@ -292,6 +314,24 @@ def test_deface_is_greyed_out_with_a_warning_when_no_defacer(
     assert not page.deface_box.isEnabled() and not page.deface_wanted()
     assert not page.deface_warning.isHidden()
     assert "No defacer found (test)" in page.deface_warning.toolTip()
+    assert not page.recheck_button.isHidden() and page.start_docker_button.isHidden()
+
+
+def test_docker_not_running_says_so_and_offers_to_start_it(
+    window: toolbox.ToolboxWindow,
+) -> None:
+    page = window.convert
+    if page.defacer_probe is not None:
+        page.defacer_probe.wait()
+    QApplication.processEvents()
+
+    page.on_defacer_checked("The Docker daemon isn't answering", convert_page.DOCKER_STOPPED)
+
+    assert "Docker isn't running" in page.deface_warning.text()
+    assert not page.start_docker_button.isHidden() and not page.recheck_button.isHidden()
+    page.on_defacer_checked("docker not found on PATH", convert_page.DOCKER_MISSING)
+    assert "not installed" in page.deface_warning.text()
+    assert page.start_docker_button.isHidden()  # nothing to start
 
 
 def test_backup_box_saves_outside_the_bids_folder(

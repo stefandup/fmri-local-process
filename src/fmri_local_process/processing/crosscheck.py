@@ -685,7 +685,8 @@ def delete_session(bids_root: Path, review: SessionReview, why: str = "") -> Non
 @dataclass(frozen=True)
 class Cell:
     """One cell of the overview table: its text and what it shows ('' when fine), e.g.
-    "missing", "short", "long", "pending" (several runs) or "check"."""
+    "missing", "short", "long", "pending" (several runs) or "check"; "trimmed" is fine too
+    (trimmed to its expected length)."""
 
     text: str
     status: str = ""
@@ -745,6 +746,10 @@ def overview_row(review: SessionReview, tasks: list[str]) -> list[Cell]:
         volumes = ", ".join(str(d.volumes) if d.volumes is not None else "?" for d in runs)
         kinds = {issue_of.get(d.path, "") for d in runs} - {""}
         kind = next((k for k in ("short", "long") if k in kinds), "")
+        trimmed = [d for d in runs if d.trimmed_from]
+        if trimmed and not kind:  # trimmed, and now the expected length: done
+            kind = "trimmed"
+            volumes += " ✂ (was " + ", ".join(str(d.trimmed_from) for d in trimmed) + ")"
         cells.append(Cell(volumes or "-", kind))
         if task in behav:
             events = [d for d in data if d.label == f"task-{task}_events"]

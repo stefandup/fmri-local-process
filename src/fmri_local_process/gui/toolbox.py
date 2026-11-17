@@ -48,9 +48,11 @@ from fmri_local_process.gui.toolbox_state import (
     CONVERTING,
     PREPROCESSING,
     TRIMMING,
+    VIEW_ONLY,
     ToolboxState,
 )
 from fmri_local_process.gui.trimming import Trimmer
+from fmri_local_process.processing.review_mode import package_name, view_only
 
 SETUP = "Setup & Convert to BIDS"
 BEHAV = "ID & Behaviour Logs"
@@ -64,6 +66,7 @@ TAB_ORDER = (
     SETUP, BEHAV, SCAN_LENGTHS, CROSSCHECK, PREPROCESS, OVERVIEW, FIRST_LEVEL, SEQUENCE
 )  # fmt: skip
 HEADER_POINT_INCREASE = NAME_LABEL_FONT_POINT_INCREASE // 2
+HIDDEN_WHEN_VIEW_ONLY = (SETUP, PREPROCESS)  # they only change data
 LOGO_IMAGE = Path(__file__).parent / "assets" / "table_mountain.png"  # top right corner
 LOGO_HEIGHT = 40
 
@@ -86,9 +89,17 @@ def tab_text(number: int, name: str, badge: str = "") -> str:
 class ToolboxWindow(QMainWindow):
     def __init__(self, start_tab: str = SETUP) -> None:
         super().__init__()
-        self.setWindowTitle("Philani fMRI toolbox")
+        review = package_name()
+        self.view_only = view_only()
+        self.setWindowTitle(
+            "Philani fMRI toolbox"
+            + (f"  —  review package: {review}" if review else "")
+            + (" (view only)" if self.view_only else "")
+        )
         self.resize(1400, 900)
         self.state = ToolboxState()
+        if self.view_only:  # locks every tab's changing actions, for good
+            self.state.set_busy(VIEW_ONLY, True)
         self.trimmer = Trimmer(self.state)
 
         self.convert = ConvertPage(self.state)
@@ -118,6 +129,11 @@ class ToolboxWindow(QMainWindow):
         self.tabs = QTabWidget()
         for number, name in enumerate(TAB_ORDER, start=1):
             self.tabs.addTab(self.pages[name], tab_text(number, name))
+        if self.view_only:  # hidden, not removed: tab numbers and badges stay as they are
+            for name in HIDDEN_WHEN_VIEW_ONLY:
+                self.tabs.setTabVisible(TAB_ORDER.index(name), False)
+            if start_tab in HIDDEN_WHEN_VIEW_ONLY:
+                start_tab = next(n for n in TAB_ORDER if n not in HIDDEN_WHEN_VIEW_ONLY)
         layout.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
 
@@ -181,7 +197,7 @@ class ToolboxWindow(QMainWindow):
         self.bids_name.setText(bids_root.name if bids_root else "No BIDS folder chosen")
         self.bids_path.setText(str(bids_root.parent) if bids_root else "(first tab)")
         self.bids_path.setToolTip(str(bids_root) if bids_root else "")
-        busy = self.state.lock_reason()
+        busy = self.state.lock_reason(VIEW_ONLY)  # the title says view only
         self.busy_label.setText(f"⏳ {busy}" if busy else "")
 
     def on_folder_changed(self, key: str) -> None:
@@ -239,7 +255,11 @@ class ToolboxWindow(QMainWindow):
                 event.ignore()
                 return
         self.preprocess.closeEvent(event)  # asks about a running C-PAC, stops its threads
-        threads = self.behav.loader is not None or self.convert.defacer_probe is not None
+        threads = (
+            self.behav.loader is not None
+            or self.convert.defacer_probe is not None
+            or self.convert.docker_thread is not None
+        )
         if event.isAccepted() and (working or threads):
             # A QThread destroyed while running aborts with a crash dialog: leave at once.
             os._exit(0)
