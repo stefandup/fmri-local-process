@@ -52,10 +52,11 @@ function Show-Help {
     @"
 Usage: .\build.ps1 -Full | -Exe | -Inno | -Review [-Plan <plan.json>]
 
-  -Full   Build the exe with PyInstaller, assemble build_output/payload/,
-          then compile the installer.
+  -Full   Build the exes with PyInstaller (the fmri_toolbox window with every tab, plus
+          the command-line tools), assemble build_output/payload/, then compile the
+          installer.
 
-  -Exe    Only build the exes into build_output/dist/<app>/ ($($Apps.Keys -join ', ')).
+  -Exe    Only build the exes into build_output/dist/<app>/ ($(@($Apps.Keys) + 'fmri_toolbox' -join ', ')).
           No Inno Setup needed.
 
   -Inno   Skip the PyInstaller build. Reuses build_output/dist/<app>/
@@ -91,6 +92,9 @@ function Build-Exes {
             --copy-metadata $PackageName @appBundleArgs $Apps[$app]
         Assert-Success "PyInstaller build of $app"
     }
+    # The toolbox window with every tab -- the installer's main app. Its Setup tab converts
+    # DICOMs too, so it gets dcm2niix as well.
+    Build-ToolboxExe $bundleArgs
 }
 
 function Build-Installer {
@@ -100,7 +104,7 @@ function Build-Installer {
 
     if (Test-Path $PayloadPath) { Remove-Item $PayloadPath -Recurse -Force }
     New-Item -ItemType Directory -Path $PayloadPath | Out-Null
-    foreach ($app in $Apps.Keys) {
+    foreach ($app in @($Apps.Keys) + $ToolboxApp) {
         $bundleDir = Join-Path $DistPath $app
         if (-not (Test-Path $bundleDir)) {
             throw "$bundleDir not found -- run '.\build.ps1 -Full' or '-Exe' first."
@@ -137,10 +141,12 @@ function Build-Installer {
 $ToolboxApp = "fmri_toolbox"
 $ReviewPath = Join-Path $BuildOutput "review"
 
-function Build-ToolboxExe {
+function Build-ToolboxExe($ExtraArgs = @()) {
     # The toolbox window (all tabs), windowed: no console behind it. Its splash image and
-    # other package data travel with it. pip only refreshes the version the app shows; it
-    # fails while a toolbox started from .venv is open (its exe is locked), so carry on then.
+    # other package data travel with it. -Full/-Exe pass dcm2niix in $ExtraArgs; a review
+    # package doesn't convert DICOMs, so it goes without. pip only refreshes the version the
+    # app shows; it fails while a toolbox started from .venv is open (its exe is locked), so
+    # carry on then.
     & $Python -m pip install -e . --no-deps
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "pip install -e . failed (a toolbox from .venv still open?); the app's version number may be stale."
@@ -149,7 +155,7 @@ function Build-ToolboxExe {
     & $Python -m PyInstaller --noconfirm --workpath $WorkPath --distpath $DistPath `
         --specpath $WorkPath --name $ToolboxApp --onedir --windowed `
         --copy-metadata $PackageName --add-data "$assets;fmri_local_process\gui\assets" `
-        (Join-Path $PSScriptRoot "packaging\fmri_toolbox.py")
+        @ExtraArgs (Join-Path $PSScriptRoot "packaging\fmri_toolbox.py")
     Assert-Success "PyInstaller build of $ToolboxApp"
 }
 

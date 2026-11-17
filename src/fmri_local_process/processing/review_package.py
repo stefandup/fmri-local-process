@@ -7,6 +7,8 @@ Only what was ticked goes in:
   crosscheck records in code/ only the entries about shared sessions, so nothing about the
   other participants goes along.
 * C-PAC outputs of those sessions and tasks, by kind (preprocessed BOLD, QC, motion, ...).
+* MRIQC's results of the shared scans: their metrics (IQMs), HTML reports and report figures.
+  Never the group reports (group_*.tsv/.html): they hold every participant's runs.
 * The ticked behavioural logs, at the same paths under the log folder (their corrections in
   code/behav_corrections.json are keyed by that path).
 * Only when asked: the raw DICOM series the shared scans were converted from.
@@ -14,7 +16,7 @@ Only what was ticked goes in:
 Layout of a package (folders as in the sources, so the app reads them as usual):
     <name>/fmri_toolbox.exe, _internal/   the app
     <name>/review_package.json            what's in it, and where (review_mode.MANIFEST)
-    <name>/review_data/bids|output|behav|dicom|atlases/
+    <name>/review_data/bids|output|mriqc|behav|dicom|atlases/
 """
 
 import csv
@@ -75,10 +77,12 @@ class Plan:
     output_root: Path | None = None
     behav_root: Path | None = None
     dicom_root: Path | None = None
+    mriqc_root: Path | None = None
     scans: list[ScanChoice] = field(default_factory=list)
     outputs: list[str] = field(default_factory=list)  # OUTPUT_KINDS keys
     behav_logs: list[str] = field(default_factory=list)  # paths relative to behav_root
     include_dicom: bool = False
+    include_mriqc: bool = True  # MRIQC's results of the shared scans, if there are any
     include_atlases: bool = True
     view_only: bool = True  # the app hides Setup and Preprocess, locks changing actions
     make_zip: bool = True
@@ -113,10 +117,12 @@ class Plan:
                 "output_root": path(self.output_root),
                 "behav_root": path(self.behav_root),
                 "dicom_root": path(self.dicom_root),
+                "mriqc_root": path(self.mriqc_root),
                 "scans": [[c.subject, c.session, c.scan] for c in sorted(self.scans)],
                 "outputs": self.outputs,
                 "behav_logs": self.behav_logs,
                 "include_dicom": self.include_dicom,
+                "include_mriqc": self.include_mriqc,
                 "include_atlases": self.include_atlases,
                 "view_only": self.view_only,
                 "make_zip": self.make_zip,
@@ -137,10 +143,12 @@ class Plan:
             output_root=path("output_root"),
             behav_root=path("behav_root"),
             dicom_root=path("dicom_root"),
+            mriqc_root=path("mriqc_root"),
             scans=[ScanChoice(*c) for c in raw.get("scans", [])],
             outputs=list(raw.get("outputs", [])),
             behav_logs=list(raw.get("behav_logs", [])),
             include_dicom=bool(raw.get("include_dicom", False)),
+            include_mriqc=bool(raw.get("include_mriqc", True)),
             include_atlases=bool(raw.get("include_atlases", True)),
             view_only=bool(raw.get("view_only", True)),
             make_zip=bool(raw.get("make_zip", True)),
@@ -284,6 +292,39 @@ def refers_to(text: str, subject: str, sessions: set[str]) -> bool:
 
 def chosen_outputs(plan: Plan) -> list[Path]:
     return [path for path, kind in output_files(plan) if kind in plan.outputs]
+
+
+# MRIQC output folder files beside the per-run results that say nothing about participants.
+MRIQC_DATASET_FILES = ("dataset_description.json", ".bidsignore")
+
+
+def mriqc_files(plan: Plan) -> list[Path]:
+    """MRIQC's results of the shared scans: per-run IQMs and timeseries (sub-*/ses-*/), report
+    figures (sub-*/figures/) and the HTML reports beside them. The group reports and MRIQC's
+    own logs stay home: they mention every participant."""
+    root = plan.mriqc_root
+    if root is None or not root.is_dir():
+        return []
+
+    def shared(path: Path) -> bool:
+        entities = bids_entities(path.name)
+        subject, session = entities.get("sub"), entities.get("ses")
+        if subject is None or session is None:
+            return False
+        return plan.shares(subject, session, scan_of(path.name))
+
+    found = [root / name for name in MRIQC_DATASET_FILES if (root / name).is_file()]
+    found += [p for p in sorted(root.glob("sub-*.html")) if shared(p)]
+    for subject in plan.subjects:
+        found += [
+            p for p in sorted((root / f"sub-{subject}").rglob("*")) if p.is_file() and shared(p)
+        ]
+    return found
+
+
+def has_mriqc_results(files: list[Path]) -> bool:
+    """Is there more than the dataset files (a run's metrics or report)?"""
+    return any(p.name not in MRIQC_DATASET_FILES for p in files)
 
 
 def dicom_series_dirs(plan: Plan) -> list[Path]:
@@ -509,6 +550,7 @@ def manifest(plan: Plan, folders: dict[str, str]) -> dict:
         "outputs": plan.outputs,
         "behav_logs": plan.behav_logs,
         "raw_dicom": plan.include_dicom,
+        "mriqc": "mriqc" in folders,
         "view_only": plan.view_only,
         "folders": folders,
     }
@@ -520,7 +562,7 @@ Open fmri_toolbox.exe. It starts on the data in review_data\\ (the folders on th
 choose another folder there to use it instead. Changes you make (crosscheck decisions, trims,
 notes) are made to the copy in review_data\\, never to the original.
 
-Shared: {subjects}. Raw DICOMs: {raw}.
+Shared: {subjects}. Raw DICOMs: {raw}. MRIQC results: {mriqc}.
 """
 
 
@@ -555,6 +597,12 @@ def assemble(
         progress("Copying C-PAC outputs")
         write_outputs(plan, data / "output")
         folders["output"] = f"{DATA_DIR}/output"
+    mriqc = mriqc_files(plan) if plan.include_mriqc else []
+    if plan.mriqc_root is not None and has_mriqc_results(mriqc):
+        progress("Copying MRIQC results")
+        for path in mriqc:
+            copy_under(path, plan.mriqc_root, data / "mriqc")
+        folders["mriqc"] = f"{DATA_DIR}/mriqc"
     if plan.behav_root is not None and plan.behav_logs:
         progress("Copying behavioural logs")
         for key in plan.behav_logs:
@@ -578,6 +626,9 @@ def assemble(
             name=plan.name,
             subjects=", ".join(f"sub-{s}" for s in plan.subjects),
             raw="included" if plan.include_dicom else "not included",
+            mriqc="included (view only: MRIQC can't be run)"
+            if "mriqc" in folders
+            else "not included",
         ),
     )
     if plan.make_zip:

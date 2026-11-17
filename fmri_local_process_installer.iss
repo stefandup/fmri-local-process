@@ -7,8 +7,9 @@
 #endif
 #define MyAppPublisher "Stellenbosch University"
 #define MyAppURL "https://www.sun.ac.za"
-; Matches $AppName in build.ps1.
-#define MyAppExeName "fmri_convert_to_bids.exe"
+; Matches $ToolboxApp in build.ps1: the toolbox window with every tab. The command-line
+; tools (fmri_convert_to_bids, fmri_preprocess) sit beside it, on PATH.
+#define MyAppExeName "fmri_toolbox.exe"
 #define MyAppId "05C45EB1-8EDF-41EA-A79E-BC1A8E0645B3"
 ; Passed by build.ps1 from processing/cpac_docker.py's CPAC_IMAGE, so both pull the same tag.
 #ifndef CpacImage

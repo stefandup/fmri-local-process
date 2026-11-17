@@ -140,6 +140,62 @@ def test_only_the_chosen_scans_go_in(tmp_path: Path) -> None:
     assert (tmp_path / "review" / "review_test.zip").is_file()
 
 
+def make_mriqc(root: Path) -> Path:
+    """MRIQC 24's output for A and B, sessions 1 and 2 (Rest bold and T1w), plus group files."""
+    mriqc = root / "mriqc"
+    touch(mriqc / "dataset_description.json", "{}")
+    touch(
+        mriqc / "group_bold.tsv",
+        "bids_name\nsub-A_ses-1_task-Rest_bold\nsub-B_ses-1_task-Rest_bold\n",
+    )
+    touch(mriqc / "group_bold.html")
+    touch(mriqc / "logs" / "mriqc-1.log")
+    touch(mriqc / "toolbox_logs" / "mriqc_sub-A.txt")
+    for subject in "AB":
+        for session in "12":
+            prefix = f"sub-{subject}_ses-{session}"
+            for scan in ("task-Rest_bold", "T1w"):
+                touch(mriqc / f"{prefix}_{scan}.html")
+                folder = "func" if scan.endswith("bold") else "anat"
+                touch(
+                    mriqc / f"sub-{subject}" / f"ses-{session}" / folder / f"{prefix}_{scan}.json"
+                )
+                desc_scan = scan.replace("_bold", "_desc-carpet_bold").replace(
+                    "T1w", "desc-zoomed_T1w"
+                )
+                touch(mriqc / f"sub-{subject}" / "figures" / f"{prefix}_{desc_scan}.svg")
+    return mriqc
+
+
+def test_mriqc_results_of_the_shared_scans_go_in(tmp_path: Path) -> None:
+    plan = make_study(tmp_path)
+    plan.mriqc_root = make_mriqc(tmp_path)
+    plan.scans = [rp.ScanChoice("A", "1", "task-Rest_bold")]  # not its T1w
+    plan.make_zip = False
+
+    package = rp.assemble(plan, tmp_path / "review", progress=lambda _text: None)
+
+    assert relative_files(package / "review_data" / "mriqc") == {
+        "dataset_description.json",
+        "sub-A_ses-1_task-Rest_bold.html",
+        "sub-A/ses-1/func/sub-A_ses-1_task-Rest_bold.json",
+        "sub-A/figures/sub-A_ses-1_task-Rest_desc-carpet_bold.svg",
+    }  # no group reports (every participant), no logs, nothing of ses-2, the T1w or sub-B
+    manifest = json.loads((package / MANIFEST).read_text())
+    assert manifest["folders"]["mriqc"] == "review_data/mriqc" and manifest["mriqc"]
+    assert review_mode.packaged_mriqc(package)
+
+    plan.include_mriqc = False  # left out when unticked
+    package = rp.assemble(plan, tmp_path / "review", progress=lambda _text: None)
+    assert not (package / "review_data" / "mriqc").exists()
+    assert not review_mode.packaged_mriqc(package)
+
+    plan.include_mriqc = True
+    plan.scans = [rp.ScanChoice("B", "1", "task-Matching_bold")]  # MRIQC never ran on it
+    package = rp.assemble(plan, tmp_path / "review", progress=lambda _text: None)
+    assert not (package / "review_data" / "mriqc").exists()  # not just the dataset files
+
+
 def test_code_records_keep_only_the_shared_sessions(tmp_path: Path) -> None:
     plan = make_study(tmp_path)
     package = rp.assemble(plan, tmp_path / "review", progress=lambda _text: None)
@@ -246,6 +302,8 @@ def test_plan_round_trips_through_json(tmp_path: Path) -> None:
     plan = make_study(tmp_path)
     plan.include_dicom = True
     plan.view_only = False
+    plan.mriqc_root = tmp_path / "mriqc"
+    plan.include_mriqc = False
     assert rp.Plan.from_json(plan.to_json()) == plan
 
 

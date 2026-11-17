@@ -58,6 +58,7 @@ FOLDERS = (
     ("output", "C-PAC output folder"),
     ("behav", "Behavioural logs folder"),
     ("dicom", "DICOM sessions folder"),
+    ("mriqc", "MRIQC output folder"),
 )
 CANCELLED = 2
 RECOUNT_DELAY_MS = 300
@@ -107,6 +108,7 @@ class ReviewPackageDialog(QDialog):
             self.name_edit.setText(previous.name)
             self.name_edited = True
             self.dicom_box.setChecked(previous.include_dicom)
+            self.mriqc_box.setChecked(previous.include_mriqc)
             self.zip_box.setChecked(previous.make_zip)
             self.view_only_box.setChecked(previous.view_only)
             self.atlas_box.setChecked(previous.include_atlases and self.atlas_box.isEnabled())
@@ -185,6 +187,17 @@ class ReviewPackageDialog(QDialog):
         )
         self.dicom_box.toggled.connect(lambda _on: self.recount.start())
         options_layout.addWidget(self.dicom_box)
+        self.mriqc_box = QCheckBox("Include the MRIQC reports and metrics of the shared scans")
+        self.mriqc_box.setToolTip(
+            wrap_tooltip(
+                "Each shared run's MRIQC metrics, HTML report and its figures (from the MRIQC "
+                "output folder). The group reports stay out: they hold every participant. "
+                "The package then shows MRIQC's results but can't run MRIQC."
+            )
+        )
+        self.mriqc_box.setChecked(True)
+        self.mriqc_box.toggled.connect(lambda _on: self.recount.start())
+        options_layout.addWidget(self.mriqc_box)
         self.atlas_box = QCheckBox("Include the first-level atlases (no Docker needed to view)")
         present = atlases_present(default_cache())
         self.atlas_box.setEnabled(present)
@@ -226,6 +239,7 @@ class ReviewPackageDialog(QDialog):
             "output": previous.output_root if previous else None,
             "behav": previous.behav_root if previous else None,
             "dicom": previous.dicom_root if previous else None,
+            "mriqc": previous.mriqc_root if previous else None,
         }
         for key, edit in self.folder_edits.items():
             last = planned.get(key)
@@ -345,10 +359,12 @@ class ReviewPackageDialog(QDialog):
             output_root=self.folder("output"),
             behav_root=self.folder("behav"),
             dicom_root=self.folder("dicom"),
+            mriqc_root=self.folder("mriqc"),
             scans=self.chosen_scans(),
             outputs=self.chosen_outputs(),
             behav_logs=self.chosen_logs(),
             include_dicom=self.dicom_box.isChecked(),
+            include_mriqc=self.mriqc_box.isChecked(),
             include_atlases=self.atlas_box.isChecked(),
             view_only=self.view_only_box.isChecked(),
             make_zip=self.zip_box.isChecked(),
@@ -372,6 +388,11 @@ class ReviewPackageDialog(QDialog):
         parts = [f"BIDS {rp.human_size(bids)}", f"outputs {rp.human_size(outputs)}"]
         parts.append(f"{len(plan.behav_logs)} log(s) {rp.human_size(logs)}")
         total = bids + outputs + logs
+        if plan.include_mriqc and plan.mriqc_root is not None:
+            files = rp.mriqc_files(plan) if plan.scans else []
+            mriqc = rp.size_of(files) if rp.has_mriqc_results(files) else 0
+            parts.append(f"MRIQC {rp.human_size(mriqc)}")
+            total += mriqc
         if plan.include_dicom:
             dicom = rp.size_of(rp.dicom_series_dirs(plan))
             parts.append(f"raw DICOM {rp.human_size(dicom)}")

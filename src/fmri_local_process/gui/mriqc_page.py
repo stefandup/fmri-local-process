@@ -65,6 +65,7 @@ from fmri_local_process.gui.run_progress import RunProgress
 from fmri_local_process.gui.toolbox_state import QUALITY_CHECKING, VIEW_ONLY, ToolboxState
 from fmri_local_process.processing import mriqc as mq
 from fmri_local_process.processing.cpac_docker import docker_resources, finished_node
+from fmri_local_process.processing.review_mode import packaged_mriqc
 
 if TYPE_CHECKING:  # imported for real only when a report is first shown (slow to start)
     from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -216,6 +217,8 @@ class MriqcPage(QWidget):
     def __init__(self, state: ToolboxState) -> None:
         super().__init__()
         self.state = state
+        # A review package holding MRIQC results: show them, never run MRIQC.
+        self.packaged_results = packaged_mriqc()
         self.seen: tuple = ()  # (generation, BIDS folder, output folder) last shown
         self.subjects: list[str] = []
         self.statuses: dict[str, str] = {}
@@ -500,11 +503,15 @@ class MriqcPage(QWidget):
 
     # ---- refreshing ----------------------------------------------------------------------------
 
+    def results_only(self) -> bool:
+        """Only show results: a view-only package, or one that came with MRIQC's results."""
+        return VIEW_ONLY in self.state.busy or self.packaged_results
+
     def show_page(self) -> None:
         seen = (self.state.generation, self.state.folder("bids"), self.state.folder("mriqc"))
         if seen != self.seen:
             self.refresh()
-        if not self.probed and VIEW_ONLY not in self.state.busy:
+        if not self.probed and not self.results_only():
             self.probed = True
             self.check_docker()
             self.docker_timer.start()
@@ -699,7 +706,8 @@ class MriqcPage(QWidget):
                 "there."
             )
         elif not self.runs and not mq.has_results(output_root):
-            messages.append(f"No MRIQC results in {output_root} yet: tick subjects and Run MRIQC.")
+            todo = "" if self.results_only() else " yet: tick subjects and Run MRIQC"
+            messages.append(f"No MRIQC results in {output_root}{todo}.")
         elif not self.runs:
             modality = MODALITY_TEXT[str(self.modality_box.currentData())]
             messages.append(f"No MRIQC results for {modality} scans in {output_root}.")
@@ -708,15 +716,15 @@ class MriqcPage(QWidget):
                 f"{len(self.unreadable)} MRIQC result file(s) couldn't be read: "
                 + "; ".join(self.unreadable[:3])
             )
-        if self.docker_message and VIEW_ONLY not in self.state.busy:
+        if self.docker_message and not self.results_only():
             messages.append(self.docker_message)
         return messages
 
     def update_notices(self) -> None:
         self.banner.set_messages(self.notices())
         present = {mq.READY: True, mq.IMAGE_MISSING: False}.get(self.docker_state)
-        self.download.set_present(None if VIEW_ONLY in self.state.busy else present)
-        self.docker_status.setVisible(VIEW_ONLY not in self.state.busy)
+        self.download.set_present(None if self.results_only() else present)
+        self.docker_status.setVisible(not self.results_only())
         self.docker_status.show_state(*DOCKER_LINE.get(self.docker_state, (None, "", "")))
 
     def ticked_subjects(self) -> list[str]:
@@ -727,7 +735,7 @@ class MriqcPage(QWidget):
         return [s for s in self.ticked_subjects() if redo or self.statuses.get(s) != mq.DONE]
 
     def update_controls(self) -> None:
-        view_only = VIEW_ONLY in self.state.busy
+        view_only = self.results_only()
         self.run_box.setVisible(not view_only)
         running = self.worker is not None
         reason = self.state.lock_reason(QUALITY_CHECKING)
