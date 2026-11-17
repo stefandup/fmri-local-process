@@ -62,7 +62,9 @@ lobe in MNI. With **No atlas**, the whole brain is the region.
 - **Average ON/OFF cycle**: the response averaged over the cycles after removing drift, with
   all runs overlaid. It is in % signal change if the data still have their mean; otherwise
   it is in residual-SD units, so runs on different scales can still be compared.
-- **Comparison table** (hover a metric's name for an explanation):
+- **Comparison table**. Hover a metric's name for a short explanation. **Metric formulas...**
+  opens every metric's equation, what it means, and its published references, which open in
+  your browser.
 
 | Metric | What it tells you |
 |---|---|

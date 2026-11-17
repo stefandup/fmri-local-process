@@ -79,6 +79,7 @@ def test_tabs_follow_the_order_of_the_work(window: toolbox.ToolboxWindow) -> Non
         "5. Preprocess BIDS (C-PAC)",
         "6. Crosscheck overview",
         "7. First-level stats",
+        "8. Sequence overview",
     ]
 
 

@@ -24,6 +24,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
@@ -120,6 +121,7 @@ class FirstLevelPage(QWidget):
         self.on_grid: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}  # grid -> (bg, labels)
         self.cursor_mm: tuple[float, float, float] | None = None
         self.worker: ModelThread | None = None
+        self.formulas_dialog: QDialog | None = None
         self.fetcher: FetchAtlasThread | None = None
         self.seen_output: Path | None = None
 
@@ -287,6 +289,12 @@ class FirstLevelPage(QWidget):
         table_layout = QVBoxLayout(table_panel)
         table_layout.setContentsMargins(0, 0, 0, 0)
         buttons = QHBoxLayout()
+        self.formulas_button = QPushButton("Metric formulas...")
+        self.formulas_button.setToolTip(
+            "How every metric in the table is calculated, with equations and references."
+        )
+        self.formulas_button.clicked.connect(self.on_show_formulas)
+        buttons.addWidget(self.formulas_button)
         buttons.addStretch(1)
         self.save_button = QPushButton("Save maps (NIfTI)...")
         self.save_button.setToolTip("Write each run's beta, t, CNR (and % change) maps.")
@@ -718,6 +726,14 @@ class FirstLevelPage(QWidget):
         self.table.resizeColumnsToContents()
         self.export_button.setEnabled(bool(rows))
         self.save_button.setEnabled(bool(self.results))
+
+    def on_show_formulas(self) -> None:
+        from fmri_local_process.gui.metric_help_dialog import MetricHelpDialog
+
+        if self.formulas_dialog is None:  # rendering the equations takes a moment: once
+            self.formulas_dialog = MetricHelpDialog(self)
+        self.formulas_dialog.show()
+        self.formulas_dialog.raise_()
 
     def on_export_csv(self) -> None:
         rows = self.comparison()

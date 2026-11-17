@@ -1,7 +1,7 @@
 """fmri_toolbox: the Philani fMRI steps in one window, one tab per step, in the order of the
 work: Setup & Convert to BIDS, ID & Behaviour Logs, Scan lengths & trimming, BIDS Crosscheck
 (everything in BIDS correct before preprocessing), Preprocess BIDS (C-PAC), Crosscheck overview,
-First-level stats.
+First-level stats, Sequence overview.
 
 The tabs share their folders (chosen on the first tab) and know what the others are doing: while one
 job changes the BIDS folder (converting, trimming, C-PAC reading it), the others' changing
@@ -43,6 +43,7 @@ from fmri_local_process.gui.qt_common import (
     style_secondary_label,
 )
 from fmri_local_process.gui.scan_lengths import ScanLengthsPage
+from fmri_local_process.gui.sequence_page import SequencePage
 from fmri_local_process.gui.toolbox_state import (
     CONVERTING,
     PREPROCESSING,
@@ -58,7 +59,10 @@ CROSSCHECK = "BIDS Crosscheck"
 PREPROCESS = "Preprocess BIDS (C-PAC)"
 OVERVIEW = "Crosscheck overview"
 FIRST_LEVEL = "First-level stats"
-TAB_ORDER = (SETUP, BEHAV, SCAN_LENGTHS, CROSSCHECK, PREPROCESS, OVERVIEW, FIRST_LEVEL)
+SEQUENCE = "Sequence overview"
+TAB_ORDER = (
+    SETUP, BEHAV, SCAN_LENGTHS, CROSSCHECK, PREPROCESS, OVERVIEW, FIRST_LEVEL, SEQUENCE
+)  # fmt: skip
 HEADER_POINT_INCREASE = NAME_LABEL_FONT_POINT_INCREASE // 2
 LOGO_IMAGE = Path(__file__).parent / "assets" / "table_mountain.png"  # top right corner
 LOGO_HEIGHT = 40
@@ -96,6 +100,7 @@ class ToolboxWindow(QMainWindow):
         self.preprocess_generation = self.state.generation  # BIDS contents it last read
         self.overview = OverviewPage(self.state)
         self.first_level = FirstLevelPage(self.state)
+        self.sequence = SequencePage(self.state)
         self.pages: dict[str, QWidget] = {
             SETUP: self.convert,
             BEHAV: self.behav,
@@ -104,6 +109,7 @@ class ToolboxWindow(QMainWindow):
             PREPROCESS: scrolling(self.preprocess),
             OVERVIEW: self.overview,
             FIRST_LEVEL: self.first_level,
+            SEQUENCE: self.sequence,
         }
 
         central = QWidget()

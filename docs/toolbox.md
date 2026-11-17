@@ -22,9 +22,10 @@ right (IDs, logs, scan lengths, runs, dud sessions) before it is preprocessed:
 | **5. Preprocess BIDS (C-PAC)** | Run C-PAC on the crosschecked BIDS folder, with previews of each subject's results; its output folder is chosen here. See [Preprocessing](preprocessing.md). |
 | **6. Crosscheck overview** | The whole BIDS folder at a glance, like the old Streamlit BIDS viewer: summary counts shown as a log (typewriter font), then one table to scroll through (a row per session, runs and volumes per scan) with the cells to look at coloured: red missing, yellow short, orange several runs or not defaced, blue too long. Double-click a **Note** to write one there. **Export CSV...** saves that table. The **Action log** tab lists every change anyone made, newest first, with a search box. |
 | **7. First-level stats** | Fit a task GLM to each preprocessed run of a subject and compare the runs (e.g. ses-1 and ses-2 sequences). See [First-level stats](first-level-stats.md). |
+| **8. Sequence overview** | A subject's runs of one scan side by side with their scan parameters (NIfTI header, BIDS sidecar, raw DICOM), differences marked. See [Sequence overview](sequence-overview.md). |
 
 The details of each step are in [BIDS conversion](bids-conversion.md) and
-[Preprocessing](preprocessing.md), [First-level stats](first-level-stats.md).
+[Preprocessing](preprocessing.md), [First-level stats](first-level-stats.md), [Sequence overview](sequence-overview.md).
 
 - **Look.** The window uses Qt's Fusion style, as the vr_lab_toolbox tools do: crisper
   contrast, and the colours set here render the same everywhere. Explanations live in
