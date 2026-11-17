@@ -1,6 +1,7 @@
 # fMRI Local Process
 
-A locally installable fMRI toolbox. The steps so far:
+A locally installable fMRI toolbox. All steps run from one window, `fmri_toolbox`, a tab
+per step ([The toolbox window](toolbox.md)). The steps so far:
 
 1. [BIDS conversion](bids-conversion.md): Philani DICOMs → BIDS (`fmri_convert_to_bids`,
    plus `fmri_behav_events` for behavioural logs), then crosscheck (`fmri_crosscheck`).

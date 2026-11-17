@@ -1,14 +1,17 @@
 """Tests for the Philani DICOM -> BIDS port, using fake dcm2niix/deface (no real data)."""
 
 import json
+import shutil
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from fmri_local_process.processing import behav_logs as bl
 from fmri_local_process.processing import philani_bids as pb
+from fmri_local_process.processing.action_log import read_actions
 from fmri_local_process.processing.behav_logs import BehavTask, EventTable
 from fmri_local_process.processing.dcm2niix import (
     Dcm2niixFailedError,
@@ -193,9 +196,80 @@ def test_failed_deface_is_reported_and_not_noted(tmp_path: Path) -> None:
     report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), FakeDeface(fail=True))
 
     assert [what for what, _ in report.failures] == ["sub-P001_ses-1_T1w"]
-    t1w_json = bids / "sub-P001" / "ses-1" / "anat" / "sub-P001_ses-1_T1w.json"
-    assert "Notes" not in read_json(t1w_json)
+    # Converted in .converting/ and never moved in: no un-defaced face in the BIDS folder.
+    anat = bids / "sub-P001" / "ses-1" / "anat"
+    assert not anat.exists() or not list(anat.iterdir())
+    assert not (bids / pb.CONVERTING_DIR).exists()
     assert "sub-P001_ses-1_task-Rest_bold" in report.converted  # one failure doesn't stop the rest
+
+    deface = FakeDeface()
+    pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), deface)  # the next run does it
+    assert len(deface.calls) == 1
+    assert "Notes" in read_json(anat / "sub-P001_ses-1_T1w.json")
+
+
+def test_failed_conversion_leaves_no_half_written_scan(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20240101_X_P001", "5_rest_AP")
+
+    def crashes_after_writing(dicom_dir: Path, out_dir: Path, stem: str) -> None:
+        (out_dir / f"{stem}.nii.gz").write_bytes(b"half")
+        raise OSError("killed mid-write")
+
+    report = pb.convert_dicom_root(dicoms, bids, crashes_after_writing, None)
+
+    assert [what for what, _ in report.failures] == ["sub-P001_ses-1_task-Rest_bold"]
+    assert not list(bids.glob("sub-P001/ses-1/func/*"))
+    assert not (bids / pb.CONVERTING_DIR).exists()
+
+
+def test_leftover_staging_from_a_killed_run_is_removed(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    make_series(dicoms, "20240101_X_P001", "5_rest_AP")
+    leftover = bids / pb.CONVERTING_DIR / "sub-P001_ses-1_task-Rest_bold_x"
+    leftover.mkdir(parents=True)
+    (leftover / "sub-P001_ses-1_task-Rest_bold.nii.gz").write_bytes(b"half")
+
+    pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None)
+
+    assert not (bids / pb.CONVERTING_DIR).exists()
+    assert (bids / "sub-P001" / "ses-1" / "func" / "sub-P001_ses-1_task-Rest_bold.nii.gz").exists()
+
+
+def test_not_enough_disk_space_stops_before_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20240101_X_P001", "5_rest_AP")
+    monkeypatch.setattr(pb.shutil, "disk_usage", lambda _: SimpleNamespace(free=1))
+
+    fake = FakeDcm2niix()
+    with pytest.raises(pb.NotEnoughSpaceError, match="needs about 1.0 GB"):
+        pb.convert_dicom_root(dicoms, bids, fake, None)
+    assert fake.calls == []
+
+
+def test_excluded_session_is_left_out_and_the_rest_renumbered(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20240101_X_P001", "5_rest_AP")
+    make_series(dicoms, "20240102_X_P001", "5_rest_AP")
+    pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None)
+    assert (bids / "sub-P001" / "ses-2").is_dir()
+
+    pb.exclude_session(bids, "20240101_X_P001", "dud")
+    shutil.rmtree(bids / "sub-P001" / "ses-1")  # as the crosscheck does
+    report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None)
+
+    assert report.excluded == ["20240101_X_P001"]
+    assert report.renumbered == ["sub-P001: ses-2 -> ses-1"]
+    assert sorted(p.name for p in (bids / "sub-P001").glob("ses-*")) == ["ses-1"]
+    sessions = (bids / "sub-P001" / "sub-P001_sessions.tsv").read_text()
+    assert "20240102_X_P001" in sessions and "20240101_X_P001" not in sessions
+    infos = pb.scan_sessions(dicoms, excluded=pb.read_excluded_sessions(bids))
+    assert [(i.folder, i.label) for i in infos] == [("20240102_X_P001", "1")]
 
 
 def fake_extract(lines: Sequence[str]) -> EventTable:
@@ -488,3 +562,105 @@ def test_single_log_goes_to_the_only_session_even_on_another_date(
     events = bids / "sub-P001" / "ses-1" / "func" / "sub-P001_ses-1_task-Matching_events.tsv"
     assert read_json(events.with_suffix(".json"))["SourceLogDate"] == "2024-01-05"
     assert report.unplaced == []
+
+
+def test_folder_date_and_session_corrections_reach_the_conversion(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20240101_X_P001", "5_rest_AP")
+    make_series(dicoms, "20240301_X_P001", "5_rest_AP")
+    # The first folder's name has the wrong date (really scanned after the second), and the
+    # study's first visit is missing, so the later one is set to be ses-3.
+    pb.write_dicom_date_corrections(bids, {"20240101_X_P001": date(2024, 6, 1)})
+    pb.write_dicom_session_corrections(bids, {"20240101_X_P001": "3"})
+
+    pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None)
+
+    rows = (bids / "sub-P001" / "sub-P001_sessions.tsv").read_text().splitlines()[1:]
+    assert rows == [
+        "ses-1\t2024-03-01\t20240301_X_P001",
+        "ses-3\t2024-06-01\t20240101_X_P001",
+    ]
+    assert [a["action"] for a in read_actions(bids)][:2] == [
+        "correct DICOM folder date",
+        "set DICOM folder session",
+    ]
+
+
+def test_a_session_number_set_twice_keeps_the_earlier(caplog: pytest.LogCaptureFixture) -> None:
+    sessions = [
+        pb.DicomSession(Path(name), date(2024, month, 1), "P001")
+        for name, month in (("a", 1), ("b", 2), ("c", 3))
+    ]
+    numbered = pb.number_sessions(sessions, {"a": "2", "b": "2"})["P001"]
+    assert [(s.dicom.folder.name, s.label) for s in numbered] == [
+        ("a", "2"),
+        ("b", "1"),
+        ("c", "3"),
+    ]
+    assert "also set to ses-2" in caplog.text
+
+
+def test_a_folder_named_anyhow_converts_with_a_corrected_id_and_date(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    odd = "Clincial Scan - 28th October 2026"
+    make_series(dicoms, odd, "5_rest_AP")
+    assert pb.find_sessions(dicoms) == []  # the name alone says nothing usable
+    pb.write_dicom_corrections(bids, {odd: "FATIMA"})
+    pb.write_dicom_date_corrections(bids, {odd: date(2026, 10, 28)})
+    pb.write_dicom_session_corrections(bids, {odd: "1"})
+
+    report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None)
+
+    assert "sub-FATIMA_ses-1_task-Rest_bold" in report.converted
+    rows = (bids / "sub-FATIMA" / "sub-FATIMA_sessions.tsv").read_text().splitlines()
+    assert rows[1] == f"ses-1\t2026-10-28\t{odd}"
+    only_id = pb.parse_session_folder(dicoms / odd, corrected_id="FATIMA")
+    assert only_id is None  # an ID alone isn't enough: when was it scanned?
+
+
+def test_a_session_with_no_recognised_series_is_reported_with_its_series(
+    tmp_path: Path,
+) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    make_series(dicoms, "20261028_0900_P001", "3_localizer", "7_ep2d_bold_clinical")
+    make_series(dicoms, "20240101_X_P002", "2_ABCD_T1w_MPR_vNav_RMS")
+
+    report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None)
+
+    assert report.no_scans == [("20261028_0900_P001", "3_localizer, 7_ep2d_bold_clinical")]
+    assert not (bids / "sub-P001" / "ses-1").exists()
+    # The scan sessions view lists the T1w too (not only the BOLD tasks).
+    scanned = dict((folder.name, scans) for folder, scans in pb.scan_dicom_root(dicoms))
+    assert scanned == {"20240101_X_P002": frozenset({"T1w"}), "20261028_0900_P001": frozenset()}
+
+
+def test_scan_rules_saved_with_the_bids_folder_feed_one_scan(tmp_path: Path) -> None:
+    dicoms, bids = tmp_path / "dicom", tmp_path / "bids"
+    bids.mkdir()
+    # A Philani T1 and a clinical one in one session; a clinical scan alone in another.
+    make_series(dicoms, "20240101_X_P001", "2_ABCD_T1w_MPR_vNav_RMS", "9_t1_mprage_sag")
+    make_series(dicoms, "20261028_0900_P002", "3_t1_mprage_sag", "8_resting_state_fmri")
+    nested = dicoms / "20261028_0900_P002" / "scans" / "3_t1_mprage_sag" / "t1_mprage_extra"
+    nested.mkdir()  # below a matching series: not a series of its own
+
+    assert pb.read_scan_rules(bids) == pb.SCAN_RULES  # nothing saved: the built-in rules
+    rules = (*pb.SCAN_RULES, pb.rule_from("*_resting_state_fmri", "task-Rest_bold"))
+    pb.write_scan_rules(bids, rules)
+    assert pb.read_scan_rules(bids) == rules
+
+    report = pb.convert_dicom_root(dicoms, bids, FakeDcm2niix(), None)
+
+    assert {"sub-P001_ses-1_run-1_T1w", "sub-P001_ses-1_run-2_T1w"} <= set(report.to_pick)
+    assert {"sub-P002_ses-1_T1w", "sub-P002_ses-1_task-Rest_bold"} <= set(report.converted)
+    assert [a["action"] for a in read_actions(bids)] == ["add scan rule"]
+
+
+def test_bad_scan_rules_are_explained() -> None:
+    with pytest.raises(ValueError, match="folder pattern is needed"):
+        pb.rule_from(" ", "T1w")
+    with pytest.raises(ValueError, match="task-<Name>_bold"):
+        pb.rule_from("*_rest_AP", "rest")
+    assert pb.rule_from("*x*", "task-Rest2_bold").output == ("func", "task-Rest2", "bold")

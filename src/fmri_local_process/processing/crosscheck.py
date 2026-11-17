@@ -13,25 +13,35 @@ found from the data itself:
   task); trim_run keeps the first volumes
 * pending: a scan converted as several runs (run-1, run-2, ...): keep one
 * check: an events.tsv made from a log dated other than its scan
+* extra: a subject with more sessions than the study expects (set per BIDS folder; default
+  1): one may be a dud visit to delete
 
-A scan's expected length is the (upper) median volume count of all its runs, unless the
-human set a number for it (e.g. task-Matching_bold: 441); those are kept in the BIDS
-folder's code/expected_volumes.json, so they travel with the data.
+A scan's expected length is the number the human set for it (e.g. task-Matching_bold: 441),
+else the (upper) median volume count of its runs, else (a scan with a single run) the
+study's usual length. Set numbers are kept in the BIDS folder's code/expected_volumes.json,
+so they travel with the data. Session notes (code/session_notes.json) and the number of
+sessions expected (code/crosscheck_settings.json) live there too, and every change made
+here is logged in code/crosscheck_actions.tsv.
 """
 
 import csv
 import gzip
 import json
 import logging
+import shutil
 import struct
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 from statistics import median, median_high
 
 import nibabel as nib
 import numpy as np
 
+from fmri_local_process.processing.action_log import record_action
 from fmri_local_process.processing.behav_logs import BEHAV_TASKS
+from fmri_local_process.processing.philani_bids import DEFACE_NOTE, SCAN_RULES, exclude_session
+from fmri_local_process.processing.records import write_json_atomic
 from fmri_local_process.processing.session_sync import read_sessions_tsv
 
 log = logging.getLogger(__name__)
@@ -40,6 +50,23 @@ DATA_PATTERNS = ("*.nii.gz", "*_events.tsv")
 NIFTI1_HEADER_BYTES = 348
 SHORT_SIZE_FRACTION = 0.9  # a 3D image under 90% of the typical size is suspect
 EXPECTED_FILE = Path("code") / "expected_volumes.json"
+SETTINGS_FILE = Path("code") / "crosscheck_settings.json"
+NOTES_FILE = Path("code") / "session_notes.json"
+# Which run was kept and how runs were trimmed, per DICOM session folder: what a restore
+# replays onto a fresh conversion (deleted runs and cut volumes are otherwise only "gone").
+DECISIONS_FILE = Path("code") / "crosscheck_decisions.json"
+KEPT_RUNS = "kept_runs"
+TRIMS = "trims"
+CROSSCHECKED = "crosschecked"  # sessions a human marked as reviewed: {folder: {"at": time}}
+DEFAULT_EXPECTED_SESSIONS = 1
+# The Philani protocol's usual BOLD lengths (volumes), from the philani_scripts MRI toolbox.
+# Used only for a scan with a single run, which has no median to compare with.
+STUDY_VOLUMES = {
+    "task-Matching_bold": 495,
+    "task-Reappraisal_bold": 500,
+    "task-Rest_bold": 495,
+    "task-Peer_bold": 140,
+}
 
 
 class CrosscheckError(Exception):
@@ -82,7 +109,7 @@ class DataFile:
 
 @dataclass(frozen=True)
 class Issue:
-    kind: str  # "missing" / "short" / "long" / "pending" / "check"
+    kind: str  # "missing" / "short" / "long" / "pending" / "check" / "extra"
     text: str
     path: Path | None = None
     trim_to: int | None = None  # "long" only: the expected volumes
@@ -97,6 +124,13 @@ class SessionReview:
     issues: list[Issue] = field(default_factory=list)
     acq_time: str = ""  # scan date/time from sub-<id>_sessions.tsv, e.g. 2024-10-14T13:41:00
     source_folder: str = ""  # DICOM session folder it was converted from
+    note: str = ""  # the human's note (code/session_notes.json)
+    crosschecked: bool = False  # marked as reviewed by a human (code/crosscheck_decisions.json)
+
+    @property
+    def note_key(self) -> str:
+        """Notes follow the DICOM folder, so they survive session renumbering."""
+        return self.source_folder or self.name
 
     @property
     def date(self) -> str:
@@ -207,9 +241,61 @@ def read_expected(bids_root: Path) -> dict[str, int]:
 
 def write_expected(bids_root: Path, expected: dict[str, int]) -> None:
     path = bids_root / EXPECTED_FILE
+    old = read_expected(bids_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     kept = {label: n for label, n in sorted(expected.items()) if n > 0}
-    path.write_text(json.dumps(kept, indent=2) + "\n", encoding="utf-8")
+    write_json_atomic(path, kept)
+    for label in sorted(old.keys() | kept.keys()):
+        if old.get(label) != kept.get(label):
+            before, after = old.get(label, "automatic"), kept.get(label, "automatic")
+            record_action(bids_root, "set expected volumes", label, f"{before} -> {after}")
+
+
+def read_json_dict(path: Path) -> dict:
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
+def write_json_dict(path: Path, values: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(path, dict(sorted(values.items())))
+
+
+def read_expected_sessions(bids_root: Path) -> int:
+    """How many sessions each subject should have (more are flagged); default 1."""
+    value = read_json_dict(bids_root / SETTINGS_FILE).get("expected_sessions")
+    return value if isinstance(value, int) and value > 0 else DEFAULT_EXPECTED_SESSIONS
+
+
+def write_expected_sessions(bids_root: Path, sessions: int) -> None:
+    old = read_expected_sessions(bids_root)
+    path = bids_root / SETTINGS_FILE
+    write_json_dict(path, read_json_dict(path) | {"expected_sessions": sessions})
+    if old != sessions:
+        record_action(bids_root, "set expected sessions", "per subject", f"{old} -> {sessions}")
+
+
+def read_notes(bids_root: Path) -> dict[str, str]:
+    """Session notes: {DICOM source folder (or sub-X_ses-N): note}."""
+    return {str(k): str(v) for k, v in read_json_dict(bids_root / NOTES_FILE).items() if v}
+
+
+def set_note(bids_root: Path, reviews: list["SessionReview"], note: str) -> None:
+    """Give these sessions the same note ('' clears it)."""
+    notes = read_notes(bids_root)
+    note = note.strip()
+    for review in reviews:
+        if notes.get(review.note_key, "") == note:
+            continue
+        if note:
+            notes[review.note_key] = note
+        else:
+            notes.pop(review.note_key, None)
+        record_action(bids_root, "note", review.name, note or "(cleared)")
+    write_json_dict(bids_root / NOTES_FILE, notes)
 
 
 def median_volumes(data_files: list[DataFile]) -> dict[str, int]:
@@ -225,12 +311,21 @@ def median_volumes(data_files: list[DataFile]) -> dict[str, int]:
     return {label: median_high(counts) for label, counts in runs.items() if len(counts) > 1}
 
 
-def expected_lengths(bids_root: Path, data_files: list[DataFile]) -> dict[str, tuple[int, str]]:
-    """Expected volumes per label: the human's saved number, else the median of the runs.
+def automatic_lengths(data_files: list[DataFile]) -> dict[str, tuple[int, str]]:
+    """Expected volumes per label when the human set none: the median of its runs, else
+    (a single run) the study's usual length. Values are (volumes, where it came from)."""
+    lengths = {label: (n, "study default") for label, n in STUDY_VOLUMES.items()}
+    lengths |= {label: (n, "median of runs") for label, n in median_volumes(data_files).items()}
+    return lengths
 
-    Values are (volumes, where it came from): "expected" (saved) or "median of runs".
+
+def expected_lengths(bids_root: Path, data_files: list[DataFile]) -> dict[str, tuple[int, str]]:
+    """Expected volumes per label: the human's saved number, else automatic_lengths.
+
+    Values are (volumes, where it came from): "expected" (saved), "median of runs" or
+    "study default".
     """
-    lengths = {label: (n, "median of runs") for label, n in median_volumes(data_files).items()}
+    lengths = automatic_lengths(data_files)
     lengths |= {label: (n, "expected") for label, n in read_expected(bids_root).items()}
     return lengths
 
@@ -366,7 +461,40 @@ def review_bids_folder(bids_root: Path) -> list[SessionReview]:
                 review.issues.append(
                     Issue("missing", f"{label} ({count} of {len(sessions)} sessions have it)")
                 )
+    flag_extra_sessions(sessions, read_expected_sessions(bids_root))
+    notes = read_notes(bids_root)
+    marks = read_decisions(bids_root)[CROSSCHECKED]
+    for review in reviews.values():
+        review.note = notes.get(review.note_key, "")
+        review.crosschecked = bool(review.source_folder) and review.source_folder in marks
     return sorted(reviews.values(), key=lambda r: (r.subject, r.session or ""))
+
+
+def long_runs(reviews: list[SessionReview]) -> list[tuple[DataFile, int]]:
+    """Every run flagged as longer than expected, with the volumes to trim it to."""
+    files = {d.path: d for r in reviews for d in r.files}
+    return [
+        (files[i.path], i.trim_to)
+        for r in reviews
+        for i in r.issues
+        if i.kind == "long" and i.trim_to and i.path in files
+    ]
+
+
+def flag_extra_sessions(sessions: list[SessionReview], expected: int) -> None:
+    """A subject with more sessions than expected: flag each of its sessions, listing them
+    all with their dates, so a dud visit (or one visit split over two days) stands out."""
+    by_subject: dict[str, list[SessionReview]] = {}
+    for review in sessions:
+        by_subject.setdefault(review.subject, []).append(review)
+    for subject, group in by_subject.items():
+        if len(group) <= expected:
+            continue
+        group.sort(key=lambda r: int(r.session) if r.session and r.session.isdigit() else 0)
+        listing = ", ".join(f"ses-{r.session} {r.date or 'date ?'}" for r in group)
+        text = f"sub-{subject} has {len(group)} sessions, {expected} expected ({listing})"
+        for review in group:
+            review.issues.append(Issue("extra", text))
 
 
 def final_path(bids_root: Path, data: DataFile, session: str) -> Path:
@@ -401,25 +529,203 @@ def move_into_session(bids_root: Path, data: DataFile, session: str) -> Path:
     return target
 
 
-def delete_data_file(bids_root: Path, data: DataFile) -> None:
+def relative(bids_root: Path, path: Path) -> str:
+    return path.relative_to(bids_root).as_posix()
+
+
+def delete_data_file(bids_root: Path, data: DataFile, why: str = "") -> None:
     """Delete a file and its sidecar. The raw data still has it: re-running the conversion
     recreates a deleted scan, e.g. after the raw copy has been completed."""
+    target = relative(bids_root, data.path)
     data.path.unlink()
     data.sidecar.unlink(missing_ok=True)
     if data.pending:
         remove_empty_dirs(data.path.parent, bids_root)
-    log.info("Deleted %s", data.path.relative_to(bids_root))
+    record_action(bids_root, "delete file", target, why or data.summary())
+    log.info("Deleted %s", target)
+
+
+def session_source(bids_root: Path, subject: str, session: str | None) -> str:
+    """The DICOM folder a session was converted from (sessions.tsv), or ""."""
+    for row in read_sessions_tsv(bids_root, subject):
+        if session is not None and row.get("session_id", "").removeprefix("ses-") == session:
+            return row.get("source_folder", "")
+    return ""
+
+
+def scan_key(data: DataFile) -> str:
+    """sub-A_ses-1_task-Rest_run-2_bold.nii.gz -> task-Rest_run-2_bold: the name within its
+    session, which a reconversion of the same DICOM folder gives it again."""
+    prefix = f"sub-{data.subject}_ses-{data.session}_"
+    return data.path.name.removeprefix(prefix).removesuffix(data.extension)
+
+
+def run_entity(data: DataFile) -> str:
+    """'run-2' from a pending run's name ('' for a run-less one)."""
+    return next((p for p in scan_key(data).split("_") if p.startswith("run-")), "")
+
+
+def read_decisions(bids_root: Path) -> dict[str, dict[str, dict[str, object]]]:
+    """{KEPT_RUNS / TRIMS: {DICOM folder: {scan: run kept / volumes}},
+    CROSSCHECKED: {DICOM folder: {"at": when}}}."""
+    raw = read_json_dict(bids_root / DECISIONS_FILE)
+    return {kind: dict(raw.get(kind, {})) for kind in (KEPT_RUNS, TRIMS, CROSSCHECKED)}
+
+
+def set_crosschecked(bids_root: Path, reviews: list["SessionReview"], marked: bool) -> None:
+    """Mark sessions as reviewed by a human (or take the mark off), as vr_lab_toolbox's
+    'Mark crosschecked'. Kept against the DICOM folder, so it survives renumbering."""
+    decisions = read_decisions(bids_root)
+    marks = decisions[CROSSCHECKED]
+    for review in reviews:
+        if not review.source_folder or (review.source_folder in marks) == marked:
+            continue
+        if marked:
+            marks[review.source_folder] = {"at": datetime.now().isoformat(timespec="seconds")}
+        else:
+            del marks[review.source_folder]
+        action = "mark crosschecked" if marked else "un-mark crosschecked"
+        record_action(bids_root, action, review.name, review.source_folder)
+    write_json_atomic(bids_root / DECISIONS_FILE, decisions)
+
+
+def record_decision(bids_root: Path, data: DataFile, kind: str, key: str, value: object) -> None:
+    """Remember a keep-run or trim choice against the session's DICOM folder, so it can be
+    replayed after a restore (the sessions may be numbered differently by then)."""
+    folder = session_source(bids_root, data.subject, data.session)
+    if not folder:
+        return  # an older folder without sessions.tsv: logged, but can't be replayed
+    decisions = read_decisions(bids_root)
+    decisions[kind].setdefault(folder, {})[key] = value
+    write_json_atomic(bids_root / DECISIONS_FILE, decisions)
 
 
 def keep_run(bids_root: Path, chosen: DataFile, candidates: list[DataFile]) -> Path:
     """Keep chosen among one scan's runs in a session (run-less name); delete the others."""
     if chosen.session is None:
         raise CrosscheckError(f"{chosen.path.name} has no session")
+    source = relative(bids_root, chosen.path)
+    record_decision(bids_root, chosen, KEPT_RUNS, chosen.label, run_entity(chosen))
     target = move_into_session(bids_root, chosen, chosen.session)
-    for other in candidates:
-        if other.path != chosen.path:
-            delete_data_file(bids_root, other)
+    others = [d for d in candidates if d.path != chosen.path]
+    record_action(
+        bids_root,
+        "keep run",
+        source,
+        f"{chosen.summary()}; now {target.name}; {len(others)} other run(s) deleted",
+    )
+    for other in others:
+        delete_data_file(bids_root, other, f"other run of {chosen.path.name} ({other.summary()})")
     return target
+
+
+def delete_session(bids_root: Path, review: SessionReview, why: str = "") -> None:
+    """Delete a whole session folder (a dud visit) and leave its DICOM folder out of every
+    conversion from now on, so it isn't recreated. The next conversion renumbers the
+    subject's remaining sessions."""
+    if review.session is None:
+        raise CrosscheckError(f"{review.name} is not a session folder")
+    if not review.source_folder:
+        raise CrosscheckError(
+            f"{review.name}: its sessions.tsv doesn't say which DICOM folder it came from, so "
+            "a conversion would bring it back. Convert / update BIDS first, then delete it."
+        )
+    session_dir = bids_root / f"sub-{review.subject}" / f"ses-{review.session}"
+    exclude_session(
+        bids_root, review.source_folder, why or f"deleted at crosscheck ({review.name})"
+    )
+    if session_dir.is_dir():
+        shutil.rmtree(session_dir)
+    detail = f"from {review.source_folder}, scanned {review.date or '?'}"
+    record_action(bids_root, "delete session", review.name, detail + (f"; {why}" if why else ""))
+    log.info("Deleted %s (%s); left out of conversion from now on", review.name, detail)
+
+
+@dataclass(frozen=True)
+class Cell:
+    """One cell of the overview table: its text and what it shows ('' when fine), e.g.
+    "missing", "short", "long", "pending" (several runs) or "check"."""
+
+    text: str
+    status: str = ""
+
+
+def is_defaced(sidecar: Path) -> bool:
+    try:
+        notes = str(json.loads(sidecar.read_text(encoding="utf-8")).get("Notes", ""))
+    except (OSError, ValueError, AttributeError):
+        return False
+    return DEFACE_NOTE in notes
+
+
+def overview_tasks(reviews: list[SessionReview]) -> list[str]:
+    """The BOLD tasks in the folder, in the order the scan rules list them."""
+    found = {
+        d.label.removeprefix("task-").removesuffix("_bold")
+        for r in reviews
+        for d in r.files + r.pending
+        if d.label.endswith("_bold")
+    }
+    known = [rule.entities.removeprefix("task-") for rule in SCAN_RULES if rule.task_name]
+    return [t for t in known if t in found] + sorted(found - set(known))
+
+
+def overview_columns(tasks: list[str]) -> list[str]:
+    behav = {t.task for t in BEHAV_TASKS}
+    columns = ["ID", "Session", "Date", "T1w", "Defaced"]
+    for task in tasks:
+        columns += [f"{task} runs", f"{task} volumes"]
+        if task in behav:
+            columns.append(f"{task} events")
+    return columns
+
+
+def overview_row(review: SessionReview, tasks: list[str]) -> list[Cell]:
+    """One session as the old BIDS viewer showed a subject: per scan, how many runs and how
+    long, flagged where something is missing, short, long or repeated."""
+    issue_of = {i.path: i.kind for i in review.issues if i.path is not None and i.kind != "missing"}
+    data = review.files + review.pending
+    t1w = [d for d in data if d.label == "T1w"]
+    cells = [
+        Cell(review.subject),
+        Cell(f"ses-{review.session}" if review.session else "-"),
+        Cell(review.date or "?"),
+        Cell(str(len(t1w)), "missing" if not t1w else "pending" if len(t1w) > 1 else ""),
+    ]
+    defaced = [is_defaced(d.sidecar) for d in t1w]
+    cells.append(
+        Cell("-", "") if not t1w else Cell("yes", "") if all(defaced) else Cell("no", "check")
+    )
+    behav = {t.task for t in BEHAV_TASKS}
+    for task in tasks:
+        runs = [d for d in data if d.label == f"task-{task}_bold"]
+        status = "missing" if not runs else "pending" if len(runs) > 1 else ""
+        cells.append(Cell(str(len(runs)), status))
+        volumes = ", ".join(str(d.volumes) if d.volumes is not None else "?" for d in runs)
+        kinds = {issue_of.get(d.path, "") for d in runs} - {""}
+        kind = next((k for k in ("short", "long") if k in kinds), "")
+        cells.append(Cell(volumes or "-", kind))
+        if task in behav:
+            events = [d for d in data if d.label == f"task-{task}_events"]
+            if not events:
+                cells.append(Cell("-", "missing" if runs else ""))
+            else:
+                count = events[0].events
+                text = str(count) if count is not None else "?"
+                cells.append(Cell(text, "short" if not count else issue_of.get(events[0].path, "")))
+    return cells
+
+
+def write_overview_csv(reviews: list[SessionReview], path: Path) -> None:
+    """The overview table (one row per session), plus each session's problems and note."""
+    tasks = overview_tasks(reviews)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([*overview_columns(tasks), "Source folder", "Problems", "Note"])
+        for review in reviews:
+            cells = [c.text for c in overview_row(review, tasks)]
+            problems = "; ".join(i.text for i in review.issues)
+            writer.writerow([*cells, review.source_folder, problems, review.note])
 
 
 def events_end_s(data: DataFile) -> float | None:
@@ -433,7 +739,7 @@ def events_end_s(data: DataFile) -> float | None:
         return None
 
 
-def trim_run(data: DataFile, volumes: int) -> None:
+def trim_run(bids_root: Path, data: DataFile, volumes: int) -> None:
     """Keep only the first `volumes` volumes of a 4D run (the scan ran on after the task).
 
     Refuses if its events.tsv has events after the cut. The sidecar records the original
@@ -466,4 +772,54 @@ def trim_run(data: DataFile, volumes: int) -> None:
         sidecar = {}
     sidecar.setdefault("TrimmedFromVolumes", original)
     data.sidecar.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+    record_decision(bids_root, data, TRIMS, scan_key(data), volumes)
+    record_action(
+        bids_root, "trim", relative(bids_root, data.path), f"{original} -> {volumes} volumes"
+    )
     log.info("Trimmed %s: %d -> %d volumes", data.path.name, original, volumes)
+
+
+def replay_decisions(bids_root: Path) -> tuple[list[str], list[str]]:
+    """Reapply the recorded keep-run and trim choices to a freshly converted BIDS folder
+    (a restore): (what was applied, what couldn't be -- e.g. a DICOM folder that is gone).
+
+    Choices already in effect are skipped, so replaying twice changes nothing.
+    """
+    decisions = read_decisions(bids_root)
+    applied: list[str] = []
+    unresolved: list[str] = []
+    by_folder = {r.source_folder: r for r in review_bids_folder(bids_root) if r.source_folder}
+    for folder, kept in decisions[KEPT_RUNS].items():
+        review = by_folder.get(folder)
+        for label, run in kept.items():
+            if review is None:
+                unresolved.append(f"{folder}: keep {run} of {label} (session not in BIDS)")
+                continue
+            candidates = [d for d in review.pending if d.label == label]
+            if not candidates:
+                if not any(d.label == label for d in review.files):
+                    unresolved.append(f"{review.name}: {label} not found")
+                continue  # already kept (or a single run now): nothing to do
+            chosen = next((d for d in candidates if run_entity(d) == run), None)
+            if chosen is None:
+                unresolved.append(f"{review.name}: {label} has no {run}")
+                continue
+            keep_run(bids_root, chosen, candidates)
+            applied.append(f"{review.name}: kept {run} of {label}")
+    by_folder = {r.source_folder: r for r in review_bids_folder(bids_root) if r.source_folder}
+    for folder, trims in decisions[TRIMS].items():
+        review = by_folder.get(folder)
+        for key, volumes in trims.items():
+            data = next((d for d in review.files if scan_key(d) == key), None) if review else None
+            if data is None or not isinstance(volumes, int):
+                unresolved.append(f"{folder}: trim {key} to {volumes} (scan not found)")
+                continue
+            if data.volumes is not None and data.volumes <= volumes:
+                continue  # already trimmed
+            try:
+                trim_run(bids_root, data, volumes)
+            except (CrosscheckError, OSError, ValueError) as e:
+                unresolved.append(f"{data.path.name}: {e}")
+                continue
+            applied.append(f"{data.path.name}: trimmed to {volumes} volumes")
+    return applied, unresolved

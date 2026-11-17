@@ -27,7 +27,9 @@ Full details and a step-by-step "test it yourself" plan:
 1. **Check the port against R on real logs.** Run `fmri_behav_events --compare` on a few
    complete and aborted logs of both tasks. Then drop the `--compare` flag and
    `processing/behav_compare.py`.
-2. **Try the crosscheck tool** (`fmri_crosscheck`) on a full BIDS folder. It replaces
+2. **Try the toolbox window** (`fmri_toolbox`: Setup & Convert to BIDS, ID & Behaviour
+   Logs, Scan lengths & trimming, BIDS Crosscheck, Preprocess BIDS, Overview tabs) on a full
+   BIDS folder. The BIDS Crosscheck and Overview tabs replace
    `philaniBIDSspreadsheet.py`. Non-chosen runs are deleted (they can be recreated from
    raw) rather than moved to `trash/`, and no `selected_runs.json` is written.
 3. **Check the dummy-scan assumption.** Events onsets assume the first logged pulse is the

@@ -22,7 +22,11 @@ from fmri_local_process.processing.behav_match import (
     needs_review,
     read_corrections,
 )
-from fmri_local_process.processing.philani_bids import scan_sessions
+from fmri_local_process.processing.philani_bids import (
+    read_excluded_sessions,
+    read_scan_rules,
+    scan_sessions,
+)
 
 console = Console()
 STATUS_STYLE = {MATCHED: "green"}
@@ -119,9 +123,11 @@ def main(behav_root: Path, dicom_root: Path, bids_root: Path | None, problems_on
     is written.
     """
     corrections = read_corrections(bids_root) if bids_root else {}
+    excluded = read_excluded_sessions(bids_root) if bids_root else {}
     with console.status("Reading logs and scan sessions..."):
         infos = inspect_logs(behav_root, corrections)
-        matches = match_logs(infos, scan_sessions(dicom_root))
+        rules = read_scan_rules(bids_root)
+        matches = match_logs(infos, scan_sessions(dicom_root, excluded=excluded, rules=rules))
     shown = [m for m in matches if not problems_only or needs_review(m)]
     print_matches(shown)
     print_inventory(matches)

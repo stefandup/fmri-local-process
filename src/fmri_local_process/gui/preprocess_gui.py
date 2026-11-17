@@ -10,7 +10,6 @@ responsive through hours of C-PAC.
 import html
 import logging
 import os
-import sys
 import threading
 import time
 import zlib
@@ -412,8 +411,15 @@ def read_log_tail(path: Path, n_lines: int = LOG_TAIL_LINES) -> str:
 
 
 class PreprocessWindow(QMainWindow):
+    """Also the toolbox's Preprocess (C-PAC) tab: it reports when C-PAC runs and which
+    folders were picked here, and takes a lock while another tab changes the BIDS folder."""
+
+    running_changed = Signal(bool)  # C-PAC started (True) / the batch ended (False)
+    folder_chosen = Signal(str, object)  # "bids" / "output", Path
+
     def __init__(self) -> None:
         super().__init__()
+        self.external_lock = ""  # why another tab keeps Preprocess from starting ("" if not)
         self.setWindowTitle("fMRI Preprocess (C-PAC)")
         self.resize(1300, 850)
         self.settings = QSettings(SETTINGS_ORGANIZATION, SETTINGS_APP)
@@ -445,7 +451,11 @@ class PreprocessWindow(QMainWindow):
         self.setCentralWidget(central)
         root_layout = QVBoxLayout(central)
 
-        top_row = QHBoxLayout()
+        # Everything above the subjects and their outputs, in one widget so "Expand" can hide
+        # it and give the outputs the whole height.
+        self.top_panel = QWidget()
+        top_row = QHBoxLayout(self.top_panel)
+        top_row.setContentsMargins(0, 0, 0, 0)
         folders_grid = QGridLayout()
         folders_grid.setSpacing(8)
         folders_grid.addWidget(self._build_bids_group(), 0, 0)
@@ -463,7 +473,7 @@ class PreprocessWindow(QMainWindow):
         )
         activity_layout.addWidget(self.activity_text)
         top_row.addWidget(activity_group, 1)
-        root_layout.addLayout(top_row)
+        root_layout.addWidget(self.top_panel)
 
         root_layout.addWidget(self._build_run_group())
 
@@ -501,6 +511,11 @@ class PreprocessWindow(QMainWindow):
         splitter.addWidget(left)
 
         self.detail_tabs = QTabWidget()
+        self.expand_button = QPushButton()
+        self.expand_button.setCheckable(True)
+        self.expand_button.toggled.connect(self._set_expanded)
+        self.detail_tabs.setCornerWidget(self.expand_button, Qt.Corner.TopRightCorner)
+        self._set_expanded(False)
         self.outputs_widget = QWidget()
         self.outputs_layout = QVBoxLayout(self.outputs_widget)
         self.detail_tabs.addTab(self.outputs_widget, "Outputs")
@@ -548,6 +563,18 @@ class PreprocessWindow(QMainWindow):
         splitter.addWidget(self.detail_tabs)
         splitter.setSizes([380, 920])
         root_layout.addWidget(splitter, 1)
+
+    def _set_expanded(self, expanded: bool) -> None:
+        """Expand: hide the folder / settings / summary / activity panels so the subjects and
+        their outputs fill the tab; Restore brings them back. The run's progress stays."""
+        self.top_panel.setVisible(not expanded)
+        self.expand_button.setText("Restore ⤡" if expanded else "Expand ⤢")
+        self.expand_button.setToolTip(
+            "Show the folder, settings and activity panels again."
+            if expanded
+            else "Give the subjects and their outputs the whole height (hides the panels "
+            "above; the run's progress stays)."
+        )
 
     def _build_bids_group(self) -> QGroupBox:
         group = QGroupBox("BIDS Folder")
@@ -937,9 +964,14 @@ class PreprocessWindow(QMainWindow):
         set_path_display(self.bids_path_label, self.bids_name_label, folder)
         self.bids_reveal_button.setEnabled(True)
         self.settings.setValue("bids", str(folder))
+        self.folder_chosen.emit("bids", folder)
+        self._fill_task_list()
+
+    def _fill_task_list(self) -> None:
+        """The BIDS folder's tasks, ticked unless unticked before (new tasks start ticked)."""
         self.task_list.blockSignals(True)
         self.task_list.clear()
-        for label in bids_tasks(folder):
+        for label in bids_tasks(self.bids_folder) if self.bids_folder else []:
             item = QListWidgetItem(label)
             ticked = label not in self.unticked_tasks
             item.setCheckState(Qt.CheckState.Checked if ticked else Qt.CheckState.Unchecked)
@@ -951,6 +983,29 @@ class PreprocessWindow(QMainWindow):
         set_path_display(self.output_path_label, self.output_name_label, folder)
         self.output_reveal_button.setEnabled(True)
         self.settings.setValue("output", str(folder))
+        self.folder_chosen.emit("output", folder)
+
+    def use_folders(self, bids: Path | None, output: Path | None) -> None:
+        """Show these folders (chosen on another tab); unchanged ones are left alone."""
+        changed = False
+        if output is not None and output != self.output_folder:
+            self._set_output_folder(output)
+            changed = True
+        if bids is not None and bids != self.bids_folder:
+            self._set_bids_folder(bids)
+            changed = True
+        if changed:
+            self._refresh_roster()
+
+    def reload_bids(self) -> None:
+        """Read the BIDS folder's tasks and subjects again: another tab changed its contents
+        (new conversions, renamed IDs, trimmed runs) without changing the folder itself."""
+        self._fill_task_list()
+        self._refresh_roster()
+
+    def set_external_lock(self, reason: str) -> None:
+        self.external_lock = reason
+        self._update_buttons()
 
     def _reveal(self, which: str) -> None:
         folder = self.bids_folder if which == "bids" else self.output_folder
@@ -1247,7 +1302,12 @@ class PreprocessWindow(QMainWindow):
         self.subject_table.blockSignals(False)
         n_ticked = len(self._ticked_subjects())
         self.process_button.setText(f"Preprocess {n_ticked} ticked subject(s)")
-        self.process_button.setEnabled(idle and n_ticked > 0 and self.output_folder is not None)
+        self.process_button.setEnabled(
+            idle and n_ticked > 0 and self.output_folder is not None and not self.external_lock
+        )
+        self.process_button.setToolTip(
+            f"Locked: {self.external_lock}." if self.external_lock else ""
+        )
         self._update_memory_label()  # the suggestion depends on how many are ticked
 
     # ---- detail pane -------------------------------------------------------------------------
@@ -1256,6 +1316,7 @@ class PreprocessWindow(QMainWindow):
         while self.outputs_layout.count():
             item = self.outputs_layout.takeAt(0)
             if item is not None and (widget := item.widget()) is not None:
+                widget.hide()  # gone at once, not only when Qt gets round to deleting it
                 widget.deleteLater()
         selected = self._selected_subjects()
         if len(selected) != 1 or self.output_folder is None:
@@ -1573,6 +1634,7 @@ class PreprocessWindow(QMainWindow):
         self._update_run_title()
         self._update_buttons()
         self.worker.start()
+        self.running_changed.emit(True)
 
     def _hang_policy(self) -> HangPolicy:
         return HangPolicy(
@@ -1692,6 +1754,7 @@ class PreprocessWindow(QMainWindow):
         self.spinner_timer.stop()
         self.run_group.setVisible(False)
         self._update_buttons()
+        self.running_changed.emit(False)
         if isinstance(result, str):
             QMessageBox.warning(self, "Preprocessing not started", result)
             self._log_activity(result, is_error=True)
@@ -1786,11 +1849,10 @@ class PreprocessWindow(QMainWindow):
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    app = QApplication(sys.argv)
-    window = PreprocessWindow()
-    window.show()
-    sys.exit(app.exec())
+    """The toolbox (with its splash), opened on the Preprocess BIDS (C-PAC) tab."""
+    from fmri_local_process.gui.launcher import preprocess
+
+    preprocess()
 
 
 if __name__ == "__main__":

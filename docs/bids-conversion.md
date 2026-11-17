@@ -60,7 +60,7 @@ warning. The folder's second part, when it is `HHMM`, is shown as the scan time.
 - Any other character BIDS doesn't allow (anything not a letter or digit, e.g. `^` or a
   space) is dropped, with a warning. A dropped character may hide a typo, so the crosscheck
   flags it.
-- A wrong ID is corrected in the crosscheck (**IDs & behaviour logs...**, see below). Raw
+- A wrong ID is corrected on the **ID & Behaviour Logs** tab (see below). Raw
   folders and logs are never renamed.
 
 To convert a single session folder that doesn't follow these naming rules, pass the folder
@@ -88,8 +88,15 @@ BIDS_ROOT/
   the files in them) are renamed so the numbers stay in date order, and the summary lists
   them as **RENUMBERED**. Outputs made from the old numbers elsewhere (e.g. C-PAC) are not
   renamed.
-- **Scans.** Each `ScanRule` in `philani_bids.py` maps a series folder pattern to a BIDS name:
-  T1w, Reappraisal, Matching, Rest, Peer and Checkerboard.
+- **Scans.** Scan rules map a series folder pattern to a BIDS scan. The built-in ones are
+  the Philani protocol's names (T1w, Reappraisal, Matching, Rest, Peer, Checkerboard), plus
+  `*t1_mprage*` for a clinical scan's T1w. **Scan rules...** on tab 1 edits them: add,
+  change or remove rows, **Reset to Philani defaults**, and **Check DICOM folder** to see
+  per session folder what the rules find and which series folders nothing matches. The
+  rules are saved with the BIDS folder (`code/scan_rules.json`), logged and backed up.
+  Several rules can make one scan; a session where more than one matches gets them as
+  runs to pick. A session where nothing matches is listed as **NO SCANS** in the
+  conversion summary, with its series folder names.
 - **Events** (BIDS conventions):
     - `onset` and `duration` are in **seconds**. Presentation logs time in units of 0.1 ms.
     - `onset` is measured from the **first scanner pulse** (the first volume). This assumes
@@ -106,11 +113,21 @@ Everything is converted straight into its session; you choose in the crosscheck 
 | Several series of the same scan in one session | Converts each as `..._run-<k>_<suffix>` in that session. In the crosscheck, **Keep selected run** gives the chosen one the run-less name and deletes the others; re-runs then leave it alone. Until then C-PAC would preprocess every run. |
 | A log's date matches one of the subject's sessions with that task | Puts its events in that session. |
 | One log and one session with that task, but the dates differ | Puts it in that session anyway (if there is no other session, it's that one) and the crosscheck flags it ⚑. |
-| Several logs for one session, a date matching no session, or a subject with no scan session | Doesn't convert it; the summary lists it as **NOT PLACED**. Choose a log, correct its date or ID in **IDs & behaviour logs...**, then convert again. |
+| Several logs for one session, a date matching no session, or a subject with no scan session | Doesn't convert it; the summary lists it as **NOT PLACED**. Choose a log, correct its date or ID on the **ID & Behaviour Logs** tab, then convert again. |
 
 If a different log is chosen later, its events replace the old ones on the next conversion.
 Older versions staged these in `crosscheck_pending/`; that folder is removed on the next
 conversion (everything in it is made from the raw data).
+
+### Safe writing and disk space
+
+Each scan is converted, and a T1w defaced, in a temporary `.converting/` folder inside the
+BIDS folder. It moves into its session only once that has all worked, and the temporary
+folder is then removed. If a conversion stops halfway (a crash, a power cut, a full disk), the
+session never holds a half-written scan or a T1w that wasn't defaced: the next conversion does
+that scan again. Before each session the converter checks that the BIDS drive has room for
+that session's DICOM folder plus 1 GB. If not, it stops with a message; the sessions already
+converted are kept.
 
 ### Incomplete DICOM series
 
@@ -123,10 +140,11 @@ short scan from the data itself.
 To fix it, re-copy the raw session, delete the short scan in the crosscheck tool, and
 convert again.
 
-### Crosscheck tool: `fmri_crosscheck`
+### Crosscheck
 
-A PySide6 window, modelled on the vr_lab_toolbox crosscheck tools. It reads only the BIDS
-folder. The only changes it makes there are the ones you click.
+The **BIDS Crosscheck** tab of the [toolbox window](toolbox.md) (`fmri_toolbox`, or
+`fmri_crosscheck` to open it on this tab), modelled on the vr_lab_toolbox crosscheck tools.
+It reads only the BIDS folder. The only changes it makes there are the ones you click.
 
 | Icon | Meaning |
 |---|---|
@@ -135,33 +153,71 @@ folder. The only changes it makes there are the ones you click.
 | ✂ | Long: more volumes than the expected length (the scan ran on after the task): trim it |
 | ○ | Missing: a NIfTI without its sidecar, a task bold without its `events.tsv`, or a scan most other sessions have |
 | ⚑ | Events from a log dated other than the scan: check it's the right log |
+| ⊕ | The subject has more sessions than **Sessions per subject**: is one a dud visit? |
 
 The session list shows each session's **ID**, **Date** (scan date and time, from
-`sessions.tsv`; hover it for the DICOM folder), **Session**, number of files, and problems.
+`sessions.tsv`; hover it for the DICOM folder), **Session**, number of files, problems and
+your **Note**.
+
+**Sessions per subject** (tab 1, Setup & Convert to BIDS; default 1) is how many sessions this study
+expects; set it to 2 for a two-visit study. It is saved in `code/crosscheck_settings.json`.
+A subject with more sessions gets ⊕ on each of them, with all its sessions and dates listed,
+so a dud visit, or one visit split over two days, stands out.
+
+**Ticking sessions.** Tick the box beside an ID to act on several sessions at once; the
+**Ticked sessions** bar above the detail pane then offers:
+
+- **Note...**: give them all the same note (empty clears it).
+- **Delete N session(s)...**: delete the session folders, after asking you to confirm.
+
+**Select none** clears the ticks. A single session has the same **Note** box and
+**Delete session...** button at the top of its detail pane.
+
+**Deleting a session** removes its `ses-<n>` folder and lists its DICOM folder in
+`code/excluded_sessions.json`, so later conversions leave it out instead of bringing it back.
+Convert to BIDS afterwards: the subject's remaining sessions are renumbered
+in date order, and the summary lists the folder as **LEFT OUT**. To convert it again, remove
+its line from `code/excluded_sessions.json`.
+
+Notes are saved in `code/session_notes.json` against the DICOM folder, so they stay with the
+right session when sessions are renumbered. The **Crosscheck overview** tab shows every session in one
+table (runs and volumes per scan, coloured where something needs a look), and its
+**Export CSV...** saves that table with each session's DICOM folder, problems and note, for
+QC meetings or handing over.
+
+**Action log.** Every change made here is added to `code/crosscheck_actions.tsv` in the BIDS
+folder, with the time and the computer login: runs kept, files and sessions deleted,
+trims, notes, ID and log corrections, expected lengths and sessions, and sessions the
+converter renumbered.
 
 Every file also shows its volume count and duration.
 
-**Scan lengths & trimming.** A BOLD scan's expected length is the median volume count
+**Scan lengths & trimming** (tab 3, before the crosscheck, so BIDS is right first). A BOLD scan's expected length is the median volume count
 of all its runs. (It's the upper median, so it is always a length some run has, and with
-only two runs it's the longer one.) **Scan lengths & trimming...** lists each BOLD scan with
+only two runs it's the longer one.) A scan with a single run in the whole folder (e.g. one
+pilot) is compared with the study's usual length instead, shown as "study default": Matching
+495, Reappraisal 500, Rest 495 and Peer 140 volumes. The tab lists each BOLD scan with
 its runs, the volume counts found, the expected length (shown as "median (N)"), the minutes
 that makes, and how many runs are too long. Type
-another number to set it; it is remembered in `code/expected_volumes.json` in the BIDS
+another number to set it; it is saved as you type, in `code/expected_volumes.json` in the BIDS
 folder. Step the box down to the bottom ("median (N)") to follow the median again. A run
-longer than its expected length gets **Trim to N...** in its session. **Save and trim N long
-run(s)...** in the same window saves the lengths and trims them all, after asking you to
+longer than its expected length gets **Trim to N...** in its session. **Trim N long run(s)...**
+(top left of that tab) trims them all, after asking you to
 confirm. Trimming keeps the first N volumes, records the original count in the sidecar
 (`TrimmedFromVolumes`), and refuses if the run's events would be cut off. The raw DICOMs
 keep every volume: delete the file and convert again to undo. Trimming happens here, at
-crosscheck, never during preprocessing. A scan with no other session to compare
-against (e.g. a single pilot) can't be marked short automatically, so check those numbers by
-eye. **Convert / update BIDS** runs the converter from the window, with a progress bar (one step per session, plus one per subject for its behavioural logs) and the step it is on. Deleted files are recreated
-from the raw data.
+crosscheck, never during preprocessing. A single-run scan without a study default (e.g.
+Checkerboard, or the T1w) can't be marked short automatically, so check those numbers by
+eye. **Convert to BIDS** (tab 1) runs the converter, with a progress bar (one step per
+session, plus one per subject for its behavioural logs), the step it is on, and a summary
+table of the last run. Deleted files are recreated from the raw data.
 
 ### Behaviour logs: wrong IDs and dates
 
-Logs are often saved under a mistyped subject ID or on the wrong date. **IDs & behaviour
-logs...** in the crosscheck window (it needs all three folders set) has two tabs.
+Logs are often saved under a mistyped subject ID or on the wrong date. The **ID & Behaviour
+Logs** tab (it needs all three folders set on tab 1) has two tabs. The toolbox reads the logs
+in the background as soon as it opens, with a progress bar, so the tab is ready when you get
+there; **Reload logs** reads them again. Its explanations are behind **Help ?**.
 
 **Scan sessions** lists every DICOM session folder with:
 
