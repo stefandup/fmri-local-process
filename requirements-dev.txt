@@ -4,3 +4,4 @@ ruff
 pyinstaller
 mkdocs
 mkdocs-material
+textual
