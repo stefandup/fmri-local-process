@@ -6,6 +6,7 @@ the exe (or in the folder FMRI_REVIEW_PACKAGE names, for trying a package from s
 * the app's settings live in the package (review_data/settings), not in the registry
 * the first-level atlases come from the package (review_data/atlases): no Docker needed
 * a view-only package hides Setup and Preprocess and locks every changing action
+* a package with MRIQC results shows them but can't run MRIQC (view-only or not)
 
 Kept free of heavy imports: the settings and the atlas cache ask it at startup.
 """
@@ -69,6 +70,11 @@ def view_only(root: Path | None = None) -> bool:
     """A view-only package: the toolbox hides Setup and Preprocess and locks changes."""
     root = root or package_root()
     return bool(read_manifest(root).get("view_only", False)) if root else False
+
+
+def packaged_mriqc(root: Path | None = None) -> bool:
+    """A package that holds MRIQC results: the MRIQC tab only shows them."""
+    return "mriqc" in package_folders(root)
 
 
 def package_name(root: Path | None = None) -> str:

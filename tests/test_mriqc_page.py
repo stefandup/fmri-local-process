@@ -306,6 +306,25 @@ def test_view_only_hides_running(state: toolbox_state.ToolboxState) -> None:
     assert not page.run_box.isVisibleTo(page)
 
 
+def test_a_review_package_with_mriqc_results_only_shows_them(
+    state: toolbox_state.ToolboxState, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from fmri_local_process.processing import review_mode
+
+    package = tmp_path / "package"
+    (package / "review_data" / "mriqc").mkdir(parents=True)
+    manifest = {"view_only": False, "folders": {"mriqc": "review_data/mriqc"}}
+    (package / review_mode.MANIFEST).write_text(json.dumps(manifest))
+    monkeypatch.setenv(review_mode.ENV_VAR, str(package))  # not view-only, but has results
+
+    page = mriqc_page.MriqcPage(state)
+    page.show_page()
+    assert page.results_only() and page.probe is None  # no Docker questions
+    assert not page.run_box.isVisibleTo(page)
+
+
 def test_other_tabs_say_what_is_missing(state: toolbox_state.ToolboxState, tmp_path: Path) -> None:
     assert any("No DICOM sessions folder" in m for m in convert_page.setup_notices(state))
     assert any("No behavioural logs folder" in m for m in convert_page.setup_notices(state))

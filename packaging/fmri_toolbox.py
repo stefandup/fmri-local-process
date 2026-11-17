@@ -1,4 +1,4 @@
-"""PyInstaller entry point for the toolbox window (build.ps1 -Review builds fmri_toolbox.exe)."""
+"""PyInstaller entry point for the toolbox window, fmri_toolbox.exe (build.ps1 -Full/-Review)."""
 
 from fmri_local_process.gui.launcher import main
 
