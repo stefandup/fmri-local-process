@@ -17,6 +17,7 @@ found from the data itself:
   1): one may be a dud visit to delete
 
 A scan's expected length is the number the human set for it (e.g. task-Matching_bold: 441),
+else for a task timed in seconds (the checkerboard) what its design needs at the runs' TR,
 else the (upper) median volume count of its runs, else (a scan with a single run) the
 study's usual length. Set numbers are kept in the BIDS folder's code/expected_volumes.json,
 so they travel with the data. Session notes (code/session_notes.json) and the number of
@@ -40,6 +41,7 @@ import numpy as np
 
 from fmri_local_process.processing.action_log import record_action
 from fmri_local_process.processing.behav_logs import BEHAV_TASKS
+from fmri_local_process.processing.first_level import CHECKERBOARD
 from fmri_local_process.processing.philani_bids import DEFACE_NOTE, SCAN_RULES, exclude_session
 from fmri_local_process.processing.records import write_json_atomic
 from fmri_local_process.processing.session_sync import read_sessions_tsv
@@ -67,6 +69,11 @@ STUDY_VOLUMES = {
     "task-Rest_bold": 495,
     "task-Peer_bold": 140,
 }
+# Tasks timed in seconds (checkerboard_fmri_task's task_config.toml): the expected length is
+# worked out from the design and the runs' TR, and wins over the median, since runs stopped
+# late would otherwise pull the median up and leave nothing to trim.
+TASK_DESIGNS = {f"task-{CHECKERBOARD.task}_bold": CHECKERBOARD.design}
+TR_TOLERANCE_S = 0.001
 
 
 class CrosscheckError(Exception):
@@ -84,6 +91,7 @@ class DataFile:
     size: int
     volumes: int | None = None  # NIfTI only; 1 for a 3D image
     repetition_time: float | None = None  # bold only, seconds, from the sidecar
+    trimmed_from: int | None = None  # bold only: volumes before trim_run (sidecar)
     events: int | None = None  # events.tsv only: number of rows
 
     @property
@@ -104,6 +112,8 @@ class DataFile:
         text = f"{self.volumes} volumes"
         if self.repetition_time:
             text += f" ({self.volumes * self.repetition_time / 60:.1f} min)"
+        if self.trimmed_from:
+            text += f", trimmed from {self.trimmed_from}"
         return text
 
 
@@ -156,11 +166,16 @@ def nifti_volumes(path: Path) -> int | None:
     return None
 
 
-def repetition_time(sidecar: Path) -> float | None:
+def sidecar_number(sidecar: Path, key: str) -> float | None:
+    """A number from a BIDS sidecar, or None if the file or the field is missing or odd."""
     try:
-        return float(json.loads(sidecar.read_text(encoding="utf-8"))["RepetitionTime"])
+        return float(json.loads(sidecar.read_text(encoding="utf-8"))[key])
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+def repetition_time(sidecar: Path) -> float | None:
+    return sidecar_number(sidecar, "RepetitionTime")
 
 
 def bold_run_length(
@@ -205,8 +220,15 @@ def read_data_file(path: Path, subject_dir: Path) -> DataFile:
     )
     if path.name.endswith(".nii.gz"):
         volumes = nifti_volumes(path)
-        tr = repetition_time(data.sidecar) if volumes and volumes > 1 else None
-        return replace(data, volumes=volumes, repetition_time=tr)
+        if not volumes or volumes == 1:
+            return replace(data, volumes=volumes)
+        trimmed = sidecar_number(data.sidecar, "TrimmedFromVolumes")
+        return replace(
+            data,
+            volumes=volumes,
+            repetition_time=repetition_time(data.sidecar),
+            trimmed_from=int(trimmed) if trimmed else None,
+        )
     return replace(data, events=count_events(path))
 
 
@@ -311,19 +333,38 @@ def median_volumes(data_files: list[DataFile]) -> dict[str, int]:
     return {label: median_high(counts) for label, counts in runs.items() if len(counts) > 1}
 
 
+def task_design_volumes(data_files: list[DataFile]) -> dict[str, int]:
+    """Per timed task (TASK_DESIGNS), the volumes its design needs at its runs' TR.
+
+    Only when every run of it has the same TR: with mixed TRs one number can't fit them all,
+    so the median (or a number the human sets) is used instead.
+    """
+    trs: dict[str, list[float]] = {}
+    for data in data_files:
+        if data.label in TASK_DESIGNS and not data.pending and data.repetition_time:
+            trs.setdefault(data.label, []).append(data.repetition_time)
+    return {
+        label: TASK_DESIGNS[label].run_volumes(values[0])
+        for label, values in trs.items()
+        if max(values) - min(values) <= TR_TOLERANCE_S
+    }
+
+
 def automatic_lengths(data_files: list[DataFile]) -> dict[str, tuple[int, str]]:
-    """Expected volumes per label when the human set none: the median of its runs, else
-    (a single run) the study's usual length. Values are (volumes, where it came from)."""
+    """Expected volumes per label when the human set none: the task design for a timed task,
+    else the median of its runs, else (a single run) the study's usual length. Values are
+    (volumes, where it came from)."""
     lengths = {label: (n, "study default") for label, n in STUDY_VOLUMES.items()}
     lengths |= {label: (n, "median of runs") for label, n in median_volumes(data_files).items()}
+    lengths |= {label: (n, "task design") for label, n in task_design_volumes(data_files).items()}
     return lengths
 
 
 def expected_lengths(bids_root: Path, data_files: list[DataFile]) -> dict[str, tuple[int, str]]:
     """Expected volumes per label: the human's saved number, else automatic_lengths.
 
-    Values are (volumes, where it came from): "expected" (saved), "median of runs" or
-    "study default".
+    Values are (volumes, where it came from): "expected" (saved), "task design",
+    "median of runs" or "study default".
     """
     lengths = automatic_lengths(data_files)
     lengths |= {label: (n, "expected") for label, n in read_expected(bids_root).items()}

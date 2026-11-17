@@ -5,7 +5,8 @@ fit the GLM to each of the subject's runs of that task, and compare them side by
   C-PAC image; tick them on and off. A setup ticks its focus regions first (occipital
   regions for the checkerboard). With no atlas, the whole brain is the region.
 * The brain views show each run's t map above the threshold over the MNI template, the ticked
-  regions outlined. Click a view to move the cursor.
+  regions outlined. Each run has its own cursor (starting at its own peak); click a view to
+  move it. Lock cursors to move them all to the same MNI position.
 * The time courses show the signal with the model's fit (ON blocks shaded) at each run's peak
   voxel, at the cursor, or as the region's mean; below them the response averaged over the
   ON/OFF cycles, all runs overlaid.
@@ -23,6 +24,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
@@ -35,7 +37,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -119,7 +120,9 @@ class FirstLevelPage(QWidget):
         self.results: list[fl.RunResult] = []
         self.stats: list[fl.RoiStats] = []
         self.on_grid: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}  # grid -> (bg, labels)
-        self.cursor_mm: tuple[float, float, float] | None = None
+        # One cursor per run (MNI mm, None: the volume's centre). Locked: a click moves all.
+        self.cursors: list[tuple[float, float, float] | None] = []
+        self.last_cursor_row = 0  # the run whose cursor moved last: locking copies it
         self.worker: ModelThread | None = None
         self.formulas_dialog: QDialog | None = None
         self.fetcher: FetchAtlasThread | None = None
@@ -194,16 +197,6 @@ class FirstLevelPage(QWidget):
             row.addWidget(spin)
         row.addWidget(QLabel("Task length (s):"))
         row.addWidget(self.total_s)
-        row.addWidget(QLabel("Task starts at volume:"))
-        self.start_volume = QSpinBox()
-        self.start_volume.setRange(0, 100)
-        self.start_volume.setToolTip(
-            wrap_tooltip(
-                "0-based volume of the first task trigger: the number of dummy triggers in "
-                "task_config.toml (they are recorded as volumes, then the task starts)."
-            )
-        )
-        row.addWidget(self.start_volume)
         self.about = QLabel()
         style_secondary_label(self.about)
         self.about.setWordWrap(True)
@@ -265,8 +258,23 @@ class FirstLevelPage(QWidget):
         brain_layout.setContentsMargins(0, 0, 0, 0)
         row = QHBoxLayout()
         peak = QPushButton("Cursor to peak")
+        peak.setToolTip(
+            wrap_tooltip(
+                "Each run's cursor to its own peak voxel. Locked: every run's cursor to the "
+                "first run's peak."
+            )
+        )
         peak.clicked.connect(self.cursor_to_peak)
         row.addWidget(peak)
+        self.lock_box = QCheckBox("Lock cursors")
+        self.lock_box.setToolTip(
+            wrap_tooltip(
+                "Locked: clicking a run's view moves every run's cursor to the same MNI "
+                "position (compare the runs at one spot). Unlocked: each run has its own cursor."
+            )
+        )
+        self.lock_box.toggled.connect(self.on_lock_toggled)
+        row.addWidget(self.lock_box)
         row.addWidget(QLabel("Time course:"))
         self.show_box = QComboBox()
         self.show_box.addItems([SHOW_PEAK, SHOW_CURSOR, SHOW_REGION])
@@ -325,7 +333,6 @@ class FirstLevelPage(QWidget):
             on_s=self.on_s.value(),
             off_s=self.off_s.value(),
             total_s=self.total_s.value(),
-            start_volume=self.start_volume.value(),
         )
 
     def on_setup_changed(self) -> None:
@@ -334,7 +341,6 @@ class FirstLevelPage(QWidget):
         self.on_s.setValue(design.on_s)
         self.off_s.setValue(design.off_s)
         self.total_s.setValue(design.total_s)
-        self.start_volume.setValue(design.start_volume)
         self.about.setText(self.setup.about)
         self.ticked.clear()
         first_atlas = next(iter(self.setup.focus), "")
@@ -498,7 +504,8 @@ class FirstLevelPage(QWidget):
         self.run_button.setEnabled(True)
         self.results = results
         self.on_grid.clear()
-        self.cursor_mm = None
+        self.cursors = [None] * len(results)
+        self.last_cursor_row = 0
         if errors:
             QMessageBox.warning(self, "Some runs not modelled", errors)
         self.status.setText(
@@ -545,16 +552,30 @@ class FirstLevelPage(QWidget):
     # ---- cursor and drawing -------------------------------------------------------------------
 
     def cursor_to_peak(self) -> None:
-        peaks = [s.peak_mm for s in self.stats if s.peak_mm is not None]
-        self.cursor_mm = peaks[0] if peaks else None
+        """Unlocked: each run's cursor to its own peak. Locked: all to the first run's."""
+        peaks = [s.peak_mm for s in self.stats]
+        if self.lock_box.isChecked():
+            first = next((p for p in peaks if p is not None), None)
+            self.cursors = [first] * len(self.results)
+        else:
+            self.cursors = list(peaks)
         self.draw_brain()
         self.draw_time_courses()
 
-    def cursor_ijk(self, result: fl.RunResult) -> tuple[int, int, int]:
-        if self.cursor_mm is None:
+    def on_lock_toggled(self, locked: bool) -> None:
+        """Locking brings every run's cursor to the one moved last."""
+        if locked and self.cursors:
+            self.cursors = [self.cursors[self.last_cursor_row]] * len(self.cursors)
+            self.draw_brain()
+            self.draw_time_courses()
+
+    def cursor_ijk(self, row: int) -> tuple[int, int, int]:
+        result = self.results[row]
+        cursor = self.cursors[row] if row < len(self.cursors) else None
+        if cursor is None:
             return tuple(int(n // 2) for n in result.mask.shape)  # type: ignore[return-value]
         inverse = np.linalg.inv(result.affine)
-        ijk = inverse[:3, :3] @ np.asarray(self.cursor_mm) + inverse[:3, 3]
+        ijk = inverse[:3, :3] @ np.asarray(cursor) + inverse[:3, 3]
         clipped = np.clip(np.round(ijk).astype(int), 0, np.asarray(result.mask.shape) - 1)
         return int(clipped[0]), int(clipped[1]), int(clipped[2])
 
@@ -581,9 +602,10 @@ class FirstLevelPage(QWidget):
             if background is None:
                 background = np.where(result.mask, 1.0, 0.0)
             region = self.region_on(result)
-            ijk = self.cursor_ijk(result)
+            ijk = self.cursor_ijk(row)
             t_here = float(result.t[ijk])
-            cursor_text.append(f"{result.run.label}: t={t_here:.1f}")
+            x, y, z = result.world(ijk)
+            cursor_text.append(f"{result.run.label}: MNI {x:.0f}, {y:.0f}, {z:.0f}  t={t_here:.1f}")
             for column, (view, axis) in enumerate(VIEWS):
                 axes = axes_grid[row][column]
                 axes.set_axis_off()
@@ -612,11 +634,7 @@ class FirstLevelPage(QWidget):
                     axes.set_title(result.run.label, color="white", fontsize=9, loc="left")
                 elif row == 0:
                     axes.set_title(view, color="white", fontsize=9)
-        if self.cursor_mm is not None:
-            x, y, z = self.cursor_mm
-            self.cursor_label.setText(
-                f"Cursor MNI {x:.0f}, {y:.0f}, {z:.0f} mm   " + "   ".join(cursor_text)
-            )
+        self.cursor_label.setText("Cursor   " + "   |   ".join(cursor_text))
         figure.subplots_adjust(
             left=0.01, right=0.99, bottom=0.01, top=0.93, wspace=0.02, hspace=0.15
         )
@@ -628,11 +646,16 @@ class FirstLevelPage(QWidget):
             return
         row, axis = owner
         result = self.results[row]
-        ijk = list(self.cursor_ijk(result))
+        ijk = list(self.cursor_ijk(row))
         shown = [a for a in range(3) if a != axis]
         ijk[shown[0]] = int(round(event.xdata))
         ijk[shown[1]] = int(round(event.ydata))
-        self.cursor_mm = result.world((ijk[0], ijk[1], ijk[2]))
+        cursor = result.world((ijk[0], ijk[1], ijk[2]))
+        if self.lock_box.isChecked():
+            self.cursors = [cursor] * len(self.results)
+        else:
+            self.cursors[row] = cursor
+        self.last_cursor_row = row
         self.show_box.setCurrentText(SHOW_CURSOR)
         self.draw_brain()
         self.draw_time_courses()
@@ -645,7 +668,7 @@ class FirstLevelPage(QWidget):
         if mode == SHOW_PEAK and stats is not None and stats.peak is not None:
             x, y, z = stats.peak_mm or (0, 0, 0)
             return result.voxel_series(stats.peak), f"peak voxel ({x:.0f}, {y:.0f}, {z:.0f})"
-        ijk = self.cursor_ijk(result)
+        ijk = self.cursor_ijk(row)
         x, y, z = result.world(ijk)
         return result.voxel_series(ijk), f"cursor voxel ({x:.0f}, {y:.0f}, {z:.0f})"
 
@@ -663,11 +686,8 @@ class FirstLevelPage(QWidget):
             color = RUN_COLORS[row % len(RUN_COLORS)]
             axes = figure.add_subplot(grid[row, 0])
             y, where = self.series_for(row)
-            start = result.design.start_volume * result.tr
             for onset, duration in result.design.on_blocks():
-                axes.axvspan(
-                    start + onset, start + onset + duration, color="#ffd54f", alpha=0.3, linewidth=0
-                )
+                axes.axvspan(onset, onset + duration, color="#ffd54f", alpha=0.3, linewidth=0)
             if y is None:
                 axes.text(0.5, 0.5, "no signal here", transform=axes.transAxes, ha="center")
                 continue

@@ -3,6 +3,7 @@ atlas cache (no Docker, no real data)."""
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import nibabel as nib
 import numpy as np
@@ -72,7 +73,20 @@ def test_first_level_tab_models_two_sessions_in_the_occipital_focus(
     assert all(s.n_voxels == 8 for s in page.stats)  # just the 'occipital' voxels
     headers = [page.table.verticalHeaderItem(r).text() for r in range(page.table.rowCount())]  # pyright: ignore[reportOptionalMemberAccess]
     assert "Peak CNR" in headers and "C-PAC mean BOLD SNR" in headers
-    assert page.cursor_mm is not None
+    # Unlocked (default): each run's cursor at its own peak; a click moves only that run's.
+    assert page.cursors == [s.peak_mm for s in page.stats]
+    row_2_axes = next(a for a, (row, _) in page.axes_owner.items() if row == 1)
+    before = page.cursors[0]
+    page.on_brain_click(SimpleNamespace(inaxes=row_2_axes, xdata=1.0, ydata=1.0))
+    assert page.cursors[0] == before and page.cursors[1] != before
+    # Locking brings every cursor to the one moved last; a click then moves them all.
+    page.lock_box.setChecked(True)
+    assert page.cursors[0] == page.cursors[1]
+    row_1_axes = next(a for a, (row, _) in page.axes_owner.items() if row == 0)
+    page.on_brain_click(SimpleNamespace(inaxes=row_1_axes, xdata=2.0, ydata=2.0))
+    assert page.cursors[0] == page.cursors[1]
+    page.cursor_to_peak()
+    assert page.cursors == [page.stats[0].peak_mm] * 2
 
     page.tick_none()
     assert all(s.n_voxels == 0 for s in page.stats)

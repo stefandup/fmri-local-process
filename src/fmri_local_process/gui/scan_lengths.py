@@ -47,6 +47,7 @@ from fmri_local_process.processing.crosscheck import (
 
 MAX_VOLUMES = 100_000
 LONG_COLOR = "#3498db"  # the crosscheck's colour for "long"
+TRIMMED_COLOR = "#27ae60"  # done: green
 
 
 def scan_lengths(data_files: list[DataFile]) -> dict[str, list[DataFile]]:
@@ -64,10 +65,35 @@ def length_note(runs: list[DataFile]) -> str:
     return ", ".join(f"{n} (x{c})" if c > 1 else str(n) for n, c in counts)
 
 
+def trimmed_note(runs: list[DataFile]) -> str:
+    """'Trimmed 3 of 5' (all: 'Trimmed (all 5)'), or '' when none of the runs was trimmed."""
+    trimmed = sum(1 for d in runs if d.trimmed_from)
+    if not trimmed:
+        return ""
+    return (
+        f"Trimmed (all {trimmed})" if trimmed == len(runs) else f"Trimmed {trimmed} of {len(runs)}"
+    )
+
+
+def trimmed_item(runs: list[DataFile]) -> QTableWidgetItem:
+    item = QTableWidgetItem(trimmed_note(runs))
+    item.setToolTip(
+        "\n".join(
+            f"{d.path.name}: {d.trimmed_from} -> {d.volumes} volumes"
+            for d in runs
+            if d.trimmed_from
+        )
+    )
+    item.setForeground(QColor(TRIMMED_COLOR))
+    return item
+
+
 HELP_TEXT = (
     "How many volumes each BOLD scan should have. By default the median of its runs (with a "
-    "single run, the study's usual length). Type another number to set it, or step down to "
-    "the bottom to go back to the median; it is saved as you type.<br><br>"
+    "single run, the study's usual length). The checkerboard instead uses its task design: "
+    "200 s at the runs' TR, rounded up (task design). Type another number to set "
+    "it, or step down to the bottom to go back to the automatic length; it is saved as you "
+    "type.<br><br>"
     "Runs with fewer volumes are flagged as short at the BIDS Crosscheck. Runs with more can "
     "be trimmed to this length with <b>Trim</b>, keeping the first volumes: the cut volumes "
     "are deleted from the BIDS folder (the raw DICOMs keep them; delete the file and convert "
@@ -81,8 +107,16 @@ class ScanLengthsPanel(QWidget):
     saved = Signal()
     trim_wanted = Signal()  # saved, and the long runs should now be trimmed
 
-    COLUMNS = ("Scan", "Runs", "Volumes found", "Expected volumes", "Minutes", "Too long")
-    EXPECTED, MINUTES, TOO_LONG = 3, 4, 5
+    COLUMNS = (
+        "Scan",
+        "Runs",
+        "Volumes found",
+        "Expected volumes",
+        "Minutes",
+        "Too long",
+        "Trimmed",
+    )
+    EXPECTED, MINUTES, TOO_LONG, TRIMMED = 3, 4, 5, 6
 
     def __init__(
         self,
@@ -136,6 +170,7 @@ class ScanLengthsPanel(QWidget):
             cells = (label, str(len(runs)), length_note(runs))
             for column, text in enumerate(cells):
                 self.table.setItem(row, column, QTableWidgetItem(text))
+            self.table.setItem(row, self.TRIMMED, trimmed_item(runs))
             spin = QSpinBox()
             spin.setRange(0, MAX_VOLUMES)
             if label in self.automatic:

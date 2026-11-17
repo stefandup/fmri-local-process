@@ -2,9 +2,10 @@
 
 A *setup* says which task it is for and what the design is. The first is the checkerboard
 (checkerboard_fmri_task): ON/OFF blocks of a contrast-reversing checkerboard, timed from the
-first trigger after the dummy triggers. Its block regressor is convolved with SPM's canonical
-haemodynamic response and fitted per voxel by ordinary least squares, next to a constant and a
-linear and quadratic drift:
+run's first volume: the scanner's dummy scans aren't saved, and the Scan lengths tab trims
+the volumes after the task. Its block regressor is convolved with SPM's canonical
+haemodynamic response and fitted per voxel by ordinary least squares, next to a constant and
+a linear and quadratic drift:
 
     y = beta * task + b0 + b1 * linear + b2 * quadratic + noise
 
@@ -22,6 +23,7 @@ compare them between runs processed the same way, not against textbook threshold
 
 import csv
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -76,11 +78,15 @@ class BlockDesign:
     on_s: float = 20.0
     off_s: float = 20.0
     total_s: float = 200.0
-    start_volume: int = 5  # dummy triggers: the task starts on this (0-based) volume
 
     @property
     def cycle_s(self) -> float:
         return self.on_s + self.off_s
+
+    def run_volumes(self, tr: float) -> int:
+        """Volumes a run should have at this TR. The task starts on the first volume (the
+        scanner's dummy scans come before its first trigger and aren't saved)."""
+        return math.ceil(self.total_s / tr - 1e-6)
 
     def on_blocks(self) -> list[tuple[float, float]]:
         """(onset, duration) of each ON block, in seconds from the task start."""
@@ -126,8 +132,9 @@ CHECKERBOARD = FirstLevelSetup(
     },
     about=(
         "checkerboard_fmri_task defaults: OFF first, 20 s ON / 20 s OFF, 200 s, task "
-        "starting after 5 dummy triggers. Change the design below if a session ran another "
-        "task_config.toml."
+        "starting on the run's first volume (the scanner's dummy scans aren't saved; trim "
+        "the volumes after the task on the Scan lengths tab). Change the design below if a "
+        "session ran another task_config.toml."
     ),
 )
 SETUPS = (CHECKERBOARD,)
@@ -146,12 +153,11 @@ def spm_hrf(dt: float = HRF_DT_S, length_s: float = HRF_LENGTH_S) -> np.ndarray:
 def task_regressor(design: BlockDesign, n_volumes: int, tr: float) -> np.ndarray:
     """The ON blocks convolved with the HRF, sampled at each volume, plateau scaled to 1 (so
     beta is the sustained response in the data's units)."""
-    start = design.start_volume * tr
     n_fine = int(np.ceil((n_volumes * tr + HRF_LENGTH_S) / HRF_DT_S))
     fine_t = np.arange(n_fine) * HRF_DT_S
     boxcar = np.zeros(n_fine)
     for onset, duration in design.on_blocks():
-        boxcar[(fine_t >= start + onset) & (fine_t < start + onset + duration)] = 1.0
+        boxcar[(fine_t >= onset) & (fine_t < onset + duration)] = 1.0
     response = np.convolve(boxcar, spm_hrf())[:n_fine]
     sampled = np.interp(np.arange(n_volumes) * tr, fine_t, response)
     peak = sampled.max()
@@ -304,10 +310,10 @@ def model_run(run: RunFile, design: BlockDesign, tr_override: float | None = Non
     if tr <= 0:
         raise FirstLevelError(f"{run.path.name}: no repetition time in the header")
     n_volumes = data.shape[3]
-    if design.start_volume * tr + design.total_s > n_volumes * tr + 1e-6:
+    if design.total_s > n_volumes * tr + 1e-6:
         raise FirstLevelError(
             f"{run.label}: {n_volumes} volumes x {tr:.3f} s is shorter than the design "
-            f"({design.start_volume} start volumes + {design.total_s:g} s)"
+            f"({design.total_s:g} s)"
         )
     mask = np.isfinite(data).all(axis=3) & (data.std(axis=3) > 0)
     series = data[mask]  # (voxels, time)
@@ -439,7 +445,7 @@ def block_average(
         sd = full.residual_sd[0]
         scaled, unit = (detrended / sd if sd > 0 else detrended), "residual SD (z)"
     design = result.design
-    task_t = np.arange(y.size) * result.tr - design.start_volume * result.tr
+    task_t = np.arange(y.size) * result.tr
     n_cycles = int(design.total_s // design.cycle_s)
     edges = np.arange(0.0, design.cycle_s + result.tr / 2, result.tr)
     centres = edges[:-1] + result.tr / 2

@@ -68,7 +68,7 @@ def test_short_scan_found_by_comparing_with_other_sessions(tmp_path: Path) -> No
 
 
 def test_lone_scan_has_nothing_to_compare_with(tmp_path: Path) -> None:
-    write_nifti(func(tmp_path, "A", "1", "task-Checkerboard_bold.nii.gz"), 69)
+    write_nifti(func(tmp_path, "A", "1", "task-Pilot_bold.nii.gz"), 69)
     assert review_of(tmp_path, "sub-A_ses-1").issues == []
 
 
@@ -204,6 +204,49 @@ def test_without_expected_lengths_the_longest_runs_set_the_bar(tmp_path: Path) -
     assert review_of(tmp_path, "sub-C_ses-1").issues == []
 
 
+def test_checkerboard_expected_length_comes_from_the_task_design(tmp_path: Path) -> None:
+    # Every run stopped late: the median would expect 300 and offer no trims.
+    name = "task-Checkerboard_bold.nii.gz"
+    for subject in "AB":
+        write_nifti(func(tmp_path, subject, "1", name), 300, tr=0.832)
+    files = cc.find_data_files(tmp_path)
+    # ceil(200 s / 0.832 s); dummy scans are not in the NIfTI
+    assert cc.automatic_lengths(files)["task-Checkerboard_bold"] == (241, "task design")
+    [issue] = review_of(tmp_path, "sub-A_ses-1").issues
+    assert (issue.kind, issue.trim_to) == ("long", 241)
+    cc.write_expected(tmp_path, {"task-Checkerboard_bold": 300})  # a set number still wins
+    assert review_of(tmp_path, "sub-A_ses-1").issues == []
+
+
+def test_run_length_rounds_the_task_up_to_whole_volumes() -> None:
+    from fmri_local_process.processing.first_level import BlockDesign
+
+    assert BlockDesign().run_volumes(0.8) == 250
+    assert BlockDesign().run_volumes(0.832) == 241
+
+
+def test_scan_lengths_mark_trimmed_runs(tmp_path: Path) -> None:
+    from fmri_local_process.gui.scan_lengths import trimmed_note
+
+    name = "task-Rest_bold.nii.gz"
+    write_nifti(func(tmp_path, "A", "1", name), 441)
+    trimmed = write_nifti(func(tmp_path, "B", "1", name), 441)
+    sidecar = trimmed.with_name(trimmed.name.removesuffix(".nii.gz") + ".json")
+    sidecar.write_text(json.dumps({"RepetitionTime": 2.0, "TrimmedFromVolumes": 520}))
+    runs = cc.find_data_files(tmp_path)
+    assert trimmed_note(runs) == "Trimmed 1 of 2"
+    assert trimmed_note([d for d in runs if d.path == trimmed]) == "Trimmed (all 1)"
+    assert trimmed_note([d for d in runs if d.path != trimmed]) == ""
+
+
+def test_checkerboard_with_mixed_trs_falls_back_to_the_median(tmp_path: Path) -> None:
+    name = "task-Checkerboard_bold.nii.gz"
+    write_nifti(func(tmp_path, "A", "1", name), 255, tr=0.8)
+    write_nifti(func(tmp_path, "B", "1", name), 246, tr=0.832)
+    files = cc.find_data_files(tmp_path)
+    assert cc.automatic_lengths(files)["task-Checkerboard_bold"] == (255, "median of runs")
+
+
 def test_trim_keeps_the_first_volumes_and_notes_the_original(tmp_path: Path) -> None:
     import nibabel as nib
     import numpy as np
@@ -219,6 +262,9 @@ def test_trim_keeps_the_first_volumes_and_notes_the_original(tmp_path: Path) -> 
     assert image.get_data_dtype() == np.int16
     assert np.array_equal(np.asarray(image.dataobj), before[..., :6])
     assert json.loads(data.sidecar.read_text())["TrimmedFromVolumes"] == 10
+    reread = next(d for d in cc.find_data_files(tmp_path) if d.path == path)
+    assert reread.trimmed_from == 10
+    assert reread.summary().endswith("trimmed from 10")
     assert not list(path.parent.glob("*_trim*"))
     [logged] = read_actions(tmp_path)
     assert (logged["action"], logged["target"], logged["detail"]) == (

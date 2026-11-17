@@ -11,7 +11,9 @@ A setup is one task and its design. There is one so far:
 - **Checkerboard: ON/OFF visual blocks** (task-Checkerboard, from
   [checkerboard_fmri_task](https://github.com/stefandup/checkerboard_fmri_task)). The
   defaults are that task's: OFF first, 20 s ON / 20 s OFF, 200 s, and the task starts on
-  volume 5 (the 5 dummy triggers are recorded as volumes). If a session ran with another
+  the run's first volume: the scanner acquires its dummy scans before its first trigger and
+  doesn't save them. Trim the volumes after the task on the **Scan lengths & trimming** tab
+  (before preprocessing), so each run is just the task. If a session ran with another
   `task_config.toml`, change the values in the **Design** box before you click **Run**.
 
 ## What is modelled
@@ -53,12 +55,16 @@ lobe in MNI. With **No atlas**, the whole brain is the region.
 
 ## What you see
 
-- **Brain views**: for each run, sagittal, coronal and axial slices through the cursor. They
-  show the t map above the threshold (**t >**) on the MNI template, with the ticked regions
-  outlined in cyan. Click a view to move the cursor. **Cursor to peak** jumps to the first
-  run's peak.
+- **Brain views**: for each run, sagittal, coronal and axial slices through that run's
+  cursor. They show the t map above the threshold (**t >**) on the MNI template, with the
+  ticked regions outlined in cyan. Each run has its own cursor, which starts at its own peak:
+  click a run's view to move it, and **Cursor to peak** puts each back at its own peak. Tick
+  **Lock cursors** to compare the runs at one spot: every cursor jumps to the one you moved
+  last, a click then moves all of them to the same MNI position, and **Cursor to peak** goes
+  to the first run's peak. The line above the views gives each run's cursor position and t.
 - **Time courses**: the signal with the model fit, with the ON blocks shaded. Show it for
-  each run's own peak voxel, the voxel at the cursor, or the mean of the ticked regions.
+  each run's own peak voxel, the voxel at each run's cursor, or the mean of the ticked
+  regions.
 - **Average ON/OFF cycle**: the response averaged over the cycles after removing drift, with
   all runs overlaid. It is in % signal change if the data still have their mean; otherwise
   it is in residual-SD units, so runs on different scales can still be compared.

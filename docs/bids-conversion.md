@@ -196,7 +196,13 @@ Every file also shows its volume count and duration.
 of all its runs. (It's the upper median, so it is always a length some run has, and with
 only two runs it's the longer one.) A scan with a single run in the whole folder (e.g. one
 pilot) is compared with the study's usual length instead, shown as "study default": Matching
-495, Reappraisal 500, Rest 495 and Peer 140 volumes. The tab lists each BOLD scan with
+495, Reappraisal 500, Rest 495 and Peer 140 volumes. The Checkerboard is timed in seconds
+by [checkerboard_fmri_task](https://github.com/stefandup/checkerboard_fmri_task), so its
+expected length comes from that task's design instead of the median: 200 s at the runs' TR,
+rounded up (e.g. 241 volumes at TR 0.832 s; the dummy scans are not in the NIfTI, as the
+trigger only starts after them), shown as
+"task design (N)". This also catches runs that were all stopped late, which the median
+would miss. If its runs have different TRs, it falls back to the median. The tab lists each BOLD scan with
 its runs, the volume counts found, the expected length (shown as "median (N)"), the minutes
 that makes, and how many runs are too long. Type
 another number to set it; it is saved as you type, in `code/expected_volumes.json` in the BIDS
@@ -204,10 +210,13 @@ folder. Step the box down to the bottom ("median (N)") to follow the median agai
 longer than its expected length gets **Trim to N...** in its session. **Trim N long run(s)...**
 (top left of that tab) trims them all, after asking you to
 confirm. Trimming keeps the first N volumes, records the original count in the sidecar
-(`TrimmedFromVolumes`), and refuses if the run's events would be cut off. The raw DICOMs
+(`TrimmedFromVolumes`), and refuses if the run's events would be cut off. Trimmed runs are
+then marked: the tab's **Trimmed** column shows how many of each scan's runs were trimmed
+(e.g. "Trimmed 3 of 5"; hover for each file's before and after volumes), and the run's line
+in its session at crosscheck reads "... volumes, trimmed from N". The raw DICOMs
 keep every volume: delete the file and convert again to undo. Trimming happens here, at
 crosscheck, never during preprocessing. A single-run scan without a study default (e.g.
-Checkerboard, or the T1w) can't be marked short automatically, so check those numbers by
+the T1w) can't be marked short automatically, so check those numbers by
 eye. **Convert to BIDS** (tab 1) runs the converter, with a progress bar (one step per
 session, plus one per subject for its behavioural logs), the step it is on, and a summary
 table of the last run. Deleted files are recreated from the raw data.

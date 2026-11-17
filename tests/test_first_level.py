@@ -49,11 +49,11 @@ def test_on_blocks_follow_the_checkerboard_schedule() -> None:
     assert short.on_blocks() == [(0.0, 20.0), (40.0, 10.0)]
 
 
-def test_task_regressor_rises_after_the_dummy_volumes_with_a_haemodynamic_lag() -> None:
+def test_task_regressor_rises_after_the_first_on_block_with_a_haemodynamic_lag() -> None:
     design = fl.BlockDesign()
     task = fl.task_regressor(design, 260, TR)
     assert task.max() == pytest.approx(1.0)
-    first_on = int(round((5 * TR + 20.0) / TR))
+    first_on = int(round(20.0 / TR))
     assert task[:first_on].max() < 0.01  # nothing before the first ON block
     assert task[first_on + int(12 / TR)] > 0.95  # at the plateau 12 s in
 
