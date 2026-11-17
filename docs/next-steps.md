@@ -45,6 +45,9 @@ src/fmri_local_process/
 | TUI copies the logic from the Qt pages | Fastest start; the window isn't touched | Two copies that drift apart; every fix twice |
 | TUI only calls the CLIs | No refactor | The CLIs don't cover everything the tabs do (crosscheck marks, trimming, review); no shared state or live progress |
 
+[The app/ layer, shown on a toy](app-layer-toy.md) walks through the whole idea on a
+small working example.
+
 Steps, with the window working and all tests passing after each one:
 
 1. **Split the dependencies.** PySide6 becomes an optional `[gui]` install, and Textual a
