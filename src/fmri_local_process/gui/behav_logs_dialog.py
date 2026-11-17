@@ -1,10 +1,12 @@
-"""IDs & behaviour logs: match each log to a scan session, look at its events, record a verdict.
+"""Scan sessions and behaviour logs: match each log to a scan session, look at its events,
+record a verdict. Two toolbox tabs, Scan sessions then Behaviour logs, share one panel.
 
 * A wrong ID or date in a log's name is corrected here; so is a wrong subject ID in a DICOM
   session folder's name (Scan sessions tab: each folder with its scan date/time and the ID
   as written, e.g. a twin's 12345-1, which becomes 12345T1).
 * Selecting a log shows the events it produces (and whether they fit the converted BOLD run),
-  so it can be marked OK or as an error.
+  so it can be marked OK or as an error. Once looked at, logs are marked crosschecked (several
+  selected rows at once).
 * Of several logs on one day, "Use this one" picks the log that goes into BIDS.
 
 Everything is saved in the BIDS folder (code/behav_corrections.json and
@@ -41,9 +43,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fmri_local_process.gui.crosscheck_gui import (
+    CROSSCHECKED_COLOR,
+    CROSSCHECKED_ICON,
+    mark_button,
+)
 from fmri_local_process.gui.image_view import HelpToggle
-from fmri_local_process.gui.qt_common import paths_conflict
+from fmri_local_process.gui.qt_common import NoticeBanner, paths_conflict
 from fmri_local_process.gui.toolbox_state import VIEW_ONLY, ToolboxState
+from fmri_local_process.processing.action_log import record_action
 from fmri_local_process.processing.behav_export import (
     BIDS_LAYOUT,
     ONE_FOLDER,
@@ -83,6 +91,7 @@ from fmri_local_process.processing.philani_bids import (
     DATE_FORMAT,
     DICOM_CORRECTIONS_FILE,
     ScannedFolder,
+    read_crosschecked_folders,
     read_dicom_corrections,
     read_dicom_date_corrections,
     read_dicom_session_corrections,
@@ -90,6 +99,7 @@ from fmri_local_process.processing.philani_bids import (
     read_scan_rules,
     scan_dicom_root,
     session_infos,
+    write_crosschecked_folders,
     write_dicom_corrections,
     write_dicom_date_corrections,
     write_dicom_session_corrections,
@@ -106,9 +116,11 @@ CORRECTED_ID, CORRECTED_DATE, VERDICT, MATCH, SESSION, STATE, NOTES = range(4, 1
 VERDICT_COLORS = {REVIEW_OK: OK_COLOR, REVIEW_ERROR: BAD_COLOR, REVIEW_NOT_USED: WARN_COLOR}
 SESSION_COLUMNS = (
     "DICOM folder", "Scanned", "ID in folder", "Corrected ID", "Corrected date",
-    "Set session", "Resolves to", "BIDS session", "Scans", "Logs", "Notes",
+    "Set session", "Resolves to", "BIDS session", "Scans", "Logs", "Checked", "Notes",
 )  # fmt: skip
-S_CORRECTED, S_DATE, S_FIXED, S_RESOLVED, S_SESSION, S_TASKS, S_LOGS, S_NOTES = range(3, 11)
+S_CORRECTED, S_DATE, S_FIXED, S_RESOLVED, S_SESSION, S_TASKS, S_LOGS, S_CHECKED, S_NOTES = range(
+    3, 12
+)
 
 Verdict = tuple[str, str]  # (review, note)
 
@@ -215,6 +227,7 @@ class BehavData:
     excluded: set[str]  # DICOM folders deleted at crosscheck
     dicom_dates: dict[str, dt.date] = field(default_factory=dict)  # corrected scan dates
     dicom_sessions: dict[str, str] = field(default_factory=dict)  # session numbers set
+    checked_folders: set[str] = field(default_factory=set)  # marked crosschecked
 
 
 LoadProgress = Callable[[int, int, str], None]  # (done, total, what)
@@ -240,6 +253,7 @@ def load_behav_data(
         set(read_excluded_sessions(bids_root)),
         read_dicom_date_corrections(bids_root),
         read_dicom_session_corrections(bids_root),
+        read_crosschecked_folders(bids_root),
     )
 
 
@@ -260,19 +274,36 @@ class BehavLoadThread(QThread):
         self.done.emit(data)
 
 
+SESSIONS_HELP_TEXT = (
+    "Every DICOM session folder, with its scan date and time (to tell twins apart) and the "
+    "subject ID as written in its name. A twin's 12345-1 becomes 12345T1; other characters "
+    "(e.g. a space) are removed and flagged.<br><br>"
+    "Correct a wrong subject ID or scan date, or set a session number (e.g. 2 when the "
+    "first visit is missing), then press <b>Re-check</b>: <b>Resolves to</b> and <b>BIDS "
+    "session</b> show the result, <b>Logs</b> the behaviour logs matched to it. Once you have "
+    f"been through a folder, <b>Mark crosschecked</b> (it then shows {CROSSCHECKED_ICON}); "
+    "select several rows (Ctrl/Shift-click or drag) to mark them all at once.<br><br>"
+    "<b>Save</b> keeps this (and the Behaviour logs tab's corrections) in the BIDS folder's "
+    "code/ folder; Convert to BIDS applies it. Raw folders are never renamed."
+)
 HELP_TEXT = (
     "Each log is matched to a scan session by subject ID and date. A twin's 12345-1 becomes "
     "12345T1; other characters (e.g. a space) are removed and flagged.<br><br>"
-    "Correct a wrong ID or date (<b>Behaviour logs</b> tab) or a wrong subject ID in a DICOM "
-    "folder name (<b>Scan sessions</b> tab: scan date and time shown, to tell twins apart) "
-    "and press <b>Re-check</b>. Select a log to see its events and mark it OK or as an error; "
-    "of several logs on one day, pick the one to use.<br><br>"
+    "Correct a wrong ID or date here, or a wrong subject ID in a DICOM folder name on the "
+    "<b>Scan sessions</b> tab, and press <b>Re-check</b>. Select a log to see its events and "
+    "mark it OK or as an error; of several logs on one day, pick the one to use. Once you "
+    f"have been through a log, <b>Mark crosschecked</b> (it then shows {CROSSCHECKED_ICON}); "
+    "select several rows (Ctrl/Shift-click or drag) to mark them all at once.<br><br>"
     "<b>Save</b> keeps all of this in the BIDS folder (code/behav_corrections.json and "
     "code/dicom_id_corrections.json), and Convert to BIDS applies it. Raw files are never "
     "renamed. Sessions already converted under an old ID stay in the BIDS folder until you "
     "remove them."
 )
 ROWS_PER_PROGRESS_STEP = 25
+FIX_RED = "Fix the cells marked red (dates as YYYY-MM-DD, sessions as a number)."
+# Where "Export logs..." can put the events files.
+INTO_BIDS, INTO_OUTPUT, INTO_OTHER = "bids", "output", "other"
+EXPORT_SUBFOLDER = "events"  # in C-PAC's output folder
 
 
 class BehavLogsPanel(QWidget):
@@ -285,9 +316,12 @@ class BehavLogsPanel(QWidget):
         dicom_root: Path,
         parent: QWidget | None,
         data: BehavData | None = None,
+        output_root: Path | None = None,
     ):
         super().__init__(parent)
         self.bids_root, self.behav_root, self.dicom_root = bids_root, behav_root, dicom_root
+        self.output_root = output_root  # C-PAC's output folder (Preprocess tab), if chosen
+        self.bids_locked = False  # view-only package: never write into the BIDS folder
         self.events_cache: dict[str, EventTable | str] = {}  # key -> table, or why it failed
         self.behav_tasks = {t.task for t in BEHAV_TASKS}  # tasks that should have a log
 
@@ -309,6 +343,8 @@ class BehavLogsPanel(QWidget):
             for info in self.infos
             if info.correction.review
         }
+        self.crosschecked = {info.key for info in self.infos if info.correction.crosschecked}
+        self.checked_folders = set(data.checked_folders)  # Scan sessions marked crosschecked
 
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
@@ -337,9 +373,10 @@ class BehavLogsPanel(QWidget):
         controls.addWidget(self.save_button)
         self.export_button = QPushButton("Export logs...")
         self.export_button.setToolTip(
-            "Save every log as an events.tsv in a folder you choose (all in one folder, or in "
-            "BIDS sub-/ses-/func folders), using the corrections and verdicts here. No scans "
-            "are converted; logs marked error or not used are left out."
+            "Save every log as an events.tsv: into the BIDS folder (tab 1), into C-PAC's "
+            f"output folder ({EXPORT_SUBFOLDER}/), or a folder you choose (all in one folder, "
+            "or in BIDS sub-/ses-/func folders), using the corrections and verdicts here. No "
+            "scans are converted; logs marked error or not used are left out."
         )
         self.export_button.clicked.connect(self.on_export)
         controls.addWidget(self.export_button)
@@ -352,11 +389,11 @@ class BehavLogsPanel(QWidget):
         layout.addLayout(controls)
         layout.addWidget(self.help.box)
 
+        # The Scan sessions tab shows this (the toolbox puts it on a tab of its own); it shares
+        # this panel's data, Re-check and Save.
+        self.sessions_view = self._build_sessions_tab(dicom_corrections)
         splitter = QSplitter(Qt.Orientation.Vertical)
-        self.top_tabs = QTabWidget()
-        self.top_tabs.addTab(self._build_table(), "Behaviour logs")
-        self.top_tabs.addTab(self._build_session_table(dicom_corrections), "Scan sessions")
-        splitter.addWidget(self.top_tabs)
+        splitter.addWidget(self._build_table())
         tabs = QTabWidget()
         tabs.addTab(self._build_detail(), "Selected log")
         self.contents = QTextEdit()
@@ -377,7 +414,7 @@ class BehavLogsPanel(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.itemSelectionChanged.connect(self.show_detail)
         self.id_edits: list[QLineEdit] = []
         self.date_edits: list[QLineEdit] = []
@@ -394,6 +431,54 @@ class BehavLogsPanel(QWidget):
             self.date_edits.append(date_edit)
         return self.table
 
+    def _build_sessions_tab(self, corrections: dict[str, str]) -> QWidget:
+        """The Scan sessions view: Re-check / Save, the session table, and its Mark / Un-mark
+        crosschecked row underneath."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        controls = QHBoxLayout()
+        self.sessions_recheck_button = QPushButton("Re-check")
+        self.sessions_recheck_button.setToolTip(
+            "Number the sessions and match the logs again with the corrections typed so far "
+            "(not saved yet)."
+        )
+        self.sessions_recheck_button.clicked.connect(self.recheck)
+        controls.addWidget(self.sessions_recheck_button)
+        controls.addStretch(1)
+        self.sessions_status = QLabel()
+        controls.addWidget(self.sessions_status)
+        self.sessions_save_button = QPushButton("Save")
+        self.sessions_save_button.setToolTip(
+            "Keep the corrections and crosscheck marks in the BIDS folder (the Behaviour logs "
+            "tab's too); Convert to BIDS applies them."
+        )
+        self.sessions_save_button.clicked.connect(self.save)
+        controls.addWidget(self.sessions_save_button)
+        self.sessions_help = HelpToggle("Help ?", "Correcting and checking the scan sessions.")
+        self.sessions_help.set_text(SESSIONS_HELP_TEXT)
+        controls.addWidget(self.sessions_help.button)
+        layout.addLayout(controls)
+        layout.addWidget(self.sessions_help.box)
+        layout.addWidget(self._build_session_table(corrections), 1)
+        row = QHBoxLayout()
+        self.sessions_selected_label = QLabel()
+        row.addWidget(self.sessions_selected_label, 1)
+        self.unmark_sessions_button = QPushButton("Un-mark crosschecked")
+        self.unmark_sessions_button.setToolTip("Take the reviewed mark off the selected folder(s).")
+        self.unmark_sessions_button.clicked.connect(lambda: self.set_folders_checked(False))
+        row.addWidget(self.unmark_sessions_button)
+        self.mark_sessions_button = mark_button(
+            "Mark crosschecked",
+            "You have been through the selected DICOM folder(s): mark them as reviewed. Select "
+            "several rows (Ctrl/Shift-click or drag) to mark them all at once.",
+        )
+        self.mark_sessions_button.clicked.connect(lambda: self.set_folders_checked(True))
+        row.addWidget(self.mark_sessions_button)
+        layout.addLayout(row)
+        self.update_session_buttons()
+        return panel
+
     def _build_session_table(self, corrections: dict[str, str]) -> QTableWidget:
         """Every DICOM session folder: when it was scanned, its ID as written, a correction."""
         self.session_table = QTableWidget(len(self.scanned), len(SESSION_COLUMNS))
@@ -401,6 +486,8 @@ class BehavLogsPanel(QWidget):
         self.session_table.verticalHeader().setVisible(False)
         self.session_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.session_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.session_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.session_table.itemSelectionChanged.connect(self.update_session_buttons)
         self.session_edits: dict[str, QLineEdit] = {}
         self.folder_date_edits: dict[str, QLineEdit] = {}
         self.folder_session_edits: dict[str, QLineEdit] = {}
@@ -468,6 +555,17 @@ class BehavLogsPanel(QWidget):
         self.clear_button.clicked.connect(lambda: self.set_verdict(None))
         for button in (self.ok_button, self.error_button, self.use_button, self.clear_button):
             actions.addWidget(button)
+        self.unmark_button = QPushButton("Un-mark crosschecked")
+        self.unmark_button.setToolTip("Take the reviewed mark off the selected log(s).")
+        self.unmark_button.clicked.connect(lambda: self.set_crosschecked(False))
+        actions.addWidget(self.unmark_button)
+        self.mark_button = mark_button(
+            "Mark crosschecked",
+            "You have been through the selected log(s): mark them as reviewed. Select several "
+            "rows (Ctrl/Shift-click or drag) to mark them all at once.",
+        )
+        self.mark_button.clicked.connect(lambda: self.set_crosschecked(True))
+        actions.addWidget(self.mark_button)
         layout.addLayout(actions)
 
         events = QSplitter(Qt.Orientation.Horizontal)
@@ -505,7 +603,9 @@ class BehavLogsPanel(QWidget):
                 ok = False
                 continue
             review, note = self.verdicts.get(info.key, (None, ""))
-            correction = Correction(id_edit.text().strip() or None, day, review, note)
+            correction = Correction(
+                id_edit.text().strip() or None, day, review, note, info.key in self.crosschecked
+            )
             if correction != Correction():
                 result[info.key] = correction
         return result if ok else None
@@ -552,11 +652,10 @@ class BehavLogsPanel(QWidget):
         corrections = self.corrections()
         dates, sessions = self.dicom_dates(), self.dicom_sessions()
         if corrections is None or dates is None or sessions is None:
-            self.summary.setText(
-                "Fix the cells marked red (dates as YYYY-MM-DD, sessions as a number)."
-            )
+            self.set_status(FIX_RED)
             return
         self.recheck_button.setEnabled(False)
+        self.sessions_recheck_button.setEnabled(False)
         self.progress_bar.setRange(0, len(self.infos))
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
@@ -571,6 +670,8 @@ class BehavLogsPanel(QWidget):
         finally:
             self.progress_bar.setVisible(False)
             self.recheck_button.setEnabled(True)
+            self.sessions_recheck_button.setEnabled(True)
+        self.sessions_status.setText("Re-checked (not saved yet)")
 
     def show_matches(self, matches: list[LogMatch], progress: bool = False) -> None:
         self.matches = matches
@@ -581,12 +682,14 @@ class BehavLogsPanel(QWidget):
             info = m.info
             logged = f"{info.time_text} ({info.date_source})" if info.found_date else "-"
             review = info.correction.review or ""
+            marked = info.correction.crosschecked
+            verdict = " ".join(filter(None, [CROSSCHECKED_ICON if marked else "", review]))
             cells = {
                 0: info.key,
                 1: info.task.task if info.task else "?",
                 2: id_text(info.raw_subject, info.file_subject),
                 3: logged,
-                VERDICT: review,
+                VERDICT: verdict,
                 MATCH: m.status,
                 SESSION: f"{m.session.name} ({m.session.when})" if m.session else "",
                 STATE: info.state,
@@ -599,16 +702,19 @@ class BehavLogsPanel(QWidget):
                     item.setForeground(QColor(OK_COLOR if m.status == MATCHED else BAD_COLOR))
                 if column == STATE and info.state != COMPLETE:
                     item.setForeground(QColor(WARN_COLOR))
-                if column == VERDICT and review:
-                    item.setForeground(QColor(VERDICT_COLORS[review]))
+                if column == VERDICT and verdict:
+                    color = VERDICT_COLORS[review] if review else CROSSCHECKED_COLOR
+                    item.setForeground(QColor(color))
                 self.table.setItem(row, column, item)
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setStretchLastSection(True)
         self.show_sessions()
         matched = sum(m.status == MATCHED for m in matches)
         waiting = sum(needs_review(m) for m in matches)
+        marked = sum(m.info.correction.crosschecked for m in matches)
         self.summary.setText(
-            f"{matched} of {len(matches)} log(s) matched to a session; {waiting} need review"
+            f"{matched} of {len(matches)} log(s) matched to a session; {waiting} need review; "
+            f"{CROSSCHECKED_ICON} {marked} crosschecked"
         )
         self.apply_filter()
 
@@ -645,6 +751,7 @@ class BehavLogsPanel(QWidget):
                 S_RESOLVED: id_text(raw_id, session.subject) if session else "-",
                 S_SESSION: session.name if session else "",
                 S_LOGS: "; ".join(sorted(matched)),
+                S_CHECKED: CROSSCHECKED_ICON if folder.name in self.checked_folders else "",
                 S_NOTES: "; ".join(filter(None, notes)),
             }
             for column, text in cells.items():
@@ -652,9 +759,40 @@ class BehavLogsPanel(QWidget):
                 item.setToolTip(text)
                 if column == S_NOTES and text:
                     item.setForeground(QColor(WARN_COLOR))
+                if column == S_CHECKED:
+                    item.setForeground(QColor(CROSSCHECKED_COLOR))
+                    item.setToolTip("crosschecked" if text else "")
                 self.session_table.setItem(row, column, item)
         self.session_table.resizeColumnsToContents()
         self.session_table.horizontalHeader().setStretchLastSection(True)
+
+    def selected_folders(self) -> list[str]:
+        """The DICOM folder names selected on the Scan sessions tab."""
+        rows = sorted(i.row() for i in self.session_table.selectionModel().selectedRows())
+        return [self.scanned[row][0].name for row in rows]
+
+    def update_session_buttons(self) -> None:
+        chosen = self.selected_folders()
+        n = len(chosen)
+        self.mark_sessions_button.setEnabled(any(f not in self.checked_folders for f in chosen))
+        self.mark_sessions_button.setText(
+            f"Mark {n} crosschecked" if n > 1 else "Mark crosschecked"
+        )
+        self.unmark_sessions_button.setEnabled(any(f in self.checked_folders for f in chosen))
+        checked = len(self.checked_folders & {f.name for f, _ in self.scanned})
+        self.sessions_selected_label.setText(
+            f"{n} selected; {CROSSCHECKED_ICON} {checked} of {len(self.scanned)} crosschecked"
+        )
+
+    def set_folders_checked(self, marked: bool) -> None:
+        """Mark (or un-mark) every selected DICOM folder as reviewed; kept on Save."""
+        folders = set(self.selected_folders())
+        if marked:
+            self.checked_folders |= folders
+        else:
+            self.checked_folders -= folders
+        self.show_sessions()
+        self.update_session_buttons()
 
     def apply_filter(self) -> None:
         only = self.problems_only.isChecked()
@@ -663,9 +801,21 @@ class BehavLogsPanel(QWidget):
 
     # ---- selected log ---------------------------------------------------------------------
 
+    def selected_matches(self) -> list[LogMatch]:
+        """Every selected log still shown (not hidden by 'Needs review only')."""
+        rows = sorted(index.row() for index in self.table.selectionModel().selectedRows())
+        return [self.matches[row] for row in rows if not self.table.isRowHidden(row)]
+
     def selected(self) -> LogMatch | None:
-        rows = self.table.selectionModel().selectedRows()
-        return self.matches[rows[0].row()] if rows else None
+        """The one selected log; None when none or several are selected."""
+        chosen = self.selected_matches()
+        return chosen[0] if len(chosen) == 1 else None
+
+    def update_mark_buttons(self, chosen: list[LogMatch]) -> None:
+        n = len(chosen)
+        self.mark_button.setEnabled(any(not m.info.correction.crosschecked for m in chosen))
+        self.mark_button.setText(f"Mark {n} crosschecked" if n > 1 else "Mark crosschecked")
+        self.unmark_button.setEnabled(any(m.info.correction.crosschecked for m in chosen))
 
     def events_of(self, info: LogInfo) -> EventTable | str:
         if info.key not in self.events_cache:
@@ -679,12 +829,20 @@ class BehavLogsPanel(QWidget):
         return self.events_cache[info.key]
 
     def show_detail(self) -> None:
-        m = self.selected()
+        chosen = self.selected_matches()
+        m = chosen[0] if len(chosen) == 1 else None
         for button in (self.ok_button, self.error_button, self.use_button, self.clear_button):
             button.setEnabled(m is not None)
+        self.update_mark_buttons(chosen)
         self.events_table.setRowCount(0)
         self.events_summary.clear()
         self.fit_label.setText("")
+        if len(chosen) > 1:
+            self.detail_title.setText(
+                f"<b>{len(chosen)} logs selected</b> -- mark them crosschecked together, or "
+                "select one to see its events."
+            )
+            return
         if m is None:
             self.detail_title.setText("Select a log above.")
             return
@@ -741,6 +899,17 @@ class BehavLogsPanel(QWidget):
         self._set(m.info.key, review, self.note_edit.text().strip() if review else "")
         self.recheck()
 
+    def set_crosschecked(self, marked: bool) -> None:
+        """Mark (or un-mark) every selected log as reviewed; kept on Save."""
+        keys = {m.info.key for m in self.selected_matches()}
+        if not keys:
+            return
+        if marked:
+            self.crosschecked |= keys
+        else:
+            self.crosschecked -= keys
+        self.recheck()
+
     def use_this_one(self) -> None:
         m = self.selected()
         if m is None:
@@ -753,9 +922,37 @@ class BehavLogsPanel(QWidget):
             self._set(rival.info.key, REVIEW_NOT_USED, f"{chosen.path.name} used instead")
         self.recheck()
 
-    def on_export(self) -> None:
-        """Save as: pick a layout and a folder, then write every log's events.tsv there."""
-        self.recheck()  # export what the table shows, with the corrections typed so far
+    def export_destinations(self) -> dict[str, str]:
+        """What the export can go into: {text shown: INTO_BIDS / INTO_OUTPUT / INTO_OTHER}."""
+        choices = {}
+        if not self.bids_locked:
+            choices[f"The BIDS folder (tab 1): {self.bids_root}"] = INTO_BIDS
+        if self.output_root is not None:
+            out = self.output_root / EXPORT_SUBFOLDER
+            choices[f"C-PAC's output folder: {out}"] = INTO_OUTPUT
+        choices["Another folder..."] = INTO_OTHER
+        return choices
+
+    def export_target(self) -> tuple[Path, str, bool] | None:
+        """Ask where and how: (folder, layout, into the BIDS folder); None if cancelled."""
+        destinations = self.export_destinations()
+        where, ok = QInputDialog.getItem(
+            self, "Export logs", "Put the events files in:", list(destinations), 0, False
+        )
+        if not ok:
+            return None
+        destination = destinations[where]
+        if destination == INTO_BIDS:
+            replace = QMessageBox.question(
+                self,
+                "Export into the BIDS folder",
+                "Write each matched log's events.tsv into its sub-/ses-/func folder, "
+                "replacing the events file already there (Convert to BIDS writes the same "
+                "files)? Logs not matched to a scan session are left out.",
+            )
+            if replace != QMessageBox.StandardButton.Yes:
+                return None
+            return self.bids_root, BIDS_LAYOUT, True
         layouts = {
             "One folder (sub-..._events.tsv side by side)": ONE_FOLDER,
             "BIDS folders (sub-.../ses-.../func/)": BIDS_LAYOUT,
@@ -764,26 +961,38 @@ class BehavLogsPanel(QWidget):
             self, "Export logs", "Lay the events files out as:", list(layouts), 0, False
         )
         if not ok:
-            return
-        chosen = QFileDialog.getExistingDirectory(
-            self, "Export the events files to", str(self.bids_root.parent)
-        )
-        if not chosen:
-            return
-        out_root = Path(chosen)
+            return None
+        if destination == INTO_OUTPUT and self.output_root is not None:
+            out_root = self.output_root / EXPORT_SUBFOLDER
+        else:
+            chosen = QFileDialog.getExistingDirectory(
+                self, "Export the events files to", str(self.bids_root.parent)
+            )
+            if not chosen:
+                return None
+            out_root = Path(chosen)
+            if paths_conflict(out_root, self.bids_root):
+                QMessageBox.warning(
+                    self,
+                    "Pick another folder",
+                    "Not in (or around) the BIDS folder: choose 'The BIDS folder' instead.",
+                )
+                return None
         for raw, what in ((self.behav_root, "behavioural logs"), (self.dicom_root, "DICOMs")):
             if paths_conflict(out_root, raw):
                 QMessageBox.warning(
                     self, "Pick another folder", f"Not in (or around) the raw {what}."
                 )
-                return
-        if paths_conflict(out_root, self.bids_root):
-            QMessageBox.warning(
-                self,
-                "Pick another folder",
-                "Not in (or around) the BIDS folder: Convert to BIDS puts the events there.",
-            )
+                return None
+        return out_root, layouts[choice], False
+
+    def on_export(self) -> None:
+        """Save as: pick where and how, then write every log's events.tsv there."""
+        self.recheck()  # export what the table shows, with the corrections typed so far
+        target = self.export_target()
+        if target is None:
             return
+        out_root, layout, into_bids = target
         self.export_button.setEnabled(False)
         self.progress_bar.setFormat("Exporting %v / %m logs")
         self.progress_bar.setVisible(True)
@@ -794,14 +1003,26 @@ class BehavLogsPanel(QWidget):
             QApplication.processEvents()
 
         try:
-            report = export_events(self.matches, out_root, layouts[choice], progress)
+            report = export_events(
+                self.matches, out_root, layout, progress, skip_unplaced=into_bids
+            )
+            if into_bids and report.written:
+                record_action(
+                    self.bids_root,
+                    "export behaviour events",
+                    str(self.bids_root),
+                    f"{len(report.written)} events file(s) written",
+                )
         finally:
             self.progress_bar.setVisible(False)
             self.progress_bar.setFormat("Re-checking %v / %m logs")
             self.export_button.setEnabled(True)
         lines = [f"{len(report.written)} events file(s) written to {out_root}."]
         if report.left_out:
-            lines.append(f"{len(report.left_out)} left out (marked error / not used, or no task).")
+            why = "not matched to a session, " if into_bids else ""
+            lines.append(
+                f"{len(report.left_out)} left out ({why}marked error / not used, or no task)."
+            )
         if report.failed:
             lines.append(f"{len(report.failed)} failed:")
             lines += [f"  {log}: {why}" for log, why in report.failed[:10]]
@@ -815,9 +1036,7 @@ class BehavLogsPanel(QWidget):
         corrections = self.corrections()
         dates, sessions = self.dicom_dates(), self.dicom_sessions()
         if corrections is None or dates is None or sessions is None:
-            self.summary.setText(
-                "Not saved: fix the cells marked red (dates as YYYY-MM-DD, sessions as a number)."
-            )
+            self.set_status(f"Not saved: {FIX_RED[0].lower()}{FIX_RED[1:]}")
             return
         # Keep corrections for logs not under this behaviour folder right now.
         keys = {info.key for info in self.infos}
@@ -839,9 +1058,17 @@ class BehavLogsPanel(QWidget):
             if k not in folders
         }
         write_dicom_session_corrections(self.bids_root, kept_sessions | sessions)
+        kept_checked = read_crosschecked_folders(self.bids_root) - folders
+        write_crosschecked_folders(self.bids_root, kept_checked | self.checked_folders)
         self.saved_dates, self.saved_sessions = dates, sessions
         self.summary.setText(self.summary.text() + "  (saved)")
+        self.sessions_status.setText("Saved")
         self.saved.emit()
+
+    def set_status(self, text: str) -> None:
+        """A message on both tabs (e.g. a cell to fix may be on the other one)."""
+        self.summary.setText(text)
+        self.sessions_status.setText(text)
 
 
 class BehavLogsPage(QWidget):
@@ -850,6 +1077,9 @@ class BehavLogsPage(QWidget):
     ready when you get to it), and again when a folder changes or on Reload."""
 
     badge_changed = Signal(str)
+    panel_changed = Signal()  # loaded or dropped: the Scan sessions tab shows its part
+    load_progress = Signal(int, int, str)  # (done, total, what), while reading
+    logs_loaded = Signal(object)  # list[LogInfo] read ([] when dropped), for Scan lengths
 
     def __init__(self, state: ToolboxState) -> None:
         super().__init__()
@@ -872,6 +1102,8 @@ class BehavLogsPage(QWidget):
         self.load_button.clicked.connect(self.load)
         row.addWidget(self.load_button)
         layout.addLayout(row)
+        self.banner = NoticeBanner()
+        layout.addWidget(self.banner)
         self.filler = QWidget()  # keeps the row at the top until the logs are loaded
         layout.addWidget(self.filler, 1)
         self.layout_ = layout
@@ -888,19 +1120,42 @@ class BehavLogsPage(QWidget):
     def update_status(self, text: str = "") -> None:
         ready = self.folders() is not None
         self.load_button.setEnabled(ready and self.loader is None)
-        if not ready:
-            text = (
-                "Choose the DICOM sessions, behavioural logs and BIDS folders on the "
-                "Setup & Convert to BIDS tab."
-            )
         self.status.setText(text)
         self.status.setVisible(bool(text))
+        self.banner.set_messages(self.notices())
+
+    def notices(self) -> list[str]:
+        """Folders not chosen; once read, no logs or no DICOM sessions found in them."""
+        names = {
+            "dicom": "DICOM sessions",
+            "behav": "behavioural logs",
+            "bids": "BIDS",
+        }
+        missing = [name for key, name in names.items() if self.state.folder(key) is None]
+        if missing:
+            return [
+                f"No {' / '.join(missing)} folder chosen: choose it on the Setup & Convert "
+                "to BIDS tab. This tab matches the logs to the scan sessions, so it needs all "
+                "three."
+            ]
+        if self.panel is None:
+            return []
+        messages = []
+        if not self.panel.infos:
+            messages.append(
+                f"No behavioural logs (.log files) found in {self.state.folder('behav')}."
+            )
+        if not self.panel.scanned:
+            messages.append(f"No DICOM session folders found in {self.state.folder('dicom')}.")
+        return messages
 
     def show_page(self) -> None:
         if self.panel is None and self.loader is None and self.folders() is not None:
             self.load()
 
     def on_folder_changed(self, key: str) -> None:
+        if key == "output" and self.panel is not None:  # only the export uses it
+            self.panel.output_root = self.state.folder("output")
         if key in ("bids", "behav", "dicom"):
             self.drop_panel()
             if self.folders() is not None:
@@ -910,10 +1165,15 @@ class BehavLogsPage(QWidget):
     def drop_panel(self) -> None:
         if self.panel is not None:
             self.layout_.removeWidget(self.panel)
+            # The Scan sessions tab holds this part: it isn't deleted with the panel.
+            self.panel.sessions_view.setParent(None)
+            self.panel.sessions_view.deleteLater()
             self.panel.deleteLater()
             self.panel = None
             self.filler.show()
             self.badge_changed.emit("")
+            self.panel_changed.emit()
+            self.logs_loaded.emit([])
 
     def load(self) -> None:
         """Read the logs on a worker thread; the panel appears when it is done."""
@@ -938,6 +1198,7 @@ class BehavLogsPage(QWidget):
         self.progress_bar.setRange(0, max(total, 1))
         self.progress_bar.setValue(done)
         self.progress_bar.setFormat(f"{what}: %v / %m")
+        self.load_progress.emit(done, total, what)
 
     def on_loaded(self, result: BehavData | str) -> None:
         if self.loader is not None:
@@ -948,15 +1209,21 @@ class BehavLogsPage(QWidget):
         if isinstance(result, str) or folders is None:
             self.update_status(f"Can't read the logs: {result}" if isinstance(result, str) else "")
             return
-        self.panel = BehavLogsPanel(*folders, self, data=result)
+        self.panel = BehavLogsPanel(
+            *folders, self, data=result, output_root=self.state.folder("output")
+        )
         self.panel.saved.connect(self.on_saved)
         if VIEW_ONLY in self.state.busy:  # corrections feed Convert to BIDS
-            self.panel.save_button.setEnabled(False)
-            self.panel.save_button.setToolTip("Locked: view-only review package.")
+            self.panel.bids_locked = True
+            for button in (self.panel.save_button, self.panel.sessions_save_button):
+                button.setEnabled(False)
+                button.setToolTip("Locked: view-only review package.")
         self.filler.hide()
         self.layout_.addWidget(self.panel, 1)
         self.update_status()
         self.badge_changed.emit(self.badge())
+        self.panel_changed.emit()
+        self.logs_loaded.emit(self.panel.infos)
 
     def wait(self) -> None:
         """Let a running read finish (closing the window, or a test)."""
@@ -970,6 +1237,72 @@ class BehavLogsPage(QWidget):
 
     def on_saved(self) -> None:
         self.badge_changed.emit(self.badge())
+        if self.panel is not None:  # verdicts change which logs count for Scan lengths
+            self.logs_loaded.emit(self.panel.infos)
         QMessageBox.information(
             self, "Saved", "Corrections saved. Convert to BIDS (tab 1) to apply them."
         )
+
+
+class ScanSessionsPage(QWidget):
+    """The Scan sessions tab: the DICOM session folders part of the Behaviour logs tab's
+    panel (one load, one Save for both), shown here on a tab of its own."""
+
+    def __init__(self, behav: BehavLogsPage) -> None:
+        super().__init__()
+        self.behav = behav
+        self.view: QWidget | None = None
+        layout = QVBoxLayout(self)
+        row = QHBoxLayout()
+        self.status = QLabel()
+        row.addWidget(self.status)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        row.addWidget(self.progress_bar, 1)
+        row.addStretch(1)
+        self.load_button = QPushButton("Reload")
+        self.load_button.setToolTip(
+            "Read every DICOM session folder and behavioural log again. Drops corrections "
+            "typed but not saved."
+        )
+        self.load_button.clicked.connect(behav.load)
+        row.addWidget(self.load_button)
+        layout.addLayout(row)
+        self.banner = NoticeBanner()
+        layout.addWidget(self.banner)
+        self.filler = QWidget()
+        layout.addWidget(self.filler, 1)
+        self.layout_ = layout
+        behav.panel_changed.connect(self.on_panel_changed)
+        behav.load_progress.connect(self.on_progress)
+        behav.state.folder_changed.connect(lambda _key: self.update_status())
+        self.on_panel_changed()
+
+    def show_page(self) -> None:
+        self.behav.show_page()  # starts reading if it hasn't yet
+        self.update_status()
+
+    def on_progress(self, done: int, total: int, what: str) -> None:
+        self.progress_bar.setRange(0, max(total, 1))
+        self.progress_bar.setValue(done)
+        self.progress_bar.setFormat(f"{what}: %v / %m")
+        self.update_status()
+
+    def on_panel_changed(self) -> None:
+        if self.view is not None:
+            self.layout_.removeWidget(self.view)
+            self.view = None
+        panel = self.behav.panel
+        if panel is not None:
+            self.view = panel.sessions_view
+            self.layout_.addWidget(self.view, 1)
+        self.filler.setVisible(self.view is None)
+        self.update_status()
+
+    def update_status(self) -> None:
+        loading = self.behav.loader is not None
+        self.progress_bar.setVisible(loading)
+        self.status.setText(self.behav.status.text())
+        self.status.setVisible(bool(self.status.text()))
+        self.load_button.setEnabled(self.behav.load_button.isEnabled())
+        self.banner.set_messages(self.behav.notices())

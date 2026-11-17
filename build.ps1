@@ -116,6 +116,8 @@ function Build-Installer {
     Assert-Success "Reading CPAC_IMAGE"
     $defaceImage = (& $Python -c "from fmri_local_process.processing.deface import DEFACE_IMAGE; print(DEFACE_IMAGE)").Trim()
     Assert-Success "Reading DEFACE_IMAGE"
+    $mriqcImage = (& $Python -c "from fmri_local_process.processing.mriqc import MRIQC_IMAGE; print(MRIQC_IMAGE)").Trim()
+    Assert-Success "Reading MRIQC_IMAGE"
 
     if (Test-Path $InstallerPath) { Remove-Item $InstallerPath -Recurse -Force }
 
@@ -128,7 +130,7 @@ function Build-Installer {
         $iscc = $isccCmd.Source
     }
 
-    & $iscc (Join-Path $PSScriptRoot "fmri_local_process_installer.iss") "/DMyAppVersion=$version" "/DCpacImage=$cpacImage" "/DDefaceImage=$defaceImage"
+    & $iscc (Join-Path $PSScriptRoot "fmri_local_process_installer.iss") "/DMyAppVersion=$version" "/DCpacImage=$cpacImage" "/DDefaceImage=$defaceImage" "/DMriqcImage=$mriqcImage"
     Assert-Success "ISCC.exe"
 }
 

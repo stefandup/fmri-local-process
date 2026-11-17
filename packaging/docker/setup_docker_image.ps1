@@ -15,6 +15,11 @@ and safe to re-run by hand, e.g. to switch defacer:
 -Defacer pydeface    pydeface, installed with pip (small)
 -Defacer none        only download C-PAC (fmri_preprocess); no defacer image is built
 
+-Mriqc               also download MRIQC (the toolbox's Scan quality tab; its own image, used
+                     as it is, ~5 GB). Can be run on its own later to add it:
+                       ... setup_docker_image.ps1 -Defacer none -NoCpac -Mriqc
+-NoCpac              skip the C-PAC download (only with -Defacer none: a defacer is built on it)
+
 Written for Windows PowerShell 5.1, which every target PC has.
 #>
 param(
@@ -22,11 +27,14 @@ param(
     [ValidateSet("freesurfer", "local", "pydeface", "none")]
     [string]$Defacer,
     [string]$DefaceFiles = "",
-    # Defaults match processing/cpac_docker.py CPAC_IMAGE and processing/deface.py DEFACE_IMAGE;
-    # the installer passes the values build.ps1 read from those modules.
+    [switch]$Mriqc,
+    [switch]$NoCpac,
+    # Defaults match processing/cpac_docker.py CPAC_IMAGE, processing/deface.py DEFACE_IMAGE and
+    # processing/mriqc.py MRIQC_IMAGE; the installer passes the values build.ps1 read from them.
     [string]$CpacImage = "fcpindi/c-pac:release-v1.8.7",
     [string]$Image = "philani_fmri_process:latest",
     [string]$FreesurferImage = "freesurfer/freesurfer:7.1.1",
+    [string]$MriqcImage = "nipreps/mriqc:24.0.2",
     # Wait for Enter before closing on failure, so the window's error stays readable.
     [switch]$PauseOnError
 )
@@ -78,17 +86,30 @@ function Find-DefaceFile([string]$Folder, [string]$Name, [string]$SubFolder) {
 docker info *> $null
 if ($LASTEXITCODE -ne 0) { Fail "Docker Desktop is not running. Start it, wait for 'Engine running', and re-run." }
 
-$total = if ($Defacer -eq "none") { 1 } elseif ($Defacer -eq "freesurfer") { 4 } else { 2 }
+if ($NoCpac -and $Defacer -ne "none") { Fail "-NoCpac only goes with -Defacer none: the defacer image is built on C-PAC." }
+$total = 0
+if (-not $NoCpac) { $total++ }
+if ($Mriqc) { $total++ }
+if ($Defacer -eq "freesurfer") { $total += 3 } elseif ($Defacer -ne "none") { $total++ }
+if ($total -eq 0) { Fail "Nothing to do: give -Mriqc, a -Defacer, or leave out -NoCpac." }
 
-Step 1 $total "Download C-PAC ($CpacImage, ~15 GB unpacked; can take an hour or more)"
-Get-DockerImage $CpacImage
+$step = 1
+if (-not $NoCpac) {
+    Step $step $total "Download C-PAC ($CpacImage, ~15 GB unpacked; can take an hour or more)"
+    Get-DockerImage $CpacImage
+    $step++
+}
+if ($Mriqc) {
+    Step $step $total "Download MRIQC ($MriqcImage, ~5 GB; scan quality checks)"
+    Get-DockerImage $MriqcImage
+    $step++
+}
 if ($Defacer -eq "none") {
     Write-Progress -Activity $Activity -Completed
     Write-Host "Done. No defacer image built: T1w images can only be defaced with --freesurfer, or not at all (--no-deface)." -ForegroundColor Green
     exit 0
 }
 
-$step = 2
 if ($Defacer -eq "freesurfer") {
     Step $step $total "Download FreeSurfer ($FreesurferImage, ~5 GB; only mri_deface is kept)"
     Get-DockerImage $FreesurferImage

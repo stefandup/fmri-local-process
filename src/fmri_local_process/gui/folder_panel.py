@@ -34,6 +34,9 @@ CONFLICTS = (
     ("bids", "dicom", "the converter would read its own output as DICOM sessions"),
     ("bids", "output", "C-PAC output can't go in (or around) the BIDS folder"),
     ("dicom", "output", "C-PAC output can't go in (or around) the raw DICOMs"),
+    ("mriqc", "bids", "MRIQC output can't go in (or around) the BIDS folder"),
+    ("mriqc", "dicom", "MRIQC output can't go in (or around) the raw DICOMs"),
+    ("mriqc", "output", "MRIQC output needs its own folder, apart from C-PAC's"),
 )
 # Folders read only: they may change while a job runs; the others wait for it.
 READ_ONLY_KEYS = ("behav",)

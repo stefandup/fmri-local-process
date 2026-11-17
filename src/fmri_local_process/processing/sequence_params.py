@@ -352,35 +352,41 @@ def dicom_series(dicom_root: Path, bids_root: Path, subject: str) -> dict[str, l
     return stems
 
 
+def series_of_run(
+    nifti: Path, stems: dict[str, list[Path]]
+) -> tuple[Path | None, dict[str, object], str]:
+    """(series folder, its DICOM_TAGS, '') for a BIDS run, from dicom_series()'s stems; or
+    (None, {}, why not). Several candidate series (picked at crosscheck): the sidecar's
+    SeriesNumber tells which; without a match it is left out rather than guessed."""
+    stem = nifti.name.removesuffix(".nii.gz")
+    candidates = stems.get(stem, [])
+    if not candidates:
+        return None, {}, "no DICOM series found"
+    if len(candidates) == 1:
+        return candidates[0], read_dicom_header(candidates[0]), ""
+    wanted = read_sidecar(nifti.with_name(f"{stem}.json")).get("SeriesNumber")
+    for folder in candidates:
+        tags = read_dicom_header(folder)
+        if wanted is not None and str(tags.get("SeriesNumber")) == str(wanted):
+            return folder, tags, ""
+    return (
+        None,
+        {},
+        f"{len(candidates)} DICOM series could be this run; not guessed "
+        "(sidecar has no matching SeriesNumber)",
+    )
+
+
 def add_dicom_values(runs: list[ScanRun], dicom_root: Path, bids_root: Path) -> None:
     """Read each run's DICOM series: fill the parameters the header and sidecar lack."""
     if not runs:
         return
     stems = dicom_series(dicom_root, bids_root, runs[0].subject)
     for run in runs:
-        stem = run.nifti.name.removesuffix(".nii.gz")
-        candidates = stems.get(stem, [])
-        tags: dict[str, object] = {}
-        if not candidates:
-            run.dicom_note = "no DICOM series found"
+        series, tags, why_not = series_of_run(run.nifti, stems)
+        if series is None:
+            run.dicom_note = why_not
             continue
-        if len(candidates) == 1:
-            series = candidates[0]
-            tags = read_dicom_header(series)
-        else:  # picked at crosscheck: the sidecar's series number tells which
-            wanted = read_sidecar(run.sidecar).get("SeriesNumber")
-            series, tags = None, {}
-            for folder in candidates:
-                folder_tags = read_dicom_header(folder)
-                if wanted is not None and str(folder_tags.get("SeriesNumber")) == str(wanted):
-                    series, tags = folder, folder_tags
-                    break
-            if series is None:
-                run.dicom_note = (
-                    f"{len(candidates)} DICOM series could be this run; not guessed "
-                    "(sidecar has no matching SeriesNumber)"
-                )
-                continue
         if not tags:
             run.dicom_note = f"{series.name}: no readable DICOM file"
             continue

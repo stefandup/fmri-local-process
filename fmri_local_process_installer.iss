@@ -18,6 +18,10 @@
 #ifndef DefaceImage
   #define DefaceImage "philani_fmri_process:latest"
 #endif
+; Passed by build.ps1 from processing/mriqc.py's MRIQC_IMAGE: the toolbox's Scan quality tab.
+#ifndef MriqcImage
+  #define MriqcImage "nipreps/mriqc:24.0.2"
+#endif
 
 [Setup]
 ; Three "{" here, not two: the preprocessor substitutes {#MyAppId} before Inno's own "{{"
@@ -158,7 +162,7 @@ begin
 end;
 
 // ---- Docker and tools page --------------------------------------------------------------
-// One checklist: Docker Desktop, the C-PAC image, and the T1w defacer image. Anything already
+// One checklist: Docker Desktop, the C-PAC image, the MRIQC image and the T1w defacer image. Anything already
 // on this PC is shown as OK and greyed out (the defacer stays tickable, to rebuild/switch it).
 
 function DockerAnswers(): Boolean;
@@ -196,8 +200,8 @@ var
   ToolsPage: TWizardPage;
   ToolsList: TNewCheckListBox;
   DefaceFilesPage: TInputDirWizardPage;
-  HaveDocker, DockerRunning, HaveCpac, HaveDefacer: Boolean;
-  ItemDocker, ItemCpac, ItemDefacer: Integer;
+  HaveDocker, DockerRunning, HaveCpac, HaveMriqc, HaveDefacer: Boolean;
+  ItemDocker, ItemCpac, ItemMriqc, ItemDefacer: Integer;
   ItemRadio: array[0..2] of Integer;
 
 function WantDockerInstall(): Boolean;
@@ -208,6 +212,11 @@ end;
 function WantCpac(): Boolean;
 begin
   Result := (not HaveCpac) and ToolsList.Checked[ItemCpac];
+end;
+
+function WantMriqc(): Boolean;
+begin
+  Result := (not HaveMriqc) and ToolsList.Checked[ItemMriqc];
 end;
 
 function WantDefacer(): Boolean;
@@ -232,9 +241,10 @@ begin
   HaveDocker := DockerInstalled();
   DockerRunning := HaveDocker and DockerAnswers();
   HaveCpac := DockerRunning and ImagePresent('{#CpacImage}');
+  HaveMriqc := DockerRunning and ImagePresent('{#MriqcImage}');
   HaveDefacer := DockerRunning and ImagePresent('{#DefaceImage}');
 
-  Intro := 'Preprocessing (fmri_preprocess) and T1w defacing run in Docker. Tick what to set '
+  Intro := 'Preprocessing (C-PAC), scan quality checks (MRIQC) and T1w defacing run in Docker. Tick what to set '
     + 'up now; everything can be skipped and done later by re-running this installer.';
   if HaveDocker and not DockerRunning then
     Intro := Intro + ' Docker Desktop is not running, so it can''t tell which images are '
@@ -269,6 +279,13 @@ begin
   else
     Caption := 'Download C-PAC ({#CpacImage}, ~15 GB; 30-90+ minutes)';
   ItemCpac := ToolsList.AddCheckBox(Caption, '', 0, not HaveCpac, not HaveCpac, False, True, nil);
+
+  if HaveMriqc then
+    Caption := 'MRIQC ({#MriqcImage}): downloaded - OK'
+  else
+    Caption := 'Download MRIQC ({#MriqcImage}, ~5 GB; checks scan quality before preprocessing)';
+  ItemMriqc := ToolsList.AddCheckBox(Caption, '', 0, not HaveMriqc, not HaveMriqc, False, True,
+    nil);
 
   if HaveDefacer then
     Caption := 'T1w defacer ({#DefaceImage}): built - OK. Tick to rebuild it with:'
@@ -345,9 +362,14 @@ function DownloadEstimate(): String;
 begin
   if HaveCpac then
     Result := '- C-PAC: already downloaded'
-  else
+  else if WantCpac() or WantDefacer() then
     Result := '- C-PAC ({#CpacImage}): ~15 GB unpacked, 30-90+ minutes (skipped if already '
-      + 'downloaded)';
+      + 'downloaded)'
+  else
+    Result := '- C-PAC: skipped';
+  if WantMriqc() then
+    Result := Result + #13#10'- MRIQC ({#MriqcImage}): ~5 GB, 15-45+ minutes (skipped if '
+      + 'already downloaded)';
   if WantDefacer() then
     case SelectedDefacer() of
       DEFACER_FREESURFER: Result := Result + #13#10'- FreeSurfer: another ~5 GB download, '
@@ -397,6 +419,11 @@ begin
   Script := ExpandConstant('{app}\docker\setup_docker_image.ps1');
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' + Script + '" -Defacer ' + DefacerArg()
     + ' -CpacImage "{#CpacImage}" -Image "{#DefaceImage}"';
+  if WantMriqc() then
+    Params := Params + ' -Mriqc -MriqcImage "{#MriqcImage}"';
+  // C-PAC already here or unticked: skip it (a defacer is built on it, so not then).
+  if (not WantCpac()) and (not WantDefacer()) then
+    Params := Params + ' -NoCpac';
   if WantDefacer() and (SelectedDefacer() = DEFACER_LOCAL) then
     Params := Params + ' -DefaceFiles ' + QuotedDir(DefaceFilesPage.Values[0]);
 
@@ -437,7 +464,7 @@ begin
     if WantDockerInstall() then
       InstallDocker();
     // A defacer image is built on C-PAC, so the script also downloads C-PAC when needed.
-    if WantCpac() or WantDefacer() then
+    if WantCpac() or WantDefacer() or WantMriqc() then
       SetupDockerImages();
   end;
 end;

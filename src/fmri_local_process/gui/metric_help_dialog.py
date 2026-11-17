@@ -1,9 +1,10 @@
-"""Metric formulas: every First-level stats metric with its equation (rendered by matplotlib's
-mathtext in Computer Modern, so no LaTeX install is needed), what it means, and references
-that open in the browser."""
+"""Metric formulas: every metric of a tab's table with its equation (rendered by matplotlib's
+mathtext in Computer Modern, so no LaTeX install is needed), what it means, typical values
+where known, and references that open in the browser. Used by First-level stats and MRIQC."""
 
 import html
 import io
+from collections.abc import Sequence
 
 import matplotlib
 from matplotlib import mathtext
@@ -33,16 +34,18 @@ def anchor(doc: MetricDoc) -> str:
     return "m-" + "".join(c if c.isalnum() else "-" for c in doc.title.lower())
 
 
-def help_html(images: dict[str, str]) -> str:
+FIRST_LEVEL_HEADING = "How the First-level stats metrics are calculated"
+
+
+def help_html(
+    images: dict[str, str],
+    docs: Sequence[MetricDoc] = METRIC_DOCS,
+    heading: str = FIRST_LEVEL_HEADING,
+) -> str:
     """The page; images maps each equation to the resource URL its PNG is under."""
-    contents = " · ".join(
-        f'<a href="#{anchor(doc)}">{html.escape(doc.title)}</a>' for doc in METRIC_DOCS
-    )
-    parts = [
-        "<h2>How the First-level stats metrics are calculated</h2>",
-        f"<p>{contents}</p>",
-    ]
-    for doc in METRIC_DOCS:
+    contents = " · ".join(f'<a href="#{anchor(doc)}">{html.escape(doc.title)}</a>' for doc in docs)
+    parts = [f"<h2>{html.escape(heading)}</h2>", f"<p>{contents}</p>"]
+    for doc in docs:
         parts.append(f'<h3><a name="{anchor(doc)}"></a>{html.escape(doc.title)}</h3>')
         if doc.rows:
             rows = ", ".join(f"<i>{html.escape(r)}</i>" for r in doc.rows)
@@ -50,6 +53,8 @@ def help_html(images: dict[str, str]) -> str:
         for tex in doc.equations:
             parts.append(f'<p style="margin-left:24px"><img src="{images[tex]}"></p>')
         parts.append(f"<p>{html.escape(doc.text)}</p>")
+        if doc.typical:
+            parts.append(f"<p><b>Typical values:</b> {html.escape(doc.typical)}</p>")
         if doc.refs:
             refs = "".join(
                 f'<li>{html.escape(ref.text)} <a href="{ref.url}">{html.escape(ref.url)}</a></li>'
@@ -60,9 +65,15 @@ def help_html(images: dict[str, str]) -> str:
 
 
 class MetricHelpDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        docs: Sequence[MetricDoc] = METRIC_DOCS,
+        heading: str = FIRST_LEVEL_HEADING,
+        title: str = "Metric formulas",
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Metric formulas")
+        self.setWindowTitle(title)
         self.resize(820, 760)
         layout = QVBoxLayout(self)
         self.browser = QTextBrowser()
@@ -70,7 +81,7 @@ class MetricHelpDialog(QDialog):
         text_color = self.palette().color(QPalette.ColorRole.Text).name()
         images: dict[str, str] = {}
         document = self.browser.document()
-        for doc in METRIC_DOCS:
+        for doc in docs:
             for tex in doc.equations:
                 if tex in images:
                     continue
@@ -80,7 +91,7 @@ class MetricHelpDialog(QDialog):
                 image.setDevicePixelRatio(FORMULA_DPI / 96)
                 document.addResource(QTextDocument.ResourceType.ImageResource, QUrl(url), image)
                 images[tex] = url
-        self.browser.setHtml(help_html(images))
+        self.browser.setHtml(help_html(images, docs, heading))
         layout.addWidget(self.browser)
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         close.rejected.connect(self.reject)

@@ -83,6 +83,9 @@ def show_message(splash: QSplashScreen, text: str) -> None:
 
 
 def launch(start_tab: str | None = None) -> None:
+    # Qt's web engine (the MRIQC tab's report view, started later) needs this set before
+    # the application exists.
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     splash = QSplashScreen(splash_pixmap())
     splash.show()

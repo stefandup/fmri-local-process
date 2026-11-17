@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
 from fmri_local_process.gui.qt_common import (
     PROCESS_ACCENT_COLOR,
     PROCESS_ACCENT_HOVER_COLOR,
+    NoticeBanner,
     primary_action_stylesheet,
     style_secondary_label,
     wrap_tooltip,
@@ -130,6 +131,8 @@ class FirstLevelPage(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addLayout(self._build_controls())
+        self.banner = NoticeBanner()
+        layout.addWidget(self.banner)
         layout.addWidget(self._build_design())
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_regions())
@@ -364,12 +367,20 @@ class FirstLevelPage(QWidget):
         self.subject_box.addItems(subjects)
         if current in subjects:
             self.subject_box.setCurrentText(current)
+        notices = []
         if output is None:
-            self.status.setText("Choose the C-PAC output folder on the Preprocess tab.")
+            notices.append(
+                "No C-PAC output folder chosen: choose it on the Preprocess BIDS (C-PAC) tab."
+            )
         elif not subjects:
-            self.status.setText(f"No preprocessed task-{self.setup.task} runs in {output}.")
-        else:
-            self.status.setText(f"{len(subjects)} subject(s) with task-{self.setup.task}.")
+            notices.append(
+                f"No preprocessed task-{self.setup.task} runs in {output}: preprocess them on "
+                "the Preprocess BIDS (C-PAC) tab first."
+            )
+        self.banner.set_messages(notices)
+        self.status.setText(
+            f"{len(subjects)} subject(s) with task-{self.setup.task}." if subjects else ""
+        )
         self.run_button.setEnabled(bool(subjects))
 
     def on_fetch_atlases(self) -> None:

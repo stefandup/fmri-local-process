@@ -39,7 +39,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QSpinBox,
     QSplitter,
@@ -51,6 +50,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fmri_local_process.gui.docker_controls import (
+    DOCKER_RECHECK_MS,
+    DockerControlThread,
+    DockerStatus,
+)
+from fmri_local_process.gui.image_download import ImageDownload
 from fmri_local_process.gui.image_view import (
     HelpToggle,
     PreviewPicker,
@@ -69,6 +74,7 @@ from fmri_local_process.gui.qt_common import (
     SETTINGS_ORGANIZATION,
     UNKNOWN_COLOR,
     WARNING_COLOR,
+    NoticeBanner,
     accent_group_box_stylesheet,
     default_browse_dir,
     paths_conflict,
@@ -79,6 +85,7 @@ from fmri_local_process.gui.qt_common import (
     style_secondary_label,
     wrap_tooltip,
 )
+from fmri_local_process.gui.run_progress import RunningSubject, RunProgress
 from fmri_local_process.processing.brain_slices import SlicePreview, render_slices, slice_previews
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
@@ -97,7 +104,6 @@ from fmri_local_process.processing.cpac_docker import (
     bold_sessions,
     clear_subject_results,
     clear_working_volume,
-    docker_desktop,
     docker_memory_gb,
     docker_resources,
     explain_failure,
@@ -141,7 +147,6 @@ TASK_LIST_HEIGHT = 96  # ~4 rows; more tasks scroll
 SUMMARY_MIN_WIDTH = 200
 LOG_TAIL_LINES = 400
 MAX_MISSING_SHOWN = 12
-DOCKER_RECHECK_MS = 30_000
 SLICE_CACHE_SIZE = 40  # rendered slice previews kept (~3 MB each)
 STATUS_ICON = {
     "done": ("✓", OK_COLOR),
@@ -152,7 +157,6 @@ STATUS_ICON = {
     "running": ("▶", RUNNING_COLOR),
     "not run": ("○", UNKNOWN_COLOR),
 }
-SPINNER = "◐◓◑◒"
 STATUS_LEGEND = (
     "✓ every session has a preprocessed BOLD (of each ticked task) and every output C-PAC "
     "expected\n"
@@ -191,13 +195,6 @@ class RunSettings:
     parallel: int = 1  # subjects at once, each in its own container
     hang: HangPolicy = field(default_factory=HangPolicy)
     keep_working: bool = False  # keep a finished subject's working folder in Docker
-
-
-@dataclass
-class RunningSubject:
-    started_at: float
-    steps: int = 0
-    last_step: str = ""
 
 
 @dataclass
@@ -373,32 +370,20 @@ class PreprocessThread(QThread):
             self.message.emit(f"docker pull: {text}", False)
 
 
-class DockerControlThread(QThread):
-    """Starts / restarts Docker Desktop off the GUI thread (takes up to a minute or two)."""
-
-    done = Signal(str, str)  # action, error ("" when it worked)
-
-    def __init__(self, action: str) -> None:
-        super().__init__()
-        self.action = action
-
-    def run(self) -> None:
-        self.done.emit(self.action, docker_desktop(self.action) or "")
-
-
 class MemoryProbeThread(QThread):
     """Asks Docker for its memory and CPU limits off the GUI thread (slow when Docker is
     starting)."""
 
-    done = Signal(object, object, str)  # Docker's GB or None, its CPUs or None, why unknown
+    # Docker's GB or None, its CPUs or None, why unknown, whether the C-PAC image is here
+    done = Signal(object, object, str, object)
 
     def run(self) -> None:
         try:
             docker = find_docker()
         except DockerUnavailableError as e:
-            self.done.emit(None, None, str(e))
+            self.done.emit(None, None, str(e), None)
             return
-        self.done.emit(*docker_resources(docker), "")
+        self.done.emit(*docker_resources(docker), "", image_present(docker, CPAC_IMAGE))
 
 
 def read_log_tail(path: Path, n_lines: int = LOG_TAIL_LINES) -> str:
@@ -441,9 +426,9 @@ class PreprocessWindow(QMainWindow):
         self.docker_gb: float | None = None
         self.docker_cpus: int | None = None
         self.docker_error = ""
+        self.cpac_missing = False  # Docker runs, but the C-PAC image isn't downloaded
         self.memory_probed = False
         self.suggest_pending = False  # 'Suggest' waits for a fresh look at Docker's limits
-        self.docker_control: DockerControlThread | None = None
         # Untick-list rather than tick-list, so newly found subjects start ticked.
         self.unticked: set[str] = set()
         self.unticked_tasks: set[str] = set()
@@ -457,6 +442,8 @@ class PreprocessWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root_layout = QVBoxLayout(central)
+        self.banner = NoticeBanner()
+        root_layout.addWidget(self.banner)
 
         # Everything above the subjects and their outputs, in one widget so "Expand" can hide
         # it and give the outputs the whole height.
@@ -680,25 +667,28 @@ class PreprocessWindow(QMainWindow):
         style_secondary_label(self.memory_label)
         layout.addWidget(self.memory_label)
 
-        docker_row = QHBoxLayout()
-        self.docker_label = QLabel("Checking Docker...")
-        self.docker_label.setWordWrap(True)
-        style_secondary_label(self.docker_label)
-        docker_row.addWidget(self.docker_label, 1)
-        self.docker_start_button = QPushButton("Start Docker")
-        self.docker_start_button.setToolTip("Runs 'docker desktop start'.")
-        self.docker_start_button.clicked.connect(partial(self._on_docker_action, "start"))
-        docker_row.addWidget(self.docker_start_button)
-        self.docker_restart_button = QPushButton("Restart Docker")
-        self.docker_restart_button.setToolTip(
-            wrap_tooltip(
-                "Runs 'docker desktop restart'. Clears Docker's file sharing when C-PAC fails "
-                "with 'Input/output error'. Stops any running container."
-            )
+        self.docker_status = DockerStatus(
+            "Clears Docker's file sharing when C-PAC fails with 'Input/output error'."
         )
-        self.docker_restart_button.clicked.connect(partial(self._on_docker_action, "restart"))
-        docker_row.addWidget(self.docker_restart_button)
-        layout.addLayout(docker_row)
+        self.docker_status.action_started.connect(
+            lambda action: self._log_activity(f"Docker: running 'docker desktop {action}'...")
+        )
+        self.docker_status.action_done.connect(self._on_docker_action_done)
+        self.docker_label = self.docker_status.label
+        self.docker_start_button = self.docker_status.start_button
+        self.docker_restart_button = self.docker_status.restart_button
+        layout.addWidget(self.docker_status)
+        self.cpac_download = ImageDownload(
+            CPAC_IMAGE,
+            "the C-PAC image",
+            "~15 GB",
+            remove_note="The T1w defacer image (if set up) is built on C-PAC and keeps most of "
+            "its layers, so less space is freed while it is there.",
+            settings=self.settings,
+        )
+        self.cpac_download.finished.connect(self._on_cpac_downloaded)
+        self.cpac_download.removed.connect(self._on_cpac_removed)
+        layout.addWidget(self.cpac_download)
         # Re-check now and then, so the warning clears (or appears) without a restart.
         self.docker_timer = QTimer(self)
         self.docker_timer.setInterval(DOCKER_RECHECK_MS)
@@ -791,15 +781,10 @@ class PreprocessWindow(QMainWindow):
         return group
 
     def _build_run_group(self) -> QGroupBox:
-        """Large progress panel, shown only while a batch runs."""
-        group = QGroupBox("Running")
-        group.setStyleSheet(accent_group_box_stylesheet(PROCESS_ACCENT_COLOR))
-        layout = QVBoxLayout(group)
-        head = QHBoxLayout()
-        self.run_title = QLabel()
-        style_name_label(self.run_title)
-        self.run_title.setStyleSheet(f"color: {PROCESS_ACCENT_COLOR};")
-        head.addWidget(self.run_title, 1)
+        """Large progress panel (gui/run_progress.py), shown only while a batch runs."""
+        self.progress = RunProgress()
+        self.run_title = self.progress.title_label
+        self.running = self.progress.running  # one dict: the panel clears it, never replaces
         self.stop_button = QPushButton("Stop after running subject(s)")
         self.stop_button.setToolTip(
             "Lets the running subject(s) finish and starts no new ones; C-PAC can't be cut "
@@ -816,36 +801,10 @@ class PreprocessWindow(QMainWindow):
             )
         )
         self.stop_now_button.clicked.connect(self._on_stop_now)
-        head.addWidget(self.stop_button)
-        head.addWidget(self.stop_now_button)
-        layout.addLayout(head)
-
-        self.step_bar = QProgressBar()
-        self.step_bar.setMinimumHeight(30)
-        bar_font = self.step_bar.font()
-        bar_font.setPointSize(bar_font.pointSize() + 3)
-        bar_font.setBold(True)
-        self.step_bar.setFont(bar_font)
-        self.step_bar.setStyleSheet(
-            f"QProgressBar::chunk {{ background-color: {PROCESS_ACCENT_COLOR}; }}"
-            "QProgressBar { text-align: center; }"
-        )
-        layout.addWidget(self.step_bar)
-        self.last_step_label = QLabel()
-        style_secondary_label(self.last_step_label)
-        layout.addWidget(self.last_step_label)
-        self.subject_bar = QProgressBar()
-        layout.addWidget(self.subject_bar)
-
-        self.spinner_index = 0
-        self.spinner_timer = QTimer(self)
-        self.spinner_timer.setInterval(150)
-        self.spinner_timer.timeout.connect(self._update_run_title)
-        self.step_estimate: int | None = None
-        self.run_stage = ""
-        group.setVisible(False)
-        self.run_group = group
-        return group
+        self.progress.add_button(self.stop_button)
+        self.progress.add_button(self.stop_now_button)
+        self.run_group = self.progress
+        return self.progress
 
     def _build_output_group(self) -> QGroupBox:
         group = QGroupBox("Output Folder")
@@ -1111,9 +1070,35 @@ class PreprocessWindow(QMainWindow):
             if subject in selected:
                 self.subject_table.selectRow(row)
         self.subject_table.blockSignals(False)
+        self._update_banner()
         self._refresh_summary()
         self._update_buttons()
         self._render_detail()
+
+    def _update_banner(self) -> None:
+        self.banner.set_messages(self._notices(bool(self._ticked_tasks())))
+
+    def _notices(self, ticked_any: bool) -> list[str]:
+        """What is missing to preprocess: folders, BOLD runs, ticked tasks, the C-PAC image."""
+        messages = []
+        if self.cpac_missing:
+            messages.append(
+                f"The C-PAC image ({CPAC_IMAGE}, ~15 GB) isn't downloaded yet: click "
+                "'Download the C-PAC image' below (once per computer), or tick C-PAC in the "
+                "installer."
+            )
+        if self.bids_folder is None:
+            messages.append("No BIDS folder chosen: Browse for it below.")
+        elif not self._all_task_labels():
+            messages.append(
+                f"No BOLD runs in {self.bids_folder} yet: convert the DICOMs on the Setup & "
+                "Convert to BIDS tab first."
+            )
+        elif not ticked_any:
+            messages.append("No task ticked: tick the BOLD tasks to preprocess below.")
+        if self.output_folder is None:
+            messages.append("No C-PAC output folder chosen: Browse for one below.")
+        return messages
 
     def _status_item(self, status: str) -> QTableWidgetItem:
         icon, color = STATUS_ICON[status]
@@ -1154,13 +1139,21 @@ class PreprocessWindow(QMainWindow):
         return [self.subjects[row] for row in rows if row < len(self.subjects)]
 
     def _on_memory_probed(
-        self, docker_gb: float | None, docker_cpus: int | None, docker_error: str
+        self,
+        docker_gb: float | None,
+        docker_cpus: int | None,
+        docker_error: str,
+        has_image: bool | None = None,  # None: unknown
     ) -> None:
         self.memory_probe.wait()
         self.docker_gb = docker_gb
         self.docker_cpus = docker_cpus
         self.docker_error = docker_error
+        self.cpac_missing = has_image is False
         self.memory_probed = True
+        self.cpac_download.set_present(has_image)
+        self._update_banner()
+        self._update_buttons()
         if self.suggest_pending:
             self.suggest_pending = False
             if docker_gb is not None:  # fresh limits: fill in again from them
@@ -1174,33 +1167,37 @@ class PreprocessWindow(QMainWindow):
             return
         self.memory_probe.start()
 
+    @property
+    def docker_control(self) -> DockerControlThread | None:
+        """A Docker start / restart in progress, if any."""
+        return self.docker_status.control
+
     def _update_docker_label(self) -> None:
-        if self.docker_control is not None:
-            text = f"Docker: '{self.docker_control.action}' in progress (up to a few minutes)..."
-            color = RUNNING_COLOR
-        elif self.docker_error:
-            text, color = f"⚠ Docker isn't running: {self.docker_error}", ERROR_COLOR
+        warning = (
+            "Docker is running, but the C-PAC image isn't downloaded yet (below)."
+            if self.cpac_missing
+            else ""
+        )
+        self.docker_status.show_state(not self.docker_error, self.docker_error, warning)
+
+    def _on_cpac_downloaded(self, error: str) -> None:
+        if error:
+            self._log_activity(f"C-PAC download stopped: {error}", True)
         else:
-            text, color = "✓ Docker is running.", OK_COLOR
-        self.docker_label.setText(text)
-        self.docker_label.setStyleSheet(f"color: {color};")
-        busy = self.docker_control is not None
-        self.docker_start_button.setEnabled(not busy and bool(self.docker_error))
-        self.docker_restart_button.setEnabled(not busy)
+            self._log_activity(f"C-PAC image {CPAC_IMAGE} downloaded.")
+        self._probe_docker()
+
+    def _on_cpac_removed(self, error: str) -> None:
+        if error:
+            self._log_activity(f"C-PAC image not removed: {error}", True)
+        else:
+            self._log_activity(f"C-PAC image {CPAC_IMAGE} removed.")
+        self._probe_docker()
 
     def _on_docker_action(self, action: str) -> None:
-        if self.docker_control is not None:
-            return
-        self._log_activity(f"Docker: running 'docker desktop {action}'...")
-        self.docker_control = DockerControlThread(action)
-        self.docker_control.done.connect(self._on_docker_action_done)
-        self._update_docker_label()
-        self.docker_control.start()
+        self.docker_status.run(action)
 
     def _on_docker_action_done(self, action: str, error: str) -> None:
-        if self.docker_control is not None:
-            self.docker_control.wait()
-        self.docker_control = None
         if error:
             self._log_activity(f"Docker {action} failed: {error}", True)
         else:
@@ -1309,12 +1306,22 @@ class PreprocessWindow(QMainWindow):
         self.subject_table.blockSignals(False)
         n_ticked = len(self._ticked_subjects())
         self.process_button.setText(f"Preprocess {n_ticked} ticked subject(s)")
+        self.cpac_download.set_locked("" if idle else "C-PAC is running")
+        no_image = self.cpac_missing or self.cpac_download.busy
         self.process_button.setEnabled(
-            idle and n_ticked > 0 and self.output_folder is not None and not self.external_lock
+            idle
+            and n_ticked > 0
+            and self.output_folder is not None
+            and not self.external_lock
+            and not no_image
         )
-        self.process_button.setToolTip(
-            f"Locked: {self.external_lock}." if self.external_lock else ""
-        )
+        if self.external_lock:
+            tip = f"Locked: {self.external_lock}."
+        elif no_image:
+            tip = "Download the C-PAC image first (button above)."
+        else:
+            tip = ""
+        self.process_button.setToolTip(tip)
         self._update_memory_label()  # the suggestion depends on how many are ticked
 
     # ---- detail pane -------------------------------------------------------------------------
@@ -1626,19 +1633,9 @@ class PreprocessWindow(QMainWindow):
             f"Preprocessing {len(subjects)} subject(s), {what}{at_once}, "
             f"{run.n_cpus} CPU(s), {run.mem_gb:g} GB each..."
         )
-        self.run_stage = "Checking Docker..."
-        self.running.clear()
-        self.step_estimate = int(str(self.settings.value(self._estimate_key(), 0))) or None
-        self.step_bar.setRange(0, 0)
-        self.last_step_label.setText("")
-        self.subject_bar.setRange(0, len(subjects))
-        self.subject_bar.setValue(0)
-        self.subject_bar.setFormat("Subjects: %v of %m done")
+        self.progress.start(len(subjects), self._saved_estimate(), "Checking Docker...")
         self.stop_button.setEnabled(True)
         self.stop_now_button.setEnabled(True)
-        self.run_group.setVisible(True)
-        self.spinner_timer.start()
-        self._update_run_title()
         self._update_buttons()
         self.worker.start()
         self.running_changed.emit(True)
@@ -1660,40 +1657,9 @@ class PreprocessWindow(QMainWindow):
     def _estimate_key(self) -> str:
         return f"steps_per_subject/{'+'.join(self._tasks()) or 'all'}"
 
-    def _step_count(self, steps: int) -> str:
-        return f"step {steps} of ~{self.step_estimate}" if self.step_estimate else f"step {steps}"
-
-    def _update_run_title(self) -> None:
-        self.spinner_index = (self.spinner_index + 1) % len(SPINNER)
-        spinner = SPINNER[self.spinner_index]
-        if not self.running:
-            self.run_title.setText(f"{spinner}  {self.run_stage}")
-        elif len(self.running) == 1:
-            subject, state = next(iter(self.running.items()))
-            self.run_title.setText(f"{spinner}  sub-{subject}  -  {self._step_count(state.steps)}")
-        else:
-            names = ", ".join(f"sub-{subject}" for subject in self.running)
-            self.run_title.setText(f"{spinner}  {len(self.running)} at once: {names}")
-
-    def _update_step_bar(self) -> None:
-        """One subject: its steps; several: their average (against the last run's count)."""
-        if not self.running:
-            return
-        if not self.step_estimate:
-            self.step_bar.setRange(0, 0)  # first run: busy bar; the title shows steps
-        else:
-            mean = sum(state.steps for state in self.running.values()) // len(self.running)
-            self.step_bar.setRange(0, max(self.step_estimate, mean + 1))
-            self.step_bar.setValue(mean)
-            average = " on average" if len(self.running) > 1 else ""
-            self.step_bar.setFormat(f"%p%{average}  (estimated from the last complete run)")
-        self.last_step_label.setText(
-            "\n".join(
-                f"sub-{subject}: {self._step_count(state.steps)}"
-                f"{f' - last finished: {state.last_step}' if state.last_step else ''}"
-                for subject, state in self.running.items()
-            )
-        )
+    def _saved_estimate(self) -> int | None:
+        """Steps the last complete run of a subject took (with these tasks), if known."""
+        return int(str(self.settings.value(self._estimate_key(), 0))) or None
 
     def _on_stop(self) -> None:
         if self.worker is not None:
@@ -1716,39 +1682,27 @@ class PreprocessWindow(QMainWindow):
             return
         self.stop_button.setEnabled(False)
         self.stop_now_button.setEnabled(False)
-        self.run_stage = "Stopping..."
+        self.progress.set_stage("Stopping...")
         self._log_activity("Stopping the running C-PAC container(s) now...")
         threading.Thread(target=worker.stop_now, daemon=True).start()  # docker takes ~10 s
 
     def _on_subject_started(self, _index: int, _total: int, subject: str) -> None:
         if not self.running:  # re-read: the last subject may have just saved a new count
-            self.step_estimate = int(str(self.settings.value(self._estimate_key(), 0))) or None
-        self.running[subject] = RunningSubject(time.monotonic())
+            self.progress.estimate = self._saved_estimate()
+        self.progress.subject_started(subject)
         self._set_status(subject, "running")
-        self._update_step_bar()
-        self._update_run_title()
         self._update_live_line()
 
     def _on_step(self, subject: str, node: str, steps_done: int) -> None:
-        state = self.running.get(subject)
-        if state is None:
-            return
-        state.steps, state.last_step = steps_done, node
-        self._update_step_bar()
-        self._update_run_title()
+        self.progress.step(subject, steps_done, node)
         self._update_live_line()
 
     def _on_subject_finished(self, subject: str, steps_done: int, preprocessed: bool) -> None:
         if preprocessed and steps_done:
             self.settings.setValue(self._estimate_key(), steps_done)
-        self.running.pop(subject, None)
+        self.progress.subject_finished(subject)
         self._update_live_line()  # the thread's result line replaces this subject's
-        if not self.running:
-            self.run_stage = "Next subject..."
         self._set_status(subject, self._subject_status(subject))
-        self.subject_bar.setValue(self.subject_bar.value() + 1)
-        self._update_step_bar()
-        self._update_run_title()
         if self._selected_subjects() == [subject]:
             self._render_detail()
 
@@ -1756,10 +1710,8 @@ class PreprocessWindow(QMainWindow):
         if self.worker is not None:
             self.worker.wait()
         self.worker = None
-        self.running.clear()
+        self.progress.finish()
         self._set_live_line(None)
-        self.spinner_timer.stop()
-        self.run_group.setVisible(False)
         self._update_buttons()
         self.running_changed.emit(False)
         if isinstance(result, str):
@@ -1809,11 +1761,11 @@ class PreprocessWindow(QMainWindow):
         for subject, state in self.running.items():
             elapsed = int(time.monotonic() - state.started_at)
             count = f"step {state.steps}"
-            if self.step_estimate:
-                percent = min(99, 100 * state.steps // self.step_estimate)
-                count += f" of ~{self.step_estimate} ({percent}%)"
-            spinner = SPINNER[self.spinner_index]
-            text = f"{spinner} BUSY sub-{subject}: {count}, {elapsed // 60}m{elapsed % 60:02d}s"
+            if estimate := self.progress.estimate:
+                percent = min(99, 100 * state.steps // estimate)
+                count += f" of ~{estimate} ({percent}%)"
+            took = f"{elapsed // 60}m{elapsed % 60:02d}s"
+            text = f"{self.progress.spinner} BUSY sub-{subject}: {count}, {took}"
             lines.append(f"{text} - {state.last_step or 'starting container'}")
         self._set_live_line("\n".join(lines) or None)
 
@@ -1821,8 +1773,7 @@ class PreprocessWindow(QMainWindow):
         if self.worker is None:
             self.docker_timer.stop()
             self.memory_probe.wait()  # seconds at most; a running QThread can't be destroyed
-            if self.docker_control is not None:
-                self.docker_control.wait()
+            self.docker_status.wait()
             event.accept()
             return
         box = QMessageBox(self)

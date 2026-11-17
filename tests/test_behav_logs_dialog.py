@@ -104,6 +104,80 @@ def test_view_events_mark_and_pick_one_of_the_day(tmp_path: Path) -> None:
     assert saved[TYPO] == bm.Correction(review=bm.REVIEW_ERROR, note="empty file")
 
 
+def test_select_several_logs_and_mark_them_crosschecked(tmp_path: Path) -> None:
+    from PySide6.QtCore import QItemSelectionModel
+
+    dialog, bids, rows = open_dialog(tmp_path)
+    assert bm.needs_review(dialog.matches[rows[TYPO]])
+    dialog.table.selectRow(rows[GOOD])
+    dialog.table.selectionModel().select(
+        dialog.table.model().index(rows[TYPO], 0),
+        QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
+    )
+    assert dialog.mark_button.text() == "Mark 2 crosschecked"
+    assert not dialog.ok_button.isEnabled()  # verdicts stay one log at a time
+    assert not dialog.unmark_button.isEnabled()
+
+    dialog.set_crosschecked(True)
+    assert not bm.needs_review(dialog.matches[rows[TYPO]])
+    verdict = dialog.table.item(rows[TYPO], 6)
+    assert verdict is not None and verdict.text().startswith("☑")
+    assert len(dialog.selected_matches()) == 2  # still selected: can un-mark straight away
+    assert dialog.unmark_button.isEnabled() and not dialog.mark_button.isEnabled()
+    dialog.save()
+    saved = bm.read_corrections(bids)
+    assert saved[GOOD] == bm.Correction(crosschecked=True)
+    assert saved[TYPO].crosschecked and RESTART not in saved
+
+    dialog.table.selectRow(rows[GOOD])
+    dialog.set_crosschecked(False)
+    dialog.save()
+    assert GOOD not in bm.read_corrections(bids)
+
+
+def test_select_several_scan_sessions_and_mark_them_crosschecked(tmp_path: Path) -> None:
+    from fmri_local_process.gui.behav_logs_dialog import S_CHECKED
+    from fmri_local_process.processing import philani_bids as pb
+
+    dialog, bids, _ = open_dialog(tmp_path)
+    table = dialog.session_table
+    assert not dialog.mark_sessions_button.isEnabled()  # nothing selected yet
+    table.selectAll()
+    assert dialog.mark_sessions_button.text() == "Mark 2 crosschecked"
+    assert not dialog.unmark_sessions_button.isEnabled()
+
+    dialog.set_folders_checked(True)
+    assert [table.item(r, S_CHECKED).text() for r in range(2)] == ["☑", "☑"]  # pyright: ignore[reportOptionalMemberAccess]
+    assert dialog.unmark_sessions_button.isEnabled()
+    assert not dialog.mark_sessions_button.isEnabled()
+    dialog.save()
+    assert pb.read_crosschecked_folders(bids) == set(SESSION_DIRS)
+
+    table.selectRow([f.name for f, _ in dialog.scanned].index(SESSION_DIRS[0]))
+    dialog.set_folders_checked(False)
+    dialog.save()
+    assert pb.read_crosschecked_folders(bids) == {SESSION_DIRS[1]}
+    reopened = BehavLogsPanel(bids, tmp_path / "behav", tmp_path / "dicom", None)
+    assert reopened.checked_folders == {SESSION_DIRS[1]}  # read back from the BIDS folder
+
+
+def test_export_destinations_and_into_bids_leaves_unplaced_out(tmp_path: Path) -> None:
+    from fmri_local_process.gui.behav_logs_dialog import INTO_BIDS, INTO_OTHER, INTO_OUTPUT
+    from fmri_local_process.processing.behav_export import BIDS_LAYOUT, export_events
+
+    dialog, bids, _ = open_dialog(tmp_path)
+    assert list(dialog.export_destinations().values()) == [INTO_BIDS, INTO_OTHER]
+    dialog.output_root = tmp_path / "cpac_out"
+    assert list(dialog.export_destinations().values()) == [INTO_BIDS, INTO_OUTPUT, INTO_OTHER]
+    dialog.bids_locked = True  # view-only package
+    assert INTO_BIDS not in dialog.export_destinations().values()
+
+    # GOOD and RESTART are rival logs for one session: neither placed yet.
+    report = export_events(dialog.matches, bids, BIDS_LAYOUT, skip_unplaced=True)
+    assert report.written == [] and not (bids / "unplaced").exists()
+    assert {why for _, why in report.left_out} == {"not matched to a scan session"}
+
+
 def test_scan_sessions_tab_shows_scan_times_and_corrects_a_folder_id(tmp_path: Path) -> None:
     _app = QApplication.instance() or QApplication([])
     bids, dicoms, behav = tmp_path / "bids", tmp_path / "dicom", tmp_path / "behav"
@@ -174,6 +248,44 @@ def test_page_loads_the_logs_and_shows_how_many_need_review(
     assert page.panel is not None and len(page.panel.infos) == 3
     assert page.load_button.text() == "Reload logs"
     assert badges[-1].endswith("to review")
+
+
+def test_scan_sessions_tab_shows_the_panels_sessions_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtCore import QSettings
+
+    from fmri_local_process.gui import toolbox_state
+    from fmri_local_process.gui.behav_logs_dialog import BehavLogsPage, ScanSessionsPage
+
+    _app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(
+        toolbox_state,
+        "make_settings",
+        lambda app: QSettings(str(tmp_path / f"{app}.ini"), QSettings.Format.IniFormat),
+    )
+    bids, dicoms, behav = make_folders(tmp_path)
+    state = toolbox_state.ToolboxState()
+    page = BehavLogsPage(state)
+    sessions = ScanSessionsPage(page)
+    loaded: list[object] = []
+    page.logs_loaded.connect(loaded.append)
+    assert sessions.view is None  # nothing read yet
+
+    for key, folder in (("bids", bids), ("dicom", dicoms), ("behav", behav)):
+        state.set_folder(key, folder)
+    sessions.show_page()
+    page.wait()
+
+    panel = page.panel
+    assert panel is not None and sessions.view is panel.sessions_view
+    assert panel.sessions_view.parent() is sessions  # on its own tab, not the logs tab's
+    assert panel.session_table.rowCount() == len(SESSION_DIRS)
+    assert loaded[-1] == panel.infos  # Scan lengths gets the logs to suggest lengths from
+
+    page.load()  # reload: the old view goes, the new panel's comes in
+    page.wait()
+    assert page.panel is not panel and sessions.view is page.panel.sessions_view  # pyright: ignore[reportOptionalMemberAccess]
 
 
 def test_scan_sessions_tab_corrects_a_folder_date_and_sets_a_session(tmp_path: Path) -> None:

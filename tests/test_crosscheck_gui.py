@@ -77,13 +77,15 @@ def test_tabs_follow_the_order_of_the_work(window: toolbox.ToolboxWindow) -> Non
     names = [window.tabs.tabText(i).replace("&&", "&") for i in range(window.tabs.count())]
     assert names == [
         "1. Setup & Convert to BIDS",
-        "2. ID & Behaviour Logs",
-        "3. Scan lengths & trimming",
-        "4. BIDS Crosscheck",
-        "5. Preprocess BIDS (C-PAC)",
-        "6. Crosscheck overview",
-        "7. First-level stats",
-        "8. Sequence overview",
+        "2. Scan sessions",
+        "3. Behaviour logs",
+        "4. Scan lengths & trimming",
+        "5. BIDS Crosscheck",
+        "6. Scan quality (MRIQC)",
+        "7. Preprocess BIDS (C-PAC)",
+        "8. Crosscheck overview",
+        "9. First-level stats",
+        "10. Sequence overview",
     ]
 
 
@@ -195,7 +197,7 @@ def test_crosscheck_table_shows_id_scan_date_and_session(
     cells = [table.item(0, c).text() for c in range(table.columnCount())]  # pyright: ignore[reportOptionalMemberAccess]
     assert cells[:4] == ["12345T1", "2024-10-14 13:41", "ses-1", "2"]
     assert "⚠" in cells[4]  # two runs: keep one
-    assert window.tabs.tabText(3) == "4. BIDS Crosscheck (1 to check)"
+    assert window.tabs.tabText(4) == "5. BIDS Crosscheck (1 to check)"
 
 
 def test_ticked_sessions_enable_actions_and_select_none_clears(
@@ -271,7 +273,7 @@ def test_select_all_then_mark_the_ticked_sessions_crosschecked(
     two_session_subject(bids)
     open_crosscheck(window, bids)
     page = window.crosscheck
-    assert window.tabs.tabText(3) == "4. BIDS Crosscheck (2 to check)"
+    assert window.tabs.tabText(4) == "5. BIDS Crosscheck (2 to check)"
 
     page.select_all_button.click()
     assert len(page.ticked_reviews()) == 2 and not page.select_all_button.isEnabled()
@@ -280,7 +282,7 @@ def test_select_all_then_mark_the_ticked_sessions_crosschecked(
 
     assert all(r.crosschecked for r in page.reviews)
     assert page.table.item(0, 4).text() == "☑ crosschecked"  # pyright: ignore[reportOptionalMemberAccess]
-    assert window.tabs.tabText(3) == "4. BIDS Crosscheck"  # nothing left to check
+    assert window.tabs.tabText(4) == "5. BIDS Crosscheck"  # nothing left to check
     assert page.unmark_ticked_button.isEnabled() and not page.mark_ticked_button.isEnabled()
 
 

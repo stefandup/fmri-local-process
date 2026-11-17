@@ -38,7 +38,7 @@ from fmri_local_process.gui.crosscheck_gui import (
     needs_a_look,
     problem_text,
 )
-from fmri_local_process.gui.qt_common import wrap_tooltip
+from fmri_local_process.gui.qt_common import NoticeBanner, bids_notices, wrap_tooltip
 from fmri_local_process.gui.toolbox_state import ToolboxState
 from fmri_local_process.processing.action_log import COLUMNS, read_actions
 from fmri_local_process.processing.crosscheck import (
@@ -122,6 +122,8 @@ class OverviewPage(QWidget):
         self.reviews: list[SessionReview] = []
         self.logged: list[dict[str, str]] = []
         layout = QVBoxLayout(self)
+        self.banner = NoticeBanner()
+        layout.addWidget(self.banner)
 
         summary = QGroupBox("BIDS folder summary")
         summary_layout = QVBoxLayout(summary)
@@ -210,6 +212,7 @@ class OverviewPage(QWidget):
             )
             self.summary_label.setPlainText("\n".join(lines))
             self.logged = list(reversed(read_actions(bids_root)))
+        self.banner.set_messages(bids_notices(bids_root, bool(self.reviews)))
         self.fit_summary()
         self.fill_sessions()
         self.fill_history()

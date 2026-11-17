@@ -1,7 +1,7 @@
 """fmri_toolbox: the Philani fMRI steps in one window, one tab per step, in the order of the
-work: Setup & Convert to BIDS, ID & Behaviour Logs, Scan lengths & trimming, BIDS Crosscheck
-(everything in BIDS correct before preprocessing), Preprocess BIDS (C-PAC), Crosscheck overview,
-First-level stats, Sequence overview.
+work: Setup & Convert to BIDS, Scan sessions, Behaviour logs, Scan lengths & trimming, BIDS
+Crosscheck (everything in BIDS correct before preprocessing), Scan quality (MRIQC), Preprocess BIDS
+(C-PAC), Crosscheck overview, First-level stats, Sequence overview.
 
 The tabs share their folders (chosen on the first tab) and know what the others are doing: while one
 job changes the BIDS folder (converting, trimming, C-PAC reading it), the others' changing
@@ -29,10 +29,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from fmri_local_process.gui.behav_logs_dialog import BehavLogsPage
+from fmri_local_process.gui.behav_logs_dialog import BehavLogsPage, ScanSessionsPage
 from fmri_local_process.gui.convert_page import ConvertPage
 from fmri_local_process.gui.crosscheck_gui import CrosscheckPage
 from fmri_local_process.gui.first_level_page import FirstLevelPage
+from fmri_local_process.gui.mriqc_page import MriqcPage
 from fmri_local_process.gui.overview_page import OverviewPage
 from fmri_local_process.gui.preprocess_gui import PreprocessWindow
 from fmri_local_process.gui.qt_common import (
@@ -55,15 +56,18 @@ from fmri_local_process.gui.trimming import Trimmer
 from fmri_local_process.processing.review_mode import package_name, view_only
 
 SETUP = "Setup & Convert to BIDS"
-BEHAV = "ID & Behaviour Logs"
+SESSIONS = "Scan sessions"
+BEHAV = "Behaviour logs"
 SCAN_LENGTHS = "Scan lengths & trimming"
 CROSSCHECK = "BIDS Crosscheck"
+MRIQC = "Scan quality (MRIQC)"
 PREPROCESS = "Preprocess BIDS (C-PAC)"
 OVERVIEW = "Crosscheck overview"
 FIRST_LEVEL = "First-level stats"
 SEQUENCE = "Sequence overview"
 TAB_ORDER = (
-    SETUP, BEHAV, SCAN_LENGTHS, CROSSCHECK, PREPROCESS, OVERVIEW, FIRST_LEVEL, SEQUENCE
+    SETUP, SESSIONS, BEHAV, SCAN_LENGTHS, CROSSCHECK, MRIQC, PREPROCESS, OVERVIEW, FIRST_LEVEL,
+    SEQUENCE,
 )  # fmt: skip
 HEADER_POINT_INCREASE = NAME_LABEL_FONT_POINT_INCREASE // 2
 HIDDEN_WHEN_VIEW_ONLY = (SETUP, PREPROCESS)  # they only change data
@@ -104,8 +108,10 @@ class ToolboxWindow(QMainWindow):
 
         self.convert = ConvertPage(self.state)
         self.behav = BehavLogsPage(self.state)
+        self.sessions = ScanSessionsPage(self.behav)
         self.crosscheck = CrosscheckPage(self.state, self.trimmer)
         self.scan_lengths = ScanLengthsPage(self.state, self.trimmer)
+        self.mriqc = MriqcPage(self.state)
         self.preprocess = PreprocessWindow()
         self.preprocess.setWindowFlags(Qt.WindowType.Widget)  # a page here, not a window
         self.preprocess_generation = self.state.generation  # BIDS contents it last read
@@ -114,9 +120,11 @@ class ToolboxWindow(QMainWindow):
         self.sequence = SequencePage(self.state)
         self.pages: dict[str, QWidget] = {
             SETUP: self.convert,
+            SESSIONS: self.sessions,
             BEHAV: self.behav,
             SCAN_LENGTHS: self.scan_lengths,
             CROSSCHECK: self.crosscheck,
+            MRIQC: self.mriqc,
             PREPROCESS: scrolling(self.preprocess),
             OVERVIEW: self.overview,
             FIRST_LEVEL: self.first_level,
@@ -139,6 +147,7 @@ class ToolboxWindow(QMainWindow):
 
         self._connect_preprocess()
         self.behav.badge_changed.connect(lambda text: self.set_badge(BEHAV, text))
+        self.behav.logs_loaded.connect(self.scan_lengths.set_log_infos)
         self.state.folder_changed.connect(self.on_folder_changed)
         self.state.busy_changed.connect(self.on_busy_changed)
         self.state.data_changed.connect(self.on_data_changed)
@@ -147,7 +156,7 @@ class ToolboxWindow(QMainWindow):
         self.tabs.setCurrentIndex(TAB_ORDER.index(start_tab))
         self.on_tab_changed(self.tabs.currentIndex())
         self.refresh_crosscheck_badge()
-        # Read the behavioural logs in the background from the start: tab 2 is ready by
+        # Read the sessions and logs in the background from the start: tabs 2-3 are ready by
         # the time you get to it.
         QTimer.singleShot(0, self.behav.show_page)
 
@@ -254,9 +263,18 @@ class ToolboxWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+        mriqc_running = self.mriqc.worker is not None
+        if not self.mriqc.close_check():  # asks about a running MRIQC, stops it
+            event.ignore()
+            return
         self.preprocess.closeEvent(event)  # asks about a running C-PAC, stops its threads
+        if event.isAccepted():
+            self.scan_lengths.dicom_box.stop()  # only reads: just stop
         threads = (
-            self.behav.loader is not None
+            mriqc_running
+            or self.mriqc.download.busy  # docker keeps the finished layers: resumes next time
+            or self.preprocess.cpac_download.busy
+            or self.behav.loader is not None
             or self.convert.defacer_probe is not None
             or self.convert.docker_thread is not None
         )

@@ -40,7 +40,13 @@ from PySide6.QtWidgets import (
 
 from fmri_local_process.gui.folder_panel import FolderPanel
 from fmri_local_process.gui.image_view import HelpToggle
-from fmri_local_process.gui.qt_common import WARNING_COLOR, primary_action_stylesheet, reveal
+from fmri_local_process.gui.qt_common import (
+    WARNING_COLOR,
+    NoticeBanner,
+    bids_notices,
+    primary_action_stylesheet,
+    reveal,
+)
 from fmri_local_process.gui.toolbox_state import ToolboxState
 from fmri_local_process.gui.trimming import Trimmer
 from fmri_local_process.processing.crosscheck import (
@@ -171,6 +177,8 @@ class CrosscheckPage(QWidget):
         self.lock_label.setStyleSheet(f"color: {WARNING_COLOR};")
         top.addWidget(self.lock_label)
         layout.addLayout(top)
+        self.banner = NoticeBanner()
+        layout.addWidget(self.banner)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         left = QWidget()
@@ -298,6 +306,7 @@ class CrosscheckPage(QWidget):
         bids_root = self.state.folder("bids")
         selected = self.selected_review()
         self.reviews = review_bids_folder(bids_root) if bids_root else []
+        self.banner.set_messages(bids_notices(bids_root, bool(self.reviews)))
         self.ticked &= {r.name for r in self.reviews}
         self.table.blockSignals(True)  # no itemChanged (tick) signals while filling
         self.table.setRowCount(len(self.reviews))
