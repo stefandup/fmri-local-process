@@ -22,6 +22,7 @@ nav:
   - Sequence overview: sequence-overview.md
   - Review packages: review-package.md
   - Roadmap: roadmap.md
+  - "Next steps: headless & HPC": next-steps.md
   - For Contributors:
       - Golden Rules: golden-rules.md
   - AI Style Guide: ai-style-guide.md

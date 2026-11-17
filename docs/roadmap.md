@@ -25,8 +25,9 @@ recreate the toolbox tabs in the terminal.
 3. TUI tabs: Crosscheck and Preprocess first, then Scan lengths, Behaviour logs, Convert.
 4. Packaging: optional Qt install, and the TUI inside the HPC container image.
 
-**Open questions:** adding `textual` (and later `textual-image`) as dependencies; whether
-the image approach is right; trial first, or a full plan for step 2.
+**Decided (2026-11-17):** `textual` and `textual-image` are OK; images as PNG plus inline
+where the terminal can show them; move the logic into `app/` first. See
+[Next steps: headless server and HPC](next-steps.md) for the full plan and the pros and cons.
 
 ## C-PAC on the HPC (Apptainer + PBS)
 
