@@ -29,8 +29,10 @@ import csv
 import gzip
 import json
 import logging
+import math
 import shutil
 import struct
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +43,7 @@ import numpy as np
 
 from fmri_local_process.processing.action_log import record_action
 from fmri_local_process.processing.behav_logs import BEHAV_TASKS
+from fmri_local_process.processing.behav_match import COMPLETE, LogInfo
 from fmri_local_process.processing.first_level import CHECKERBOARD
 from fmri_local_process.processing.philani_bids import DEFACE_NOTE, SCAN_RULES, exclude_session
 from fmri_local_process.processing.records import write_json_atomic
@@ -74,6 +77,10 @@ STUDY_VOLUMES = {
 # late would otherwise pull the median up and leave nothing to trim.
 TASK_DESIGNS = {f"task-{CHECKERBOARD.task}_bold": CHECKERBOARD.design}
 TR_TOLERANCE_S = 0.001
+# Seconds kept after a run's last event when suggesting a length from the logs: the BOLD
+# response to the last trials is still unfolding. Settable per task (crosscheck settings).
+DEFAULT_EVENTS_MARGIN_S = 15.0
+EVENTS_MARGIN_KEY = "events_margin_s"
 
 
 class CrosscheckError(Exception):
@@ -348,6 +355,82 @@ def task_design_volumes(data_files: list[DataFile]) -> dict[str, int]:
         for label, values in trs.items()
         if max(values) - min(values) <= TR_TOLERANCE_S
     }
+
+
+RunEnd = tuple[float, float]  # (last event's end, TR), seconds
+
+
+def run_event_ends(data_files: list[DataFile]) -> dict[str, list[RunEnd]]:
+    """Per bold label, (when its last event ends, TR) of every run with an events.tsv."""
+    ends: dict[str, list[RunEnd]] = {}
+    for data in data_files:
+        if data.pending or not data.label.endswith("_bold") or not data.repetition_time:
+            continue
+        end = events_end_s(data)
+        if end is not None:
+            ends.setdefault(data.label, []).append((end, data.repetition_time))
+    return ends
+
+
+def label_trs(data_files: list[DataFile]) -> dict[str, float]:
+    """Per bold label, the TR most of its runs have."""
+    trs: dict[str, Counter[float]] = {}
+    for data in data_files:
+        if not data.pending and data.label.endswith("_bold") and data.repetition_time:
+            trs.setdefault(data.label, Counter())[data.repetition_time] += 1
+    return {label: counts.most_common(1)[0][0] for label, counts in trs.items()}
+
+
+def log_event_ends(infos: list[LogInfo], data_files: list[DataFile]) -> dict[str, list[RunEnd]]:
+    """Per bold label, (last event end, the scan's TR) of every complete behaviour log not
+    marked error / not used: the raw logs, before (or without) any events.tsv in BIDS."""
+    trs = label_trs(data_files)
+    ends: dict[str, list[RunEnd]] = {}
+    for info in infos:
+        if info.task is None or info.events_end_s is None:
+            continue
+        if info.state != COMPLETE or info.excluded:
+            continue
+        label = f"task-{info.task.task}_bold"
+        if label in trs:
+            ends.setdefault(label, []).append((info.events_end_s, trs[label]))
+    return ends
+
+
+def volumes_from_logs(ends: list[RunEnd], margin_s: float) -> tuple[int, int] | None:
+    """Suggested volumes from the logs: each run's last event end plus the margin, in
+    whole volumes at its TR; (upper median over runs, longest). None without runs.
+
+    The median, so a log that stopped early (or ran long) doesn't set the length.
+    """
+    if not ends:
+        return None
+    # round() first: 16.0 / 2.0 is 8 volumes, not 9 from a float wobble.
+    volumes = [math.ceil(round((end + margin_s) / tr, 6)) for end, tr in ends]
+    return median_high(volumes), max(volumes)
+
+
+def read_events_margins(bids_root: Path) -> dict[str, float]:
+    """Margins (s) after the last event set per bold label ({} when all are default)."""
+    saved = read_json_dict(bids_root / SETTINGS_FILE).get(EVENTS_MARGIN_KEY)
+    if not isinstance(saved, dict):
+        return {}
+    return {str(k): float(v) for k, v in saved.items() if isinstance(v, int | float) and v >= 0}
+
+
+def write_events_margins(bids_root: Path, margins: dict[str, float]) -> None:
+    """Save the margins that differ from the default; log each change."""
+    old = read_events_margins(bids_root)
+    kept = {k: v for k, v in sorted(margins.items()) if v != DEFAULT_EVENTS_MARGIN_S}
+    path = bids_root / SETTINGS_FILE
+    write_json_dict(path, read_json_dict(path) | {EVENTS_MARGIN_KEY: kept})
+    for label in sorted(old.keys() | kept.keys()):
+        before = old.get(label, DEFAULT_EVENTS_MARGIN_S)
+        after = kept.get(label, DEFAULT_EVENTS_MARGIN_S)
+        if before != after:
+            record_action(
+                bids_root, "set margin after last event", label, f"{before:g} s -> {after:g} s"
+            )
 
 
 def automatic_lengths(data_files: list[DataFile]) -> dict[str, tuple[int, str]]:

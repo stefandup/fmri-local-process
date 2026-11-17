@@ -17,7 +17,7 @@ from PySide6.QtCore import QSettings, Qt  # noqa: E402 -- needs QT_QPA_PLATFORM 
 from PySide6.QtGui import QImage  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 
-from fmri_local_process.gui import preprocess_gui  # noqa: E402
+from fmri_local_process.gui import docker_controls, preprocess_gui  # noqa: E402
 
 
 def no_docker() -> Path:
@@ -68,7 +68,7 @@ def test_docker_status_and_controls(
     assert warned == ["Docker isn't running"] and window.worker is None
 
     actions: list[str] = []
-    monkeypatch.setattr(preprocess_gui, "docker_desktop", lambda action: actions.append(action))
+    monkeypatch.setattr(docker_controls, "docker_desktop", lambda action: actions.append(action))
     window._on_docker_action("start")
     assert not window.docker_restart_button.isEnabled()  # busy while it runs
     assert window.docker_control is not None
@@ -81,6 +81,28 @@ def test_docker_status_and_controls(
     assert window.docker_label.text() == "✓ Docker is running."
     assert not window.docker_start_button.isEnabled()
     assert window.docker_restart_button.isEnabled()
+
+
+def test_missing_cpac_image_is_offered_for_download(
+    window: preprocess_gui.PreprocessWindow, tmp_path: Path
+) -> None:
+    window.output_folder = tmp_path
+    window.subjects = ["P01"]
+    window._on_memory_probed(16.0, 4, "", False)  # Docker runs, no C-PAC image
+    assert window.cpac_download.button.isVisibleTo(window)
+    assert not window.cpac_download.remove_button.isVisibleTo(window)
+    assert "isn't downloaded" in window.docker_label.text()
+    assert any("C-PAC image" in m for m in window.banner.shown)
+    window._update_buttons()
+    assert not window.process_button.isEnabled()
+    assert "Download the C-PAC image" in window.process_button.toolTip()
+
+    window._on_memory_probed(16.0, 4, "", True)  # downloaded: it can be removed instead
+    assert not window.cpac_download.button.isVisibleTo(window)
+    assert window.cpac_download.remove_button.isVisibleTo(window)
+    assert not any("C-PAC image" in m for m in window.banner.shown)
+    window._update_buttons()
+    assert window.process_button.isEnabled()
 
 
 def make_bids(root: Path) -> Path:

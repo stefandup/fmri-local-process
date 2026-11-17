@@ -4,7 +4,8 @@ runs that are longer (scans stopped by hand after the task).
 The expected length is by default the (upper) median of all a scan's runs (with a single
 run, the study's usual length); the human can set another number, which is saved in the BIDS
 folder (code/expected_volumes.json) so it travels with the data. The crosscheck flags runs
-shorter than that as short.
+shorter than that as short. A "From logs" column suggests a length from the
+events.tsv files (last event + a margin, settable per task), to type in if it fits.
 """
 
 from collections import Counter
@@ -14,6 +15,7 @@ from PySide6.QtCore import QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -24,28 +26,40 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fmri_local_process.gui.dicom_volumes_box import DicomVolumesBox
 from fmri_local_process.gui.image_view import HelpToggle
 from fmri_local_process.gui.qt_common import (
     PROCESS_ACCENT_COLOR,
     PROCESS_ACCENT_HOVER_COLOR,
+    NoticeBanner,
     primary_action_stylesheet,
     style_secondary_label,
     wrap_tooltip,
 )
 from fmri_local_process.gui.toolbox_state import ToolboxState
 from fmri_local_process.gui.trimming import Trimmer
+from fmri_local_process.processing.behav_match import LogInfo
 from fmri_local_process.processing.crosscheck import (
+    DEFAULT_EVENTS_MARGIN_S,
     EXPECTED_FILE,
+    SETTINGS_FILE,
     DataFile,
+    RunEnd,
     automatic_lengths,
     find_data_files,
+    log_event_ends,
     long_runs,
+    read_events_margins,
     read_expected,
     review_bids_folder,
+    run_event_ends,
+    volumes_from_logs,
+    write_events_margins,
     write_expected,
 )
 
 MAX_VOLUMES = 100_000
+MAX_MARGIN_S = 120.0
 LONG_COLOR = "#3498db"  # the crosscheck's colour for "long"
 TRIMMED_COLOR = "#27ae60"  # done: green
 
@@ -98,7 +112,14 @@ HELP_TEXT = (
     "be trimmed to this length with <b>Trim</b>, keeping the first volumes: the cut volumes "
     "are deleted from the BIDS folder (the raw DICOMs keep them; delete the file and convert "
     "again to undo). Trim here, before the crosscheck, so BIDS is right before it is "
-    "preprocessed."
+    "preprocessed.<br><br>"
+    "<b>From logs</b> suggests a length from the complete behaviour logs (read on the "
+    "Behaviour logs tab; logs marked error / not used left out; until they are read, the "
+    "events.tsv files in BIDS): each log's last event end plus the <b>Margin</b> (default "
+    f"{DEFAULT_EVENTS_MARGIN_S:g} s, so the BOLD response to the last trials is kept), in "
+    "volumes at its TR; the median over runs, so one log that stopped early doesn't set it. "
+    "It's only a suggestion: type it into Expected volumes if it fits. Scans without logs "
+    "(e.g. rest) show none."
 )
 AUTOSAVE_DELAY_MS = 800  # save once typing pauses, not on every digit
 
@@ -112,11 +133,13 @@ class ScanLengthsPanel(QWidget):
         "Runs",
         "Volumes found",
         "Expected volumes",
+        "From logs",
+        "Margin (s)",
         "Minutes",
         "Too long",
         "Trimmed",
     )
-    EXPECTED, MINUTES, TOO_LONG, TRIMMED = 3, 4, 5, 6
+    EXPECTED, FROM_LOGS, MARGIN, MINUTES, TOO_LONG, TRIMMED = 3, 4, 5, 6, 7, 8
 
     def __init__(
         self,
@@ -124,11 +147,22 @@ class ScanLengthsPanel(QWidget):
         data_files: list[DataFile],
         parent: QWidget | None,
         can_trim: bool = True,
+        log_ends: dict[str, list[RunEnd]] | None = None,
     ):
         super().__init__(parent)
         self.bids_root = bids_root
         self.scans = scan_lengths(data_files)
         self.automatic = automatic_lengths(data_files)  # median of runs, else study default
+        # Read once (margins only rescale them): the complete raw logs the Behaviour logs tab
+        # read, else the events.tsv files already in BIDS.
+        self.log_ends = log_ends or {}
+        self.event_ends = self.log_ends | {
+            label: ends
+            for label, ends in run_event_ends(data_files).items()
+            if label not in self.log_ends
+        }
+        margins = read_events_margins(bids_root)
+        self.margins: dict[str, QDoubleSpinBox] = {}
         self.trim_requested = False
         self.can_trim = can_trim
         expected = read_expected(bids_root)
@@ -156,7 +190,10 @@ class ScanLengthsPanel(QWidget):
         style_secondary_label(self.saved_label)
         top.addWidget(self.saved_label)
         self.help = HelpToggle("Help ?", "What the expected lengths do, and trimming.")
-        self.help.set_text(HELP_TEXT + f"<br><br>Saved in {bids_root / EXPECTED_FILE}.")
+        self.help.set_text(
+            HELP_TEXT + f"<br><br>Saved in {bids_root / EXPECTED_FILE} (margins in "
+            f"{bids_root / SETTINGS_FILE})."
+        )
         top.addWidget(self.help.button)
         layout.addLayout(top)
         layout.addWidget(self.help.box)
@@ -183,12 +220,25 @@ class ScanLengthsPanel(QWidget):
             spin.valueChanged.connect(lambda _=0, r=row, lab=label: self.on_changed(r, lab))
             self.table.setCellWidget(row, self.EXPECTED, spin)
             self.spins[label] = spin
+            if label in self.event_ends:
+                margin = QDoubleSpinBox()
+                margin.setRange(0, MAX_MARGIN_S)
+                margin.setDecimals(1)
+                margin.setSuffix(" s")
+                margin.setValue(margins.get(label, DEFAULT_EVENTS_MARGIN_S))
+                margin.setToolTip(
+                    "Time kept after the last event when suggesting a length from the logs."
+                )
+                margin.valueChanged.connect(
+                    lambda _=0.0, r=row, lab=label: self.on_margin_changed(r, lab)
+                )
+                self.table.setCellWidget(row, self.MARGIN, margin)
+                self.margins[label] = margin
+            self.update_from_logs(row, label)
             self.update_row(row, label)
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table, 1)
-        if not self.scans:
-            layout.addWidget(QLabel("No BOLD scans found in this BIDS folder yet."))
         self.update_trim_button()
 
     def expected_for(self, label: str) -> int | None:
@@ -201,6 +251,36 @@ class ScanLengthsPanel(QWidget):
         if not expected:
             return []
         return [d for d in self.scans[label] if d.volumes is not None and d.volumes > expected]
+
+    def update_from_logs(self, row: int, label: str) -> None:
+        """The 'From logs' cell: the suggested volumes at the margin set for the scan."""
+        ends = self.event_ends.get(label, [])
+        margin = self.margins[label].value() if label in self.margins else 0.0
+        suggested = volumes_from_logs(ends, margin)
+        if suggested is None:
+            item = QTableWidgetItem("-")
+            item.setToolTip(
+                "No complete behaviour log for this scan (Behaviour logs tab), and no "
+                "events.tsv next to its runs."
+            )
+        else:
+            volumes, longest = suggested
+            source = (
+                "complete behaviour logs"
+                if label in self.log_ends
+                else "events.tsv files in BIDS (the Behaviour logs tab hasn't read the logs)"
+            )
+            item = QTableWidgetItem(str(volumes))
+            item.setToolTip(
+                f"Median over {len(ends)} {source}: last event + {margin:g} s, in volumes at "
+                f"the scan's TR. Longest: {longest}."
+            )
+        self.table.setItem(row, self.FROM_LOGS, item)
+
+    def on_margin_changed(self, row: int, label: str) -> None:
+        self.update_from_logs(row, label)
+        self.saved_label.setText("Saving...")
+        self.autosave.start()
 
     def on_changed(self, row: int, label: str) -> None:
         self.update_row(row, label)
@@ -236,6 +316,11 @@ class ScanLengthsPanel(QWidget):
         # Keep values for scans not in the folder right now (e.g. all runs deleted).
         kept = {k: v for k, v in read_expected(self.bids_root).items() if k not in self.spins}
         write_expected(self.bids_root, kept | self.expected())
+        kept_margins = {
+            k: v for k, v in read_events_margins(self.bids_root).items() if k not in self.margins
+        }
+        margins = {label: spin.value() for label, spin in self.margins.items()}
+        write_events_margins(self.bids_root, kept_margins | margins)
         self.saved_label.setText("Lengths saved")
         self.saved.emit()
 
@@ -255,14 +340,30 @@ class ScanLengthsPage(QWidget):
         self.state, self.trimmer = state, trimmer
         self.seen_generation = -1
         self.panel: ScanLengthsPanel | None = None
+        self.log_infos: list[LogInfo] = []  # read by the Behaviour logs tab, for "From logs"
         self.layout_ = QVBoxLayout(self)
-        self.placeholder = QLabel("Choose the BIDS folder on the Setup & Convert to BIDS tab.")
-        self.layout_.addWidget(self.placeholder)
+        self.banner = NoticeBanner()
+        self.layout_.addWidget(self.banner)
+        self.filler = QWidget()  # keeps the banner at the top while there is no panel
+        self.layout_.addWidget(self.filler, 1)
+        self.dicom_box = DicomVolumesBox()  # stays; the panel goes in above it
+        self.layout_.addWidget(self.dicom_box, 1)
         state.busy_changed.connect(self.update_lock)
+        state.folder_changed.connect(
+            lambda key: (
+                self.dicom_box.set_dicom_root(state.folder("dicom")) if key == "dicom" else None
+            )
+        )
 
     def show_page(self) -> None:
         """Called when the tab is shown: rebuild if the BIDS folder changed since."""
         if self.seen_generation != self.state.generation:
+            self.refresh()
+
+    def set_log_infos(self, infos: list[LogInfo]) -> None:
+        """The Behaviour logs tab (re)read the logs: suggest lengths from them."""
+        self.log_infos = infos
+        if self.panel is not None:
             self.refresh()
 
     def refresh(self) -> None:
@@ -274,13 +375,28 @@ class ScanLengthsPage(QWidget):
             self.panel.deleteLater()
             self.panel = None
         bids_root = self.state.folder("bids")
-        self.placeholder.setVisible(bids_root is None)
+        self.filler.setVisible(bids_root is None)
+        data_files = find_data_files(bids_root) if bids_root is not None else []
+        self.dicom_box.set_folders(bids_root, self.state.folder("dicom"), data_files)
         if bids_root is None:
+            self.banner.set_messages(
+                ["No BIDS folder chosen: choose it on the Setup & Convert to BIDS tab."]
+            )
             return
-        self.panel = ScanLengthsPanel(bids_root, find_data_files(bids_root), self)
+        self.panel = ScanLengthsPanel(
+            bids_root, data_files, self, log_ends=log_event_ends(self.log_infos, data_files)
+        )
+        self.banner.set_messages(
+            []
+            if self.panel.scans
+            else [
+                f"No BOLD scans in {bids_root} yet: convert the DICOMs on the Setup & Convert "
+                "to BIDS tab first."
+            ]
+        )
         self.panel.saved.connect(self.on_saved)
         self.panel.trim_wanted.connect(self.on_trim_wanted)
-        self.layout_.addWidget(self.panel, 1)
+        self.layout_.insertWidget(self.layout_.indexOf(self.dicom_box), self.panel, 1)
         self.update_lock()
 
     def update_lock(self) -> None:

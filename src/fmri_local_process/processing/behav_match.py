@@ -79,12 +79,14 @@ LEFT_OUT = (REVIEW_ERROR, REVIEW_NOT_USED)
 
 @dataclass(frozen=True)
 class Correction:
-    """What the human decided about one log: corrected ID/date and/or a review verdict."""
+    """What the human decided about one log: corrected ID/date, a review verdict, and/or
+    that they have been through it (crosschecked)."""
 
     subject: str | None = None
     date: dt.date | None = None
     review: str | None = None  # REVIEW_OK / REVIEW_ERROR
     note: str = ""
+    crosschecked: bool = False
 
 
 def read_corrections(bids_root: Path) -> dict[str, Correction]:
@@ -98,6 +100,7 @@ def read_corrections(bids_root: Path) -> dict[str, Correction]:
             dt.datetime.strptime(value["date"], ISO_DATE).date() if value.get("date") else None,
             value.get("review") if value.get("review") in REVIEWS else None,
             value.get("note", ""),
+            bool(value.get("crosschecked", False)),
         )
         for key, value in raw.items()
     }
@@ -112,6 +115,8 @@ def correction_text(c: Correction | None) -> str:
         parts.append(f"date {c.date.strftime(ISO_DATE)}")
     if c.review:
         parts.append(c.review + (f" ({c.note})" if c.note else ""))
+    if c.crosschecked:
+        parts.append("crosschecked")
     return ", ".join(parts) or "-"
 
 
@@ -125,7 +130,7 @@ def write_corrections(bids_root: Path, corrections: dict[str, Correction]) -> No
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = {}
     for key, c in sorted(corrections.items()):
-        entry = {}
+        entry: dict[str, str | bool] = {}
         if c.subject:
             entry["subject"] = c.subject
         if c.date:
@@ -134,6 +139,8 @@ def write_corrections(bids_root: Path, corrections: dict[str, Correction]) -> No
             entry["review"] = c.review
         if c.note:
             entry["note"] = c.note
+        if c.crosschecked:
+            entry["crosschecked"] = True
         if entry:
             raw[key] = entry
     write_json_atomic(path, raw)
@@ -191,6 +198,7 @@ class LogInfo:
     columns: tuple[str, ...] = ()
     pulses: int = 0
     trial_types: Counter[str] = field(default_factory=Counter)
+    events_end_s: float | None = None  # when the last event ends, from the first pulse
 
     @property
     def raw_subject(self) -> str:
@@ -267,6 +275,13 @@ def inspect_log(log_file: Path, root: Path, correction: Correction | None = None
             info.notes.append(f"can't extract events: {e!r}")
             return info
         info.trial_types = Counter(table.trial_type)
+        info.events_end_s = max(
+            (
+                onset + (duration or 0.0)
+                for onset, duration in zip(table.onset, table.duration, strict=True)
+            ),
+            default=None,
+        )
         if table.trial_type[-1] != "thankyou":
             info.state = ABORTED
             info.notes.append(f"ends at '{table.trial_type[-1]}', before the thank-you screen")
@@ -407,8 +422,8 @@ def match_logs(infos: list[LogInfo], sessions: list[SessionInfo]) -> list[LogMat
 
 
 def needs_review(m: LogMatch) -> bool:
-    """Something to look at, and no verdict recorded for it yet."""
-    if m.info.correction.review:
+    """Something to look at, with no verdict and not marked crosschecked yet."""
+    if m.info.correction.review or m.info.correction.crosschecked:
         return False
     return m.status != MATCHED or m.info.state != COMPLETE or bool(m.info.notes)
 

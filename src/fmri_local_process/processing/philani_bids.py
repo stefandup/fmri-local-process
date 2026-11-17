@@ -86,6 +86,8 @@ PENDING_DIR = "crosscheck_pending"
 DICOM_CORRECTIONS_FILE = Path("code") / "dicom_id_corrections.json"
 DICOM_DATE_CORRECTIONS_FILE = Path("code") / "dicom_date_corrections.json"
 DICOM_SESSION_CORRECTIONS_FILE = Path("code") / "dicom_session_corrections.json"
+DICOM_CROSSCHECKED_FILE = Path("code") / "dicom_crosschecked.json"
+CROSSCHECKED = "crosschecked"  # the value kept per DICOM folder marked as reviewed
 EXCLUDED_SESSIONS_FILE = Path("code") / "excluded_sessions.json"
 CONVERTING_DIR = ".converting"  # in the BIDS folder: series being converted right now
 SPACE_MARGIN_BYTES = 1024**3  # free space to keep on top of a session's DICOM size
@@ -312,6 +314,21 @@ def write_dicom_session_corrections(bids_root: Path, labels: dict[str, str]) -> 
     )
 
 
+def read_crosschecked_folders(bids_root: Path) -> set[str]:
+    """DICOM session folders the human marked as reviewed (Scan sessions tab)."""
+    return set(read_folder_map(bids_root, DICOM_CROSSCHECKED_FILE))
+
+
+def write_crosschecked_folders(bids_root: Path, folders: set[str]) -> None:
+    write_folder_map(
+        bids_root,
+        DICOM_CROSSCHECKED_FILE,
+        dict.fromkeys(folders, CROSSCHECKED),
+        "mark DICOM folder",
+        "(not crosschecked)",
+    )
+
+
 def read_excluded_sessions(bids_root: Path) -> dict[str, str]:
     """DICOM session folders deleted at crosscheck: {folder name: why}. Never converted."""
     try:
@@ -401,7 +418,7 @@ def find_sessions(
         if session is None:
             log.warning(
                 "Skipping %s: name isn't <YYYYMMDD>_<x>_<subject id>; give it a Corrected ID "
-                "and Corrected date (ID & Behaviour Logs tab, Scan sessions) to convert it",
+                "and Corrected date (Scan sessions tab) to convert it",
                 folder.name,
             )
             continue

@@ -2,9 +2,9 @@
 last changed.
 
 * Folders (DICOM sessions, behavioural logs, BIDS, C-PAC output) are chosen once, on the
-  Setup tab, and remembered. The first time, they are taken over from the separate
-  crosscheck and preprocess windows' remembered folders. In a review package they start on
-  its own data (processing/review_mode.py).
+  Setup tab, and remembered (the MRIQC output folder on the MRIQC tab). The first time,
+  they are taken over from the separate crosscheck and preprocess windows' remembered
+  folders. In a review package they start on its own data (processing/review_mode.py).
 * A job that changes the BIDS folder (converting, trimming, C-PAC reading it) is registered
   as busy; the other tabs lock their own changing actions until it ends.
 * Every change to the BIDS folder bumps a generation number, so a tab refreshes when it is
@@ -19,7 +19,7 @@ from fmri_local_process.gui.qt_common import SETTINGS_ORGANIZATION
 from fmri_local_process.processing.review_mode import package_folders, package_root, settings_dir
 
 SETTINGS_APP = "FmriToolbox"
-FOLDER_KEYS = ("dicom", "behav", "bids", "output")
+FOLDER_KEYS = ("dicom", "behav", "bids", "output", "mriqc")
 # Where the separate windows kept their folders before the toolbox: {app: {their key: ours}}.
 OLD_SETTINGS = {
     "FmriCrosscheck": {"bids": "bids", "dicom": "dicom", "behav": "behav"},
@@ -30,11 +30,13 @@ OLD_SETTINGS = {
 CONVERTING = "converting"
 TRIMMING = "trimming"
 PREPROCESSING = "preprocessing"
+QUALITY_CHECKING = "quality checking"  # MRIQC reading the BIDS folder
 VIEW_ONLY = "view only"  # never ends: a view-only review package (review_mode.view_only)
 JOB_TEXT = {
     CONVERTING: "Converting DICOMs to BIDS",
     TRIMMING: "Trimming runs",
     PREPROCESSING: "C-PAC is preprocessing",
+    QUALITY_CHECKING: "MRIQC is checking the scans",
     VIEW_ONLY: "View-only review package",
 }
 

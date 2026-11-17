@@ -286,6 +286,97 @@ def test_trim_refuses_to_cut_off_events(tmp_path: Path) -> None:
     cc.trim_run(tmp_path, data, 8)  # 16 s: fits
 
 
+def test_volumes_suggested_from_the_logs_with_a_margin(tmp_path: Path) -> None:
+    # Last events end at 100, 104 and 40 s (a log that stopped early); TR 2 s.
+    for subject, end in (("A", 100), ("B", 104), ("C", 40)):
+        write_nifti(func(tmp_path, subject, "1", "task-Matching_bold.nii.gz"), 80)
+        func(tmp_path, subject, "1", "task-Matching_events.tsv").write_text(
+            f"onset\tduration\n2\t1\n{end - 4}\t4\n"
+        )
+    write_nifti(func(tmp_path, "A", "1", "task-Rest_bold.nii.gz"), 80)  # no log
+
+    ends = cc.run_event_ends(cc.find_data_files(tmp_path))
+    assert set(ends) == {"task-Matching_bold"}
+    assert cc.volumes_from_logs(ends["task-Matching_bold"], 0) == (50, 52)  # 100 s / 2 s
+    assert cc.volumes_from_logs(ends["task-Matching_bold"], 15) == (58, 60)  # 115 s -> 58
+    assert cc.volumes_from_logs([], 15) is None
+
+    cc.write_events_margins(tmp_path, {"task-Matching_bold": 10.0, "task-Peer_bold": 15.0})
+    assert cc.read_events_margins(tmp_path) == {"task-Matching_bold": 10.0}  # default not kept
+    assert cc.read_expected_sessions(tmp_path) == 1  # shares the settings file, untouched
+    assert any(a["action"] == "set margin after last event" for a in read_actions(tmp_path))
+
+
+def test_lengths_suggested_from_complete_raw_logs_before_any_events_tsv(tmp_path: Path) -> None:
+    from test_behav_match import emo_log
+
+    from fmri_local_process.processing import behav_match as bm
+
+    behav, bids = tmp_path / "behav", tmp_path / "bids"
+    logs = {
+        "emolabeling/P001-emolabeling_scan-20240403-101500-AAAAA.log": emo_log(),
+        "emolabeling/P002-emolabeling_scan-20240505-101500-BBBBB.log": emo_log(),
+        "emolabeling/P003-emolabeling_scan-20240606-101500-CCCCC.log": emo_log(False),
+    }
+    for key, text in logs.items():
+        (behav / key).parent.mkdir(parents=True, exist_ok=True)
+        (behav / key).write_text(text, encoding="utf-8")
+    write_nifti(func(bids, "P001", "1", "task-Matching_bold.nii.gz"), 80, tr=2.0)
+    infos = bm.inspect_logs(behav, {})
+    complete = [i for i in infos if i.state == bm.COMPLETE]
+    assert len(complete) == 2 and all(i.events_end_s for i in complete)
+
+    ends = cc.log_event_ends(infos, cc.find_data_files(bids))
+    assert ends == {"task-Matching_bold": [(i.events_end_s, 2.0) for i in complete]}
+    complete[0].correction = bm.Correction(review=bm.REVIEW_ERROR)  # left out
+    assert len(cc.log_event_ends(infos, cc.find_data_files(bids))["task-Matching_bold"]) == 1
+    assert cc.log_event_ends(infos, []) == {}  # no run of the scan: no TR to count in
+
+
+def test_scan_lengths_panel_shows_the_log_suggestion_per_task_margin(tmp_path: Path) -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from fmri_local_process.gui.scan_lengths import ScanLengthsPanel
+
+    _app = QApplication.instance() or QApplication([])
+    for subject in ("A", "B"):
+        write_nifti(func(tmp_path, subject, "1", "task-Matching_bold.nii.gz"), 80)
+        func(tmp_path, subject, "1", "task-Matching_events.tsv").write_text(
+            "onset\tduration\n96\t4\n"  # ends at 100 s
+        )
+        write_nifti(func(tmp_path, subject, "1", "task-Rest_bold.nii.gz"), 80)
+
+    panel = ScanLengthsPanel(tmp_path, cc.find_data_files(tmp_path), None)
+    rows = {label: n for n, label in enumerate(panel.scans)}
+
+    def suggestion(label: str) -> str:
+        item = panel.table.item(rows[label], panel.FROM_LOGS)
+        return item.text() if item is not None else ""
+
+    assert suggestion("task-Matching_bold") == "58"  # (100 + 15) / 2, rounded up
+    assert suggestion("task-Rest_bold") == "-" and "task-Rest_bold" not in panel.margins
+    panel.margins["task-Matching_bold"].setValue(20)
+    assert suggestion("task-Matching_bold") == "60"
+    assert panel.spins["task-Matching_bold"].value() == 0  # only a suggestion: not applied
+    panel.save()
+    assert cc.read_events_margins(tmp_path) == {"task-Matching_bold": 20.0}
+    reopened = ScanLengthsPanel(tmp_path, cc.find_data_files(tmp_path), None)
+    assert reopened.margins["task-Matching_bold"].value() == 20
+
+    # The raw logs (read on the Behaviour logs tab) win over the events.tsv files.
+    from_raw = ScanLengthsPanel(
+        tmp_path,
+        cc.find_data_files(tmp_path),
+        None,
+        log_ends={"task-Matching_bold": [(60.0, 2.0)], "task-Rest_bold": [(100.0, 2.0)]},
+    )
+    rows = {label: n for n, label in enumerate(from_raw.scans)}
+    texts = [from_raw.table.item(rows[k], from_raw.FROM_LOGS) for k in rows]
+    by_label = dict(zip(rows, [t.text() if t else "" for t in texts], strict=True))
+    assert by_label == {"task-Matching_bold": "40", "task-Rest_bold": "58"}  # (60+20)/2, 115/2
+
+
 def test_median_of_the_runs_is_the_default_expected_length(tmp_path: Path) -> None:
     for subject, volumes in (("A", 441), ("B", 441), ("C", 520), ("D", 33)):
         write_nifti(func(tmp_path, subject, "1", "task-Rest_bold.nii.gz"), volumes)

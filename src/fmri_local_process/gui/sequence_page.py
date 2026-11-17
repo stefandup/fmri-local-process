@@ -20,7 +20,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from fmri_local_process.gui.qt_common import style_secondary_label, wrap_tooltip
+from fmri_local_process.gui.qt_common import (
+    NoticeBanner,
+    bids_notices,
+    style_secondary_label,
+    wrap_tooltip,
+)
 from fmri_local_process.gui.toolbox_state import ToolboxState
 from fmri_local_process.processing import sequence_params as sp
 
@@ -91,6 +96,8 @@ class SequencePage(QWidget):
         row.addWidget(self.save_button)
         layout.addLayout(row)
 
+        self.banner = NoticeBanner()
+        layout.addWidget(self.banner)
         self.status = QLabel()
         style_secondary_label(self.status)
         layout.addWidget(self.status)
@@ -120,6 +127,7 @@ class SequencePage(QWidget):
         if current in names:
             self.subject_combo.setCurrentText(current)
         self.subject_combo.blockSignals(False)
+        self.banner.set_messages(bids_notices(bids_root, bool(names)))
         if bids_root is None:
             self.runs = []
             self.log.setPlainText("Choose the BIDS folder on the Setup & Convert tab.")

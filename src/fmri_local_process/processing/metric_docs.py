@@ -21,6 +21,7 @@ class MetricDoc:
     equations: tuple[str, ...]  # mathtext, without the $...$
     text: str
     refs: tuple[Ref, ...] = ()
+    typical: str = ""  # typical values / published rules of thumb, '' when none given
 
 
 FRISTON_1998 = Ref(

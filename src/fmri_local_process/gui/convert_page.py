@@ -30,9 +30,9 @@ from PySide6.QtWidgets import (
 )
 
 from fmri_local_process.gui.backup_box import BackupBox
+from fmri_local_process.gui.docker_controls import DockerControlThread
 from fmri_local_process.gui.folder_panel import FolderPanel
 from fmri_local_process.gui.image_view import HelpToggle
-from fmri_local_process.gui.preprocess_gui import DockerControlThread
 from fmri_local_process.gui.qt_common import (
     ERROR_COLOR,
     HOME_BASE_ACCENT_COLOR,
@@ -40,6 +40,7 @@ from fmri_local_process.gui.qt_common import (
     PROCESS_ACCENT_HOVER_COLOR,
     RAW_ACCENT_COLOR,
     WARNING_COLOR,
+    NoticeBanner,
     accent_group_box_stylesheet,
     primary_action_stylesheet,
     style_secondary_label,
@@ -161,12 +162,35 @@ def report_lines(report: ConversionReport) -> list[str]:
         f"NO SCANS  {folder}: no series folder matches a scan rule (found: {found})"
         for folder, found in report.no_scans
     ]
-    lines += [
-        f"NOT PLACED  {key}: {why} -- see ID & Behaviour Logs" for key, why in report.unplaced
-    ]
+    lines += [f"NOT PLACED  {key}: {why} -- see Behaviour logs" for key, why in report.unplaced]
     lines += [f"MISSING  {what} log" for what in report.missing]
     lines += [f"FAILED  {what}: {why}" for what, why in report.failures]
     return lines
+
+
+def has_subfolders(folder: Path) -> bool:
+    try:
+        return any(child.is_dir() for child in folder.iterdir())
+    except OSError:  # gone, or (OneDrive) not synced
+        return False
+
+
+def setup_notices(state: ToolboxState) -> list[str]:
+    """What the Setup tab is missing: folders not chosen, or a DICOM folder with no sessions."""
+    dicom, behav, bids = (state.folder(key) for key in ("dicom", "behav", "bids"))
+    messages = []
+    if dicom is None:
+        messages.append("No DICOM sessions folder chosen: Browse for it above.")
+    elif not has_subfolders(dicom):
+        messages.append(f"No session folders in {dicom}: nothing to convert.")
+    if behav is None:
+        messages.append(
+            "No behavioural logs folder chosen: the BOLD runs get no events files "
+            "(Browse for it above if this study has logs)."
+        )
+    if bids is None:
+        messages.append("No BIDS folder chosen: Browse for the folder to convert into.")
+    return messages
 
 
 HELP_TEXT = (
@@ -242,8 +266,8 @@ class ConvertPage(QWidget):
                 state,
                 "bids",
                 "BIDS Folder",
-                "Where Convert to BIDS writes. The ID & Behaviour Logs, Scan lengths, BIDS "
-                "Crosscheck and Preprocess tabs all work on it.",
+                "Where Convert to BIDS writes. The Scan sessions, Behaviour logs, Scan lengths, "
+                "BIDS Crosscheck and Preprocess tabs all work on it.",
                 home_base=True,
             )
         )
@@ -329,6 +353,8 @@ class ConvertPage(QWidget):
         self.defacer_probe: DefacerProbe | None = None
         self.defacer_error = ""  # why defacing isn't available ("" when it is)
         layout.addLayout(top)
+        self.banner = NoticeBanner()
+        layout.addWidget(self.banner)
         layout.addWidget(self.help.box)
 
         self.lock_label = QLabel()
@@ -357,8 +383,10 @@ class ConvertPage(QWidget):
         layout.addWidget(splitter, 1)
 
         state.folder_changed.connect(lambda _key: self.update_controls())
+        state.folder_changed.connect(lambda _key: self.update_notices())
         state.busy_changed.connect(self.update_controls)
         self.update_controls()
+        self.update_notices()
         self.check_defacer()
 
     def _build_progress_group(self) -> QGroupBox:
@@ -386,6 +414,10 @@ class ConvertPage(QWidget):
 
     def show_page(self) -> None:
         self.update_controls()
+        self.update_notices()
+
+    def update_notices(self) -> None:
+        self.banner.set_messages(setup_notices(self.state))
 
     def update_controls(self) -> None:
         dicom, bids = self.state.folder("dicom"), self.state.folder("bids")

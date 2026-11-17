@@ -1,6 +1,6 @@
 """Export the behavioural logs on their own, as BIDS events.tsv files, to a folder of choice.
 
-The ID & Behaviour Logs tab's "Export logs..." -- events without converting any scans: for
+The Behaviour logs tab's "Export logs..." -- events without converting any scans: for
 a quick look at the behaviour, or to hand over. The corrections and verdicts on the tab
 apply: corrected IDs and dates are used, and logs marked error or not used are left out.
 
@@ -11,8 +11,9 @@ Two layouts:
 
 A log matched to a scan session gets that session's number. One that isn't (no session for
 its ID or date, or one of several for a session) goes under unplaced/, named with its log
-date (acq-YYYYMMDD) instead, so nothing is silently guessed. Each events.tsv has a JSON
-sidecar naming its source log, as the converter writes.
+date (acq-YYYYMMDD) instead, so nothing is silently guessed -- or, exporting into the
+BIDS folder itself (skip_unplaced), is left out, since an unplaced/ folder isn't valid BIDS.
+Each events.tsv has a JSON sidecar naming its source log, as the converter writes.
 """
 
 import json
@@ -69,6 +70,7 @@ def export_events(
     out_root: Path,
     layout: str = ONE_FOLDER,
     progress: ExportProgress | None = None,
+    skip_unplaced: bool = False,
 ) -> ExportReport:
     report = ExportReport()
     taken: set[Path] = set()
@@ -81,6 +83,9 @@ def export_events(
             continue
         if info.excluded:
             report.left_out.append((info.key, f"marked '{info.correction.review}'"))
+            continue
+        if skip_unplaced and (match.status != MATCHED or match.session is None):
+            report.left_out.append((info.key, "not matched to a scan session"))
             continue
         target = unique(target_for(match, out_root, layout), taken)
         try:

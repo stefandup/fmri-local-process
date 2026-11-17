@@ -7,7 +7,7 @@ package doesn't depend on vr_lab_toolbox.
 import textwrap
 from pathlib import Path
 
-from PySide6.QtCore import QStandardPaths, QUrl
+from PySide6.QtCore import QStandardPaths, Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QLabel, QSizePolicy
 
@@ -30,6 +30,42 @@ RUNNING_COLOR = "#3498db"
 WARNING_COLOR = "#f39c12"
 ERROR_COLOR = "#e74c3c"
 UNKNOWN_COLOR = "#9aa0a6"
+
+
+NOTICE_BACKGROUND = "#fdebd0"  # light amber, under the WARNING_COLOR edge
+
+
+class NoticeBanner(QLabel):
+    """What a tab is missing to show or do its work, said plainly with where to fix it, e.g.
+    'No behavioural logs found in X'. One line per problem; hidden when nothing is missing."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWordWrap(True)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setStyleSheet(
+            f"QLabel {{ background-color: {NOTICE_BACKGROUND}; color: black; "
+            f"border-left: 5px solid {WARNING_COLOR}; padding: 6px 10px; font-weight: bold; }}"
+        )
+        self.shown: list[str] = []
+        self.setVisible(False)
+
+    def set_messages(self, messages: list[str]) -> None:
+        self.shown = list(messages)
+        self.setText("\n".join(f"⚠ {message}" for message in messages))
+        self.setVisible(bool(messages))
+
+
+def bids_notices(bids_root: Path | None, has_sessions: bool) -> list[str]:
+    """The banner of a tab that reads the BIDS folder's sessions."""
+    if bids_root is None:
+        return ["No BIDS folder chosen: choose it on the Setup & Convert to BIDS tab."]
+    if not has_sessions:
+        return [
+            f"No converted sessions in {bids_root} yet: convert the DICOMs on the Setup & "
+            "Convert to BIDS tab first."
+        ]
+    return []
 
 
 def apply_app_style(app: QApplication) -> None:
