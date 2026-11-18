@@ -12,6 +12,7 @@ progress and a stop flag, and numbered tabs.
 ## The layers
 
 ```
+toy_gui_0_plain.py  0. all in one Qt window (before)      real: gui/ as it is today
 toy_processing.py   1. the work: plain functions          real: processing/ (unchanged)
 toy_app.py          2. shared, no Qt                      real: the new app/
 toy_gui.py          3a. PySide6 window, display only      real: gui/
@@ -140,8 +141,15 @@ Both front ends build their numbered tabs from `TAB_ORDER`.
 
 ## Stepping through it
 
-Run the tests in this order (VS Code Test Explorer, or `pytest tests/toy_app_layer -v`):
+First run the plain window, then the split one. Both pause 1 s per file so you can see
+the thread at work:
 
+    python tests/toy_app_layer/toy_gui_0_plain.py
+    python tests/toy_app_layer/toy_gui.py
+
+Then run the tests in this order (VS Code Test Explorer, or `pytest tests/toy_app_layer -v`):
+
+0. `test_toy_0_plain_gui.py`: the plain window, and how to read a Qt test
 1. `test_toy_1_app.py`: the app layer alone, with a fake listener
 2. `test_toy_2_gui.py`: the window, offscreen
 3. `test_toy_3_tui.py`: the terminal app, through Textual's test pilot (the same two

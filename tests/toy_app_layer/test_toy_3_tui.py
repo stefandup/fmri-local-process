@@ -8,9 +8,9 @@ import pytest
 
 pytest.importorskip("textual")  # until textual is in the requirements
 
-from test_toy_1_app import make_folder  # noqa: E402
 from textual.widgets import DataTable, Input, Static, TabbedContent  # noqa: E402
 from toy_app import JsonSettings, ToolboxState  # noqa: E402
+from toy_data import make_folder  # noqa: E402
 from toy_tui import ToyTui  # noqa: E402
 
 

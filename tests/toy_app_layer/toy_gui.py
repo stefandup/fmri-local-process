@@ -10,12 +10,19 @@ BEFORE (how gui/ is built today): the loop sits inside the QThread, so only Qt c
                 self.file_counted.emit(path.name, count_lines(path))
 
 AFTER (below): the loop lives in toy_app.CountJob, and the QThread just runs it.
+
+Compare with toy_gui_0_plain.py, the same window before the split.
+Run it:  python tests/toy_app_layer/toy_gui.py
 """
 
+import sys
+import tempfile
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QSettings, QThread, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -38,6 +45,9 @@ from toy_app import (
     summary_text,
     tab_text,
 )
+from toy_data import make_folder
+
+DEMO_PAUSE = 0.0  # main() sets 1 s per file, so you can watch the thread; tests keep 0
 
 
 class CountThread(QThread):
@@ -57,6 +67,7 @@ class CountThread(QThread):
     # The CountListener methods: just turn each call into a signal.
     def on_file(self, name: str, lines: int, done: int, total: int) -> None:
         self.file_counted.emit(name, lines, done, total)
+        time.sleep(DEMO_PAUSE)  # on the worker thread, so the window stays responsive
 
     def on_done(self, summary: CountSummary) -> None:
         self.all_done.emit(summary)
@@ -141,3 +152,23 @@ class ToolboxWindow(QMainWindow):
 
     def update_header(self) -> None:
         self.header.setText(header_text(self.state))
+
+
+def main() -> None:
+    global DEMO_PAUSE
+    DEMO_PAUSE = 1.0
+    app = QApplication(sys.argv)
+    # Registry key HKEY_CURRENT_USER\Software\MooiToolbox\ToySplit (separate from step 0's).
+    state = ToolboxState(QSettings("MooiToolbox", "ToySplit"))
+    window = ToolboxWindow(state)
+    page = window.pages[FOLDER_TAB]
+    if state.folder is None and isinstance(page, FolderPage):  # first run: offer a demo folder
+        page.path_edit.setText(str(make_folder(Path(tempfile.gettempdir()) / "toy_demo")))
+    window.setWindowTitle("Toy toolbox (app layer)")
+    window.resize(500, 350)
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

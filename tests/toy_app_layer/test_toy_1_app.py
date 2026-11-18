@@ -13,16 +13,7 @@ from toy_app import (
     header_text,
     summary_text,
 )
-
-
-def make_folder(tmp_path: Path) -> Path:
-    """Synthetic data: two small text files (and one that isn't .txt)."""
-    folder = tmp_path / "notes"
-    folder.mkdir()
-    (folder / "a.txt").write_text("one\ntwo\n")
-    (folder / "b.txt").write_text("one\ntwo\nthree\n")
-    (folder / "skip.csv").write_text("not counted\n")
-    return folder
+from toy_data import make_folder
 
 
 class FakeListener:
