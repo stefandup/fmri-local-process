@@ -2,10 +2,11 @@
 philaniBIDSspreadsheet.py): counts for the whole BIDS folder, then one table to scroll
 through -- a row per session, per scan how many runs and how long -- with the cells that need
 a look coloured (red: missing, yellow: short, orange: several runs or not defaced, blue: too
-long; green: trimmed to the expected length, done). Export CSV writes the same table. A
-second tab lists the action log: every change made to the BIDS folder, newest first, with a
-search box."""
+long; green: trimmed to the expected length, done), and each session's problems written out
+in a few words. Export CSV writes the same table. A second tab lists the action log: every
+change made to the BIDS folder, newest first, with a search box."""
 
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -29,19 +30,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from fmri_local_process.gui.crosscheck_gui import (
-    CROSSCHECKED_COLOR,
-    CROSSCHECKED_ICON,
-    ICONS,
-    LEGEND,
-    OK_ICON,
-    needs_a_look,
-    problem_text,
-)
+from fmri_local_process.gui.crosscheck_gui import CROSSCHECKED_COLOR, needs_a_look
 from fmri_local_process.gui.qt_common import NoticeBanner, bids_notices, wrap_tooltip
 from fmri_local_process.gui.toolbox_state import ToolboxState
 from fmri_local_process.processing.action_log import COLUMNS, read_actions
 from fmri_local_process.processing.crosscheck import (
+    Issue,
     SessionReview,
     overview_columns,
     overview_row,
@@ -71,6 +65,25 @@ CELL_LEGEND = (
     "Green ✂: trimmed, now the expected length (done)"
 )
 SUMMARY_MAX_LINES = 14
+# A session's problems in a few words: '<what>: <which scans>', most urgent first.
+PROBLEM_WORDS = {
+    "missing": "missing",
+    "short": "short",
+    "pending": "keep one of",
+    "long": "trim",
+    "check": "check log of",
+    "extra": "extra session",
+}
+PROBLEMS_LEGEND = (
+    "missing: an expected file isn't there\n"
+    "short: shorter than expected (or than the same scan elsewhere), or no events\n"
+    "keep one of: a scan converted as several runs\n"
+    "trim: longer than expected\n"
+    "check log of: events from a log dated other than the scan\n"
+    "extra session: the subject has more sessions than expected\n"
+    "crosschecked: marked as reviewed (whatever its problems)"
+)
+OWNER_PREFIX = re.compile(r"^sub-[^_]+_(?:ses-[^_]+_)?")
 SESSION_KINDS = {
     "pending": "session(s) with repeated runs to pick",
     "short": "session(s) with a short scan or empty events",
@@ -78,6 +91,33 @@ SESSION_KINDS = {
     "missing": "session(s) with missing files",
     "check": "session(s) with a log dated other than the scan",
 }
+
+
+def issue_target(issue: Issue) -> str:
+    """The scan an issue is about, shortly: 'task-Rest_bold', 'T1w'; '' when about none."""
+    if issue.kind == "extra":
+        return ""
+    if issue.path is not None:
+        name = issue.path.name.split(".", 1)[0]
+    else:
+        name = re.split(r"[:(]", issue.text, maxsplit=1)[0].strip()
+        name = name.removesuffix(".tsv").removesuffix(".json")
+    return OWNER_PREFIX.sub("", name)
+
+
+def problem_summary(review: SessionReview) -> str:
+    """'trim: task-Rest_bold; missing: task-Matching_events', 'ok' or 'crosschecked'."""
+    if review.crosschecked:
+        return "crosschecked"
+    parts = []
+    for kind, word in PROBLEM_WORDS.items():
+        targets = list(dict.fromkeys(issue_target(i) for i in review.issues if i.kind == kind))
+        named = [t for t in targets if t]
+        if named:
+            parts.append(f"{word}: {', '.join(named)}")
+        elif targets:
+            parts.append(word)
+    return "; ".join(parts) or "ok"
 
 
 def summary_lines(reviews: list[SessionReview], expected: int, excluded: int) -> list[str]:
@@ -91,8 +131,8 @@ def summary_lines(reviews: list[SessionReview], expected: int, excluded: int) ->
     lines = [
         f"{len(subjects)} subject(s), {len(sessions)} session(s); "
         f"{expected} session(s) per subject expected",
-        f"{OK_ICON} {clean} session(s) with nothing to resolve; "
-        f"{CROSSCHECKED_ICON} {marked} marked crosschecked; {waiting} still to check",
+        f"{clean} session(s) with nothing to resolve; {marked} marked crosschecked; "
+        f"{waiting} still to check",
     ]
     with_t1w = {r.subject for r in sessions if any(d.label == "T1w" for d in r.files)}
     lines.append(f"Subjects with at least 1 T1w: {len(with_t1w)}")
@@ -103,12 +143,12 @@ def summary_lines(reviews: list[SessionReview], expected: int, excluded: int) ->
     over = sum(n > expected for n in per_subject.values())
     under = sum(n < expected for n in per_subject.values())
     if over:
-        lines.append(f"{ICONS['extra']} {over} subject(s) with more sessions than expected")
+        lines.append(f"{over} subject(s) with more sessions than expected")
     if under:
         lines.append(f"{under} subject(s) with fewer sessions than expected (not converted yet?)")
     for kind, name in SESSION_KINDS.items():
         if affected := sum(any(i.kind == kind for i in r.issues) for r in sessions):
-            lines.append(f"{ICONS[kind]} {affected} {name}")
+            lines.append(f"{affected} {name}")
     if excluded:
         lines.append(f"{excluded} DICOM session folder(s) deleted at BIDS Crosscheck (left out)")
     return lines
@@ -229,7 +269,7 @@ class OverviewPage(QWidget):
         margins = self.summary_label.contentsMargins()
         frame = 2 * self.summary_label.frameWidth() + margins.top() + margins.bottom()
         padding = 2 * int(self.summary_label.document().documentMargin())
-        # One line of slack: lines with an icon (❗, ✂) are a little taller than the rest.
+        # One line of slack, so the last line never needs a scroll bar.
         self.summary_label.setFixedHeight((lines + 1) * line_height + frame + padding)
 
     def fill_sessions(self) -> None:
@@ -242,7 +282,7 @@ class OverviewPage(QWidget):
         table.setColumnCount(len(columns))
         table.setHorizontalHeaderLabels(columns)
         problems_header = QTableWidgetItem("Problems")
-        problems_header.setToolTip(LEGEND)
+        problems_header.setToolTip(PROBLEMS_LEGEND)
         table.setHorizontalHeaderItem(len(columns) - 2, problems_header)
         note_header = QTableWidgetItem("Note")
         note_header.setToolTip("Double-click a note to write or change it (Enter saves).")
@@ -257,8 +297,9 @@ class OverviewPage(QWidget):
                     item.setBackground(QColor(CELL_COLORS[cell.status]))
                     item.setForeground(black)
                 table.setItem(row, column, item)
-            problems = QTableWidgetItem(problem_text(review))
+            problems = QTableWidgetItem(problem_summary(review))
             problems.setFlags(problems.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            problems.setData(Qt.ItemDataRole.UserRole, needs_a_look(review))  # for the filter
             problems.setToolTip("\n".join(i.text for i in review.issues) or "Nothing to resolve")
             if needs_a_look(review):
                 problems.setBackground(QColor(CELL_COLORS["missing"]))
@@ -282,7 +323,7 @@ class OverviewPage(QWidget):
         problems_column = self.session_table.columnCount() - 2
         for row in range(self.session_table.rowCount()):
             item = self.session_table.item(row, problems_column)
-            clean = item is not None and item.text().startswith((OK_ICON, CROSSCHECKED_ICON))
+            clean = item is not None and not item.data(Qt.ItemDataRole.UserRole)
             self.session_table.setRowHidden(row, only and clean)
 
     def on_note_edited(self, item: QTableWidgetItem) -> None:

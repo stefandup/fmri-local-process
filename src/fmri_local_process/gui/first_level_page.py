@@ -1,5 +1,6 @@
 """The First-level stats tab: pick a setup (the checkerboard first), a subject and the regions,
-fit the GLM to each of the subject's runs of that task, and compare them side by side.
+fit the GLM to each of the subject's runs of that task, and compare them side by side. The
+first subject is modelled at startup (auto_run), so the tab opens on results.
 
 * Regions come from a standard atlas (Harvard-Oxford, Juelich, MNI lobes) copied out of the
   C-PAC image; tick them on and off. A setup ticks its focus regions first (occipital
@@ -489,6 +490,19 @@ class FirstLevelPage(QWidget):
         self._tick(set())
 
     # ---- running -------------------------------------------------------------------------------
+
+    def auto_run(self) -> bool:
+        """At startup: model the first subject at once, so the tab opens on results rather
+        than on a button newcomers may not know to press. True when it started."""
+        output = self.state.folder("output")
+        subject = self.subject_box.currentText()
+        if output is None or not subject or self.worker is not None or self.results:
+            return False
+        reg = str(self.data_box.currentData())
+        if not fl.find_runs(output, subject, self.setup.task, reg):
+            return False
+        self.on_run()
+        return self.worker is not None
 
     def on_run(self) -> None:
         output = self.state.folder("output")

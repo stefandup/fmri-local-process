@@ -6,20 +6,24 @@
   BIDS files changed since (trimmed, reconverted) shows as stale and is run again.
 * The results, grouped subject > session > run, show the key image quality metrics (IQMs);
   values that are outliers among the same kind of scan are highlighted. Select a run to see
-  MRIQC's own report beside it.
+  the toolbox's own look at the scan below (mriqc_views.py: drawn from the BIDS NIfTI, in the
+  background, the last few kept), and rate it: 1 bad (discard), 2 unsure, 3 keep, with an
+  optional comment (saved in the MRIQC output folder, toolbox_qc_ratings.tsv).
 * Above it all, a banner says what is missing: no BIDS folder or scans, no output folder or
   results yet, Docker not installed / not running, or the MRIQC image not downloaded (with a
   button to fix each where it can be fixed here).
 """
 
 import threading
+from collections import OrderedDict
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -28,6 +32,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -35,7 +40,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QSplitter,
-    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTreeWidget,
@@ -47,7 +51,7 @@ from PySide6.QtWidgets import (
 from fmri_local_process.gui.docker_controls import DOCKER_RECHECK_MS, DockerStatus
 from fmri_local_process.gui.folder_panel import FolderPanel
 from fmri_local_process.gui.image_download import ImageDownload
-from fmri_local_process.gui.image_view import HelpToggle
+from fmri_local_process.gui.image_view import HelpToggle, ZoomableImageView
 from fmri_local_process.gui.qt_common import (
     ERROR_COLOR,
     OK_COLOR,
@@ -64,13 +68,14 @@ from fmri_local_process.gui.qt_common import (
 from fmri_local_process.gui.run_progress import RunProgress
 from fmri_local_process.gui.toolbox_state import QUALITY_CHECKING, VIEW_ONLY, ToolboxState
 from fmri_local_process.processing import mriqc as mq
+from fmri_local_process.processing import mriqc_views
 from fmri_local_process.processing.cpac_docker import docker_resources, finished_node
 from fmri_local_process.processing.review_mode import packaged_mriqc
 
-if TYPE_CHECKING:  # imported for real only when a report is first shown (slow to start)
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-
 OUTLIER_BACKGROUND = "#f5b7b1"
+RATING_COLORS = {1: "#f1948a", 2: "#f9e79f", 3: "#abebc6"}  # black text reads on these
+VIEW_CACHE_SIZE = 24  # drawn scans kept: going back to one is instant
+QC_COLUMN, FLAGS_COLUMN, FIRST_METRIC_COLUMN = 1, 2, 3
 STALE_BACKGROUND = "#f9e79f"
 RUNNING, FAILED = "running", "failed"
 STATUS_COLOR = {
@@ -102,8 +107,10 @@ HELP_TEXT = (
     "among the same kind of scan (same task) in this dataset: more than 1.5 x the "
     "interquartile range beyond the quartiles, on the worse side (needs 5 or more runs). Hover "
     "a column header for what the metric means, or <b>Metric formulas...</b> (above the "
-    "table) for how each is calculated, typical values and references. Select a run to see "
-    "MRIQC's report."
+    "table) for how each is calculated, typical values and references.<br><br>"
+    "Select a run to see the scan below (drawn from the BIDS file), then rate it: <b>1 bad "
+    "(discard)</b>, <b>2 unsure</b> or <b>3 keep</b>, with a comment if useful. Ratings are "
+    "saved at once, in toolbox_qc_ratings.tsv in the MRIQC output folder."
     "<br><br>Nothing leaves this computer: MRIQC's upload of anonymous metrics to its web "
     "database and its usage tracking are both switched off."
 )
@@ -211,9 +218,31 @@ class MriqcThread(QThread):
             ).start()
 
 
-class MriqcPage(QWidget):
-    EMBED_REPORTS = True  # tests turn it off: no web engine offscreen
+class RenderThread(QThread):
+    """Draws one scan's view (reading a whole BOLD series takes a second or more)."""
 
+    done = Signal(object, object, str)  # key, QImage or None, why not
+
+    def __init__(self, key: tuple, path: Path, modality: str) -> None:
+        super().__init__()
+        self.key, self.path, self.modality = key, path, modality
+
+    def run(self) -> None:
+        try:
+            figure = mriqc_views.run_figure(self.path, self.modality)
+        except (mriqc_views.ViewError, MemoryError) as e:
+            self.done.emit(self.key, None, str(e))
+            return
+        # Agg draws off the GUI thread; a QImage (unlike a QPixmap) may be made here.
+        figure.set_dpi(100)
+        canvas = FigureCanvasAgg(figure)
+        canvas.draw()
+        width, height = canvas.get_width_height()
+        image = QImage(canvas.buffer_rgba(), width, height, QImage.Format.Format_RGBA8888)
+        self.done.emit(self.key, image.copy(), "")  # copy: the buffer dies with the canvas
+
+
+class MriqcPage(QWidget):
     def __init__(self, state: ToolboxState) -> None:
         super().__init__()
         self.state = state
@@ -236,8 +265,14 @@ class MriqcPage(QWidget):
         self.suggest_pending = False  # 'Suggest' waits for Docker's fresh limits
         self.probe: ProbeThread | None = None
         self.worker: MriqcThread | None = None
-        self.web: QWebEngineView | None = None  # the report view, made on first use
-        self.web_tried = False
+        # Drawing a scan's view: one at a time; a run clicked meanwhile waits as 'wanted'
+        # (only the last one clicked), so quick clicking never piles up work.
+        self.renderer: RenderThread | None = None
+        self.wanted: tuple | None = None  # (key, path, modality) to draw next
+        self.views: OrderedDict[tuple, QPixmap | str] = OrderedDict()  # key: (path, mtime)
+        self.shown_key: tuple | None = None
+        self.ratings: dict[str, mq.QcRating] = {}
+        self.runs_by_name: dict[str, mq.RunIqms] = {}
         self.formulas_dialogs: dict[str, QDialog] = {}  # per modality, made on first use
 
         layout = QVBoxLayout(self)
@@ -381,7 +416,7 @@ class MriqcPage(QWidget):
         return box
 
     def set_expanded(self, expanded: bool) -> None:
-        """Expand: the results table and report fill the tab (the folder, run and subject
+        """Expand: the results table and the scan view fill the tab (the folder, run and subject
         panels and the notices are hidden; a running batch's progress stays). Restore: back."""
         self.top_panel.setVisible(not expanded)
         self.subjects_panel.setVisible(not expanded)
@@ -389,7 +424,7 @@ class MriqcPage(QWidget):
         self.expand_button.setToolTip(
             "Show the folder, run and subject panels again."
             if expanded
-            else "Give the results and MRIQC's report the whole tab (hides the panels above "
+            else "Give the results and the scan view the whole tab (hides the panels above "
             "and the subject list; a run's progress stays)."
         )
 
@@ -448,7 +483,7 @@ class MriqcPage(QWidget):
 
     def _build_results(self) -> QWidget:
         splitter = QSplitter(Qt.Orientation.Vertical)
-        table_panel = QWidget()
+        table_panel = self.table_panel = QWidget()
         table_layout = QVBoxLayout(table_panel)
         table_layout.setContentsMargins(0, 0, 0, 0)
         row = QHBoxLayout()
@@ -471,14 +506,6 @@ class MriqcPage(QWidget):
         )
         self.formulas_button.clicked.connect(self.on_show_formulas)
         row.addWidget(self.formulas_button)
-        self.group_button = QPushButton("Group report")
-        self.group_button.setToolTip("MRIQC's group report: every run's metrics side by side.")
-        self.group_button.clicked.connect(self.on_group_report)
-        row.addWidget(self.group_button)
-        self.browser_button = QPushButton("Open in browser")
-        self.browser_button.setToolTip("Open the report shown below in your web browser.")
-        self.browser_button.clicked.connect(self.on_open_in_browser)
-        row.addWidget(self.browser_button)
         self.expand_button = QPushButton()
         self.expand_button.setCheckable(True)
         self.expand_button.toggled.connect(self.set_expanded)
@@ -490,16 +517,95 @@ class MriqcPage(QWidget):
         table_layout.addWidget(self.tree, 1)
         splitter.addWidget(table_panel)
 
-        self.report_stack = QStackedWidget()
-        self.report_note = QLabel("Select a run above to see its MRIQC report here.")
-        self.report_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.report_note.setWordWrap(True)
-        style_secondary_label(self.report_note)
-        self.report_stack.addWidget(self.report_note)
-        splitter.addWidget(self.report_stack)
-        splitter.setSizes([380, 520])
-        self.shown_report: Path | None = None
+        view_panel = QWidget()
+        view_layout = QVBoxLayout(view_panel)
+        view_layout.setContentsMargins(0, 0, 0, 0)
+        view_layout.addLayout(self._build_rating_row())
+        self.scan_view = ZoomableImageView()
+        for text, step, tip in (
+            ("◀ Prev run", -1, "The run above in the table (keeps the view expanded)."),
+            ("Next run ▶", 1, "The run below in the table (keeps the view expanded)."),
+        ):
+            button = QPushButton(text)
+            button.setToolTip(tip)
+            button.clicked.connect(lambda _=False, s=step: self.step_run(s))
+            self.scan_view.toolbar.addWidget(button)
+        self.view_expand_button = QPushButton()
+        self.view_expand_button.setCheckable(True)
+        self.view_expand_button.toggled.connect(self.set_view_expanded)
+        self.scan_view.toolbar.addWidget(self.view_expand_button)
+        view_layout.addWidget(self.scan_view, 1)
+        splitter.addWidget(view_panel)
+        splitter.setSizes([340, 560])
+        self.show_note("Select a run above to see the scan here and rate it.")
+        self.set_view_expanded(False)
         return splitter
+
+    def set_view_expanded(self, expanded: bool) -> None:
+        """Expand view: the scan and its rating row fill the tab (the table and every panel
+        hidden; Prev / Next run still go through the runs). Restore: back as it was."""
+        self.table_panel.setVisible(not expanded)
+        panels = not expanded and not self.expand_button.isChecked()
+        self.top_panel.setVisible(panels)
+        self.subjects_panel.setVisible(panels)
+        self.view_expand_button.setText("Restore ⤡" if expanded else "Expand view ⤢")
+        self.view_expand_button.setToolTip(
+            "Show the results table and the panels again."
+            if expanded
+            else "Give the scan the whole tab: hides the table and the panels. Rate it, then "
+            "Next run."
+        )
+        if self.scan_view.fit:
+            QTimer.singleShot(0, self.scan_view.fit_to_window)  # once the new size is laid out
+
+    def run_items(self) -> list[QTreeWidgetItem]:
+        """The run rows in table order (not the subject and session rows)."""
+        items = []
+        for top in range(self.tree.topLevelItemCount()):
+            subject = self.tree.topLevelItem(top)
+            for s in range(subject.childCount() if subject else 0):
+                session = subject.child(s) if subject else None
+                for r in range(session.childCount() if session else 0):
+                    run = session.child(r) if session else None
+                    if run is not None:
+                        items.append(run)
+        return items
+
+    def step_run(self, step: int) -> None:
+        """Select the previous / next run (the first one when none is selected)."""
+        items = self.run_items()
+        if not items:
+            return
+        current = self.tree.currentItem()
+        index = items.index(current) + step if current in items else 0
+        self.tree.setCurrentItem(items[max(0, min(index, len(items) - 1))])
+
+    def _build_rating_row(self) -> QHBoxLayout:
+        """QC rating: [1 bad: discard] [2 unsure] [3 keep]   Comment: [...........]"""
+        row = QHBoxLayout()
+        self.rating_title = QLabel("QC rating:")
+        row.addWidget(self.rating_title)
+        self.rating_group = QButtonGroup(self)
+        for value, meaning in mq.RATINGS.items():
+            button = QPushButton(f"{value} {meaning}")
+            button.setCheckable(True)
+            button.setStyleSheet(
+                f"QPushButton:checked {{ background-color: {RATING_COLORS[value]}; "
+                "color: black; font-weight: bold; }"
+            )
+            self.rating_group.addButton(button, value)
+            row.addWidget(button)
+        self.rating_group.idClicked.connect(self.on_rating_clicked)
+        row.addWidget(QLabel("Comment:"))
+        self.comment = QLineEdit()
+        self.comment.setPlaceholderText("optional; saved when you press Enter or click away")
+        self.comment.editingFinished.connect(self.save_current_rating)
+        row.addWidget(self.comment, 1)
+        self.rating_note = QLabel()
+        style_secondary_label(self.rating_note)
+        row.addWidget(self.rating_note)
+        self.set_rating_enabled(False)
+        return row
 
     # ---- refreshing ----------------------------------------------------------------------------
 
@@ -622,6 +728,8 @@ class MriqcPage(QWidget):
             )
         else:
             self.runs, self.unreadable = [], []
+        self.ratings = mq.read_ratings(output_root) if output_root is not None else {}
+        self.runs_by_name = {run.name: run for run in self.runs}
         self.fill_tree()
         self.update_notices()
 
@@ -629,15 +737,21 @@ class MriqcPage(QWidget):
         modality = str(self.modality_box.currentData())
         metrics = mq.METRICS[modality]
         flags = mq.flag_outliers(self.runs)
+        selected = self.selected_run()
+        self.tree.blockSignals(True)  # clearing would select nothing: keep the view as it is
         self.tree.clear()
-        self.tree.setColumnCount(2 + len(metrics))
-        self.tree.setHeaderLabels(["Subject / session / run", "Flags", *(m.label for m in metrics)])
+        self.tree.setColumnCount(FIRST_METRIC_COLUMN + len(metrics))
+        self.tree.setHeaderLabels(
+            ["Subject / session / run", "QC rating", "Flags", *(m.label for m in metrics)]
+        )
         header = self.tree.headerItem()
-        for column, metric in enumerate(metrics, start=2):
+        for column, metric in enumerate(metrics, start=FIRST_METRIC_COLUMN):
             better = f" ({metric.better} is better)" if metric.better else ""
             header.setToolTip(column, wrap_tooltip(metric.help + better))
-        header.setToolTip(1, "How many of the run's metrics are outliers (or 'stale').")
+        header.setToolTip(QC_COLUMN, "Your verdict on the run: 1 bad (discard), 2 unsure, 3 keep.")
+        header.setToolTip(FLAGS_COLUMN, "How many of the run's metrics are outliers (or 'stale').")
         black = QColor("black")
+        reselect: QTreeWidgetItem | None = None
         for subject, sessions in mq.by_subject_session(self.runs).items():
             subject_item = QTreeWidgetItem([f"sub-{subject}"])
             bold_font = subject_item.font(0)
@@ -655,14 +769,19 @@ class MriqcPage(QWidget):
                     note = f"{len(flagged)} outlier(s)" if flagged else ""
                     if run.state == mq.STALE:
                         note = ", ".join(filter(None, [note, "stale"]))
-                    run_item = QTreeWidgetItem([run.label, note])
-                    run_item.setData(0, Qt.ItemDataRole.UserRole, str(run.report or ""))
+                    run_item = QTreeWidgetItem([run.label, "", note])
+                    run_item.setData(0, Qt.ItemDataRole.UserRole, run.name)
                     run_item.setToolTip(0, run.name)
+                    self.show_rating_in(run_item, self.ratings.get(run.name))
+                    if run.name == selected:
+                        reselect = run_item
                     if run.state == mq.STALE:
-                        run_item.setBackground(1, QColor(STALE_BACKGROUND))
-                        run_item.setForeground(1, black)
-                        run_item.setToolTip(1, "The BIDS file changed since MRIQC ran: rerun.")
-                    for column, metric in enumerate(metrics, start=2):
+                        run_item.setBackground(FLAGS_COLUMN, QColor(STALE_BACKGROUND))
+                        run_item.setForeground(FLAGS_COLUMN, black)
+                        run_item.setToolTip(
+                            FLAGS_COLUMN, "The BIDS file changed since MRIQC ran: rerun."
+                        )
+                    for column, metric in enumerate(metrics, start=FIRST_METRIC_COLUMN):
                         value = run.values.get(metric.key)
                         run_item.setText(column, "" if value is None else f"{value:.3g}")
                         if metric.key in flagged:
@@ -673,19 +792,40 @@ class MriqcPage(QWidget):
                             )
                     session_item.addChild(run_item)
                 if session_item.childCount():
-                    session_item.setText(1, f"{session_flags} outlier(s)" if session_flags else "")
+                    session_item.setText(
+                        FLAGS_COLUMN, f"{session_flags} outlier(s)" if session_flags else ""
+                    )
                     subject_item.addChild(session_item)
                 subject_flags += session_flags
             if subject_item.childCount():
-                subject_item.setText(1, f"{subject_flags} outlier(s)" if subject_flags else "")
+                subject_item.setText(
+                    FLAGS_COLUMN, f"{subject_flags} outlier(s)" if subject_flags else ""
+                )
                 self.tree.addTopLevelItem(subject_item)
         self.tree.expandAll()
         for column in range(self.tree.columnCount()):
             self.tree.resizeColumnToContents(column)
-        output_root = self.state.folder("mriqc")
-        self.group_button.setEnabled(
-            output_root is not None and mq.group_report(output_root, modality) is not None
-        )
+        if reselect is not None:
+            self.tree.setCurrentItem(reselect)
+        self.tree.blockSignals(False)
+        self.on_run_selected()
+
+    @staticmethod
+    def show_rating_in(item: QTreeWidgetItem, rating: mq.QcRating | None) -> None:
+        item.setText(QC_COLUMN, rating.text if rating else "")
+        tip = ""
+        if rating is not None:
+            who = ", ".join(filter(None, [rating.rater, rating.date.replace("T", " ")]))
+            tip = "\n".join(filter(None, [rating.comment, f"({who})" if who else ""]))
+        item.setToolTip(QC_COLUMN, tip)
+        if rating is not None and rating.rating in RATING_COLORS:
+            item.setBackground(QC_COLUMN, QColor(RATING_COLORS[rating.rating]))
+            item.setForeground(QC_COLUMN, QColor("black"))
+        else:
+            item.setData(QC_COLUMN, Qt.ItemDataRole.BackgroundRole, None)
+            item.setData(QC_COLUMN, Qt.ItemDataRole.ForegroundRole, None)
+        if rating is not None and rating.comment and not rating.rating:
+            item.setText(QC_COLUMN, "comment only")
 
     def notices(self) -> list[str]:
         """What is missing, most basic first."""
@@ -967,7 +1107,7 @@ class MriqcPage(QWidget):
             mq.stop_container(self.worker.docker, mq.container_name(self.worker.current))
         return True
 
-    # ---- reports -------------------------------------------------------------------------------
+    # ---- results -------------------------------------------------------------------------------
 
     def on_subject_selected(self) -> None:
         """Selecting a subject on the left jumps to it in the results."""
@@ -981,20 +1121,130 @@ class MriqcPage(QWidget):
                 self.tree.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtTop)
                 return
 
-    def on_run_selected(self) -> None:
-        items = self.tree.selectedItems()
-        report = str(items[0].data(0, Qt.ItemDataRole.UserRole) or "") if items else ""
-        if report:
-            self.show_report(Path(report))
-        elif items and items[0].childCount() == 0:
-            self.show_note("MRIQC wrote no report for this run.")
+    # ---- the selected run: its view and rating -------------------------------------------------
 
-    def on_group_report(self) -> None:
+    def selected_run(self) -> str:
+        """The selected run's name, '' when a subject or session row (or nothing) is selected."""
+        items = self.tree.selectedItems()
+        return str(items[0].data(0, Qt.ItemDataRole.UserRole) or "") if items else ""
+
+    def on_run_selected(self) -> None:
+        run = self.runs_by_name.get(self.selected_run())
+        self.show_rating(run)
+        if run is None:
+            self.show_note("Select a run above to see the scan here and rate it.")
+            return
+        bids_root = self.state.folder("bids")
+        path = bids_root / run.nifti if bids_root is not None and run.nifti is not None else None
+        try:
+            mtime = path.stat().st_mtime if path is not None else None
+        except OSError:
+            mtime = None
+        if path is None or mtime is None:
+            self.show_note(
+                f"{run.name}\n\nThe BIDS scan isn't here, so it can't be shown: rate it from "
+                "the metrics above."
+            )
+            return
+        self.request_view((str(path), mtime), path, run.modality)
+
+    def show_note(self, text: str) -> None:
+        self.shown_key = None
+        self.scan_view.set_pixmap(QPixmap(), text)
+
+    def request_view(self, key: tuple, path: Path, modality: str) -> None:
+        """Show the scan's view: from the cache at once, else drawn in the background."""
+        self.shown_key = key
+        cached = self.views.get(key)
+        if cached is not None:
+            self.views.move_to_end(key)
+            self.show_view(cached)
+            return
+        self.scan_view.set_pixmap(QPixmap(), f"Drawing {path.name}...")
+        self.wanted = (key, path, modality)
+        self.start_next_view()
+
+    def start_next_view(self) -> None:
+        if self.renderer is not None or self.wanted is None:
+            return  # one at a time: the wanted one starts when this finishes
+        key, path, modality = self.wanted
+        self.wanted = None
+        self.renderer = RenderThread(key, path, modality)
+        self.renderer.done.connect(self.on_view_drawn)
+        self.renderer.start()
+
+    def on_view_drawn(self, key: tuple, image: QImage | None, error: str) -> None:
+        if self.renderer is not None:
+            self.renderer.wait()
+        self.renderer = None
+        view: QPixmap | str = QPixmap.fromImage(image) if image is not None else error
+        self.views[key] = view
+        while len(self.views) > VIEW_CACHE_SIZE:
+            self.views.popitem(last=False)
+        if key == self.shown_key:
+            self.show_view(view)
+        self.start_next_view()
+
+    def show_view(self, view: QPixmap | str) -> None:
+        if isinstance(view, str):
+            self.scan_view.set_pixmap(QPixmap(), view)
+        else:
+            self.scan_view.set_pixmap(view)
+
+    def set_rating_enabled(self, enabled: bool) -> None:
+        for button in self.rating_group.buttons():
+            button.setEnabled(enabled)
+        self.comment.setEnabled(enabled)
+
+    def show_rating(self, run: mq.RunIqms | None) -> None:
+        """The selected run's saved rating and comment in the rating row."""
         output_root = self.state.folder("mriqc")
-        if output_root is not None:
-            path = mq.group_report(output_root, str(self.modality_box.currentData()))
-            if path is not None:
-                self.show_report(path)
+        self.set_rating_enabled(run is not None and output_root is not None)
+        rating = self.ratings.get(run.name) if run is not None else None
+        self.rating_group.setExclusive(False)  # so every button can be unchecked
+        for button in self.rating_group.buttons():
+            button.setChecked(rating is not None and self.rating_group.id(button) == rating.rating)
+        self.rating_group.setExclusive(True)
+        self.comment.blockSignals(True)
+        self.comment.setText(rating.comment if rating else "")
+        self.comment.blockSignals(False)
+        self.rating_title.setText(f"QC rating of {run.label}:" if run else "QC rating:")
+        self.rating_note.setText(f"by {rating.rater}" if rating and rating.rater else "")
+
+    def on_rating_clicked(self, _value: int) -> None:
+        self.save_current_rating()
+
+    def save_current_rating(self) -> None:
+        run, output_root = self.selected_run(), self.state.folder("mriqc")
+        if not run or output_root is None:
+            return
+        value = self.rating_group.checkedId()
+        rating = value if value in mq.RATINGS else None
+        comment = self.comment.text().strip()
+        old = self.ratings.get(run)
+        if old is not None and (old.rating, old.comment) == (rating, comment):
+            return
+        if old is None and rating is None and not comment:
+            return
+        try:
+            saved = mq.save_rating(output_root, run, rating, comment)
+        except OSError as e:
+            QMessageBox.warning(self, "Rating not saved", f"Couldn't write the ratings file: {e}")
+            return
+        if saved is None:
+            self.ratings.pop(run, None)
+        else:
+            self.ratings[run] = saved
+        items = self.tree.selectedItems()
+        if items:
+            self.show_rating_in(items[0], saved)
+        self.rating_note.setText("saved")
+
+    def stop_drawing(self) -> None:
+        """Closing: wait for a view being drawn (a running QThread must not be destroyed)."""
+        self.wanted = None
+        if self.renderer is not None:
+            self.renderer.wait()
 
     def on_show_formulas(self) -> None:
         """The formulas of the scans shown (BOLD or T1w)."""
@@ -1013,40 +1263,3 @@ class MriqcPage(QWidget):
             self.formulas_dialogs[modality] = dialog
         dialog.show()
         dialog.raise_()
-
-    def on_open_in_browser(self) -> None:
-        if self.shown_report is not None:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.shown_report)))
-
-    def show_note(self, text: str) -> None:
-        self.shown_report = None
-        self.report_note.setText(text)
-        self.report_stack.setCurrentWidget(self.report_note)
-        self.browser_button.setEnabled(False)
-
-    def show_report(self, path: Path) -> None:
-        self.shown_report = path
-        self.browser_button.setEnabled(True)
-        view = self.report_view()
-        if view is None:
-            self.report_note.setText(
-                f"{path.name}\n\nReports can't be shown inside the app here: use Open in browser."
-            )
-            self.report_stack.setCurrentWidget(self.report_note)
-            return
-        view.load(QUrl.fromLocalFile(str(path)))
-        self.report_stack.setCurrentWidget(view)
-
-    def report_view(self) -> "QWebEngineView | None":
-        """The embedded report browser, made on first use (Qt's web engine takes a moment to
-        start); None when it isn't available."""
-        if not self.web_tried:
-            self.web_tried = True
-            if self.EMBED_REPORTS:
-                try:
-                    from PySide6.QtWebEngineWidgets import QWebEngineView
-                except ImportError:
-                    return None
-                self.web = QWebEngineView()
-                self.report_stack.addWidget(self.web)
-        return self.web

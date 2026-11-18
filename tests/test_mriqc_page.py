@@ -34,7 +34,6 @@ def state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> toolbox_state.Tool
         "make_settings",
         lambda app: QSettings(str(tmp_path / f"{app}.ini"), QSettings.Format.IniFormat),
     )
-    monkeypatch.setattr(mriqc_page.MriqcPage, "EMBED_REPORTS", False)
     return toolbox_state.ToolboxState()
 
 
@@ -82,7 +81,6 @@ def test_results_grouped_by_subject_and_session(
     for subject, session, tsnr in (("01", "1", 50), ("01", "2", 52), ("02", "1", 51)):
         name = f"sub-{subject}_ses-{session}_task-rest_bold"
         write_iqms(out, f"sub-{subject}/ses-{session}/func/{name}.nii.gz", tsnr=tsnr)
-        (out / f"{name}.html").write_text("<html></html>")
     state.set_folder("bids", bids)
     state.set_folder("mriqc", out)
     page = page_with_docker(state, mq.READY)
@@ -108,9 +106,30 @@ def test_results_grouped_by_subject_and_session(
     assert run is not None and run.text(0) == "task-rest_bold"
     assert page.banner.shown == []  # everything there
 
-    tree.setCurrentItem(run)  # no web engine offscreen: the report is offered in the browser
-    assert page.shown_report == out / "sub-01_ses-1_task-rest_bold.html"
-    assert page.browser_button.isEnabled()
+    tree.setCurrentItem(run)  # an empty NIfTI: drawn in the background, says why not
+    assert page.renderer is not None
+    page.renderer.wait()
+    QApplication.processEvents()  # the thread's 'done' signal
+    assert page.renderer is None and "can't be read" in page.scan_view.image_label.text()
+    assert page.rating_title.text() == "QC rating of task-rest_bold:"
+
+    page.rating_group.button(3).click()  # keep: saved at once, shown in the table
+    page.comment.setText("slight ghosting")
+    page.comment.editingFinished.emit()
+    saved = mq.read_ratings(out)["sub-01_ses-1_task-rest_bold"]
+    assert (saved.rating, saved.comment) == (3, "slight ghosting")
+    assert run.text(mriqc_page.QC_COLUMN) == "3 keep"
+    page.fill_tree()  # the selection and its rating survive a refill
+    assert page.selected_run() == "sub-01_ses-1_task-rest_bold"
+    assert page.rating_group.checkedId() == 3 and page.comment.text() == "slight ghosting"
+    page.view_expand_button.click()  # just the scan view: table and panels hidden
+    assert not page.tree.isVisibleTo(page) and not page.top_panel.isVisibleTo(page)
+    assert page.scan_view.isVisibleTo(page) and page.rating_title.isVisibleTo(page)
+    page.step_run(1)  # Next run works without the table
+    assert page.selected_run() == "sub-01_ses-2_task-rest_bold"
+    page.view_expand_button.click()
+    assert page.tree.isVisibleTo(page) and page.top_panel.isVisibleTo(page)
+    page.stop_drawing()
 
     page.modality_box.setCurrentIndex(1)  # T1w: none written yet
     assert any("No MRIQC results for T1w" in m for m in page.banner.shown)
@@ -270,7 +289,7 @@ def test_expand_gives_the_results_the_whole_tab(state: toolbox_state.ToolboxStat
     assert page.banner.isVisibleTo(page) and page.expand_button.text() == "Expand ⤢"
     page.expand_button.click()
     assert not page.top_panel.isVisibleTo(page) and not page.subjects_panel.isVisibleTo(page)
-    assert page.tree.isVisibleTo(page) and page.report_stack.isVisibleTo(page)
+    assert page.tree.isVisibleTo(page) and page.scan_view.isVisibleTo(page)
     assert page.expand_button.text() == "Restore ⤡"
     page.expand_button.click()
     assert page.top_panel.isVisibleTo(page) and page.subjects_panel.isVisibleTo(page)

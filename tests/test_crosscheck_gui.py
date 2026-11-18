@@ -77,16 +77,28 @@ def test_tabs_follow_the_order_of_the_work(window: toolbox.ToolboxWindow) -> Non
     names = [window.tabs.tabText(i).replace("&&", "&") for i in range(window.tabs.count())]
     assert names == [
         "1. Setup & Convert to BIDS",
-        "2. Scan sessions",
-        "3. Behaviour logs",
-        "4. Scan lengths & trimming",
-        "5. BIDS Crosscheck",
-        "6. Scan quality (MRIQC)",
-        "7. Preprocess BIDS (C-PAC)",
-        "8. Crosscheck overview",
-        "9. First-level stats",
-        "10. Sequence overview",
+        "2. Raw DICOMs",
+        "3. Sequence overview",
+        "4. Behaviour logs",
+        "5. Scan lengths & trimming",
+        "6. BIDS Crosscheck",
+        "7. Scan quality (MRIQC)",
+        "8. Preprocess BIDS (C-PAC)",
+        "9. Crosscheck overview",
+        "10. First-level stats",
     ]
+    assert set(toolbox.TAB_INTROS) == set(toolbox.TAB_ORDER)  # every tab says what it is for
+
+
+def test_review_packages_leave_out_tabs_without_their_data() -> None:
+    every = list(toolbox.TAB_ORDER)
+    assert toolbox.shown_tabs(False, None) == every  # a normal install shows them all
+    with_all = {"bids": Path("b"), "dicom": Path("d"), "behav": Path("l")}
+    assert toolbox.shown_tabs(False, with_all) == every
+    bids_only = toolbox.shown_tabs(True, {"bids": Path("b")})
+    assert toolbox.SESSIONS not in bids_only and toolbox.BEHAV not in bids_only
+    assert toolbox.SETUP not in bids_only and toolbox.PREPROCESS not in bids_only
+    assert bids_only[0] == toolbox.SEQUENCE  # the overview opens a DICOM-less package
 
 
 def test_folders_are_shared_and_remembered(window: toolbox.ToolboxWindow, tmp_path: Path) -> None:
@@ -131,15 +143,17 @@ def test_a_running_job_locks_the_other_tabs(window: toolbox.ToolboxWindow, tmp_p
 def test_a_view_only_package_hides_setup_and_preprocess(
     window: toolbox.ToolboxWindow, tmp_path: Path
 ) -> None:
-    hidden = {toolbox.TAB_ORDER.index(n) for n in toolbox.HIDDEN_WHEN_VIEW_ONLY}
-    for index in range(window.tabs.count()):
-        assert window.tabs.isTabVisible(index) == (index not in hidden)
-    assert window.tabs.currentIndex() not in hidden  # opens on the first tab it shows
+    names = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    assert names[:2] == ["1. Raw DICOMs", "2. Sequence overview"]  # left out, renumbered
+    assert not any(n in t for t in names for n in toolbox.HIDDEN_WHEN_VIEW_ONLY)
+    assert window.tabs.currentIndex() == 0  # opens on the first tab it shows
     assert "(view only)" in window.windowTitle()
+    assert not window.preprocess.docker_timer.isActive()  # no Docker checks for it
     assert window.busy_label.text() == ""  # nothing is running
 
     two_session_subject(tmp_path / "bids")
-    open_crosscheck(window, tmp_path / "bids")
+    window.state.set_folder("bids", tmp_path / "bids")
+    window.tabs.setCurrentIndex(window.tab_names.index(toolbox.CROSSCHECK))
     window.crosscheck.table.item(0, 0).setCheckState(Qt.CheckState.Checked)  # pyright: ignore[reportOptionalMemberAccess]
     assert not window.crosscheck.delete_ticked_button.isEnabled()
     assert window.crosscheck.note_ticked_button.isEnabled()  # notes change no data files
@@ -197,7 +211,7 @@ def test_crosscheck_table_shows_id_scan_date_and_session(
     cells = [table.item(0, c).text() for c in range(table.columnCount())]  # pyright: ignore[reportOptionalMemberAccess]
     assert cells[:4] == ["12345T1", "2024-10-14 13:41", "ses-1", "2"]
     assert "⚠" in cells[4]  # two runs: keep one
-    assert window.tabs.tabText(4) == "5. BIDS Crosscheck (1 to check)"
+    assert window.tabs.tabText(5) == "6. BIDS Crosscheck (1 to check)"
 
 
 def test_ticked_sessions_enable_actions_and_select_none_clears(
@@ -255,12 +269,16 @@ def test_scan_lengths_and_overview_pages_follow_the_bids_folder(
     window.tabs.setCurrentIndex(toolbox.TAB_ORDER.index(toolbox.OVERVIEW))
     summary = window.overview.summary_label.toPlainText()
     assert "1 subject(s), 2 session(s)" in summary
-    assert "⊕ 1 subject(s) with more sessions than expected" in summary
+    assert "1 subject(s) with more sessions than expected" in summary
+    assert "⊕" not in summary  # words, not icons
     sessions = window.overview.session_table
     assert sessions.rowCount() == 2
     header = [sessions.horizontalHeaderItem(c).text() for c in range(sessions.columnCount())]  # pyright: ignore[reportOptionalMemberAccess]
     assert header[:5] == ["ID", "Session", "Date", "T1w", "Defaced"]
     assert sessions.item(0, header.index("T1w")).text() == "0"  # pyright: ignore[reportOptionalMemberAccess]
+    problems = sessions.item(0, header.index("Problems")).text()  # pyright: ignore[reportOptionalMemberAccess]
+    assert problems.startswith("short: task-Rest_bold")  # empty NIfTI, no events
+    assert problems.endswith("; extra session")
     assert window.overview.table.item(0, 2).text() == "note"  # pyright: ignore[reportOptionalMemberAccess]
     window.overview.search.setText("nothing like this")
     assert window.overview.table.isRowHidden(0)
@@ -273,7 +291,7 @@ def test_select_all_then_mark_the_ticked_sessions_crosschecked(
     two_session_subject(bids)
     open_crosscheck(window, bids)
     page = window.crosscheck
-    assert window.tabs.tabText(4) == "5. BIDS Crosscheck (2 to check)"
+    assert window.tabs.tabText(5) == "6. BIDS Crosscheck (2 to check)"
 
     page.select_all_button.click()
     assert len(page.ticked_reviews()) == 2 and not page.select_all_button.isEnabled()
@@ -282,7 +300,7 @@ def test_select_all_then_mark_the_ticked_sessions_crosschecked(
 
     assert all(r.crosschecked for r in page.reviews)
     assert page.table.item(0, 4).text() == "☑ crosschecked"  # pyright: ignore[reportOptionalMemberAccess]
-    assert window.tabs.tabText(4) == "5. BIDS Crosscheck"  # nothing left to check
+    assert window.tabs.tabText(5) == "6. BIDS Crosscheck"  # nothing left to check
     assert page.unmark_ticked_button.isEnabled() and not page.mark_ticked_button.isEnabled()
 
 
