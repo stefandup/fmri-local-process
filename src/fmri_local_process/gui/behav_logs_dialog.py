@@ -1,8 +1,8 @@
-"""Scan sessions and behaviour logs: match each log to a scan session, look at its events,
-record a verdict. Two toolbox tabs, Scan sessions then Behaviour logs, share one panel.
+"""Raw DICOM sessions and behaviour logs: match each log to a scan session, look at its events,
+record a verdict. Two toolbox tabs, Raw DICOMs and Behaviour logs, share one panel.
 
 * A wrong ID or date in a log's name is corrected here; so is a wrong subject ID in a DICOM
-  session folder's name (Scan sessions tab: each folder with its scan date/time and the ID
+  session folder's name (Raw DICOMs tab: each folder with its scan date/time and the ID
   as written, e.g. a twin's 12345-1, which becomes 12345T1).
 * Selecting a log shows the events it produces (and whether they fit the converted BOLD run),
   so it can be marked OK or as an error. Once looked at, logs are marked crosschecked (several
@@ -290,7 +290,7 @@ HELP_TEXT = (
     "Each log is matched to a scan session by subject ID and date. A twin's 12345-1 becomes "
     "12345T1; other characters (e.g. a space) are removed and flagged.<br><br>"
     "Correct a wrong ID or date here, or a wrong subject ID in a DICOM folder name on the "
-    "<b>Scan sessions</b> tab, and press <b>Re-check</b>. Select a log to see its events and "
+    "<b>Raw DICOMs</b> tab, and press <b>Re-check</b>. Select a log to see its events and "
     "mark it OK or as an error; of several logs on one day, pick the one to use. Once you "
     f"have been through a log, <b>Mark crosschecked</b> (it then shows {CROSSCHECKED_ICON}); "
     "select several rows (Ctrl/Shift-click or drag) to mark them all at once.<br><br>"
@@ -344,7 +344,7 @@ class BehavLogsPanel(QWidget):
             if info.correction.review
         }
         self.crosschecked = {info.key for info in self.infos if info.correction.crosschecked}
-        self.checked_folders = set(data.checked_folders)  # Scan sessions marked crosschecked
+        self.checked_folders = set(data.checked_folders)  # crosschecked on the Raw DICOMs tab
 
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
@@ -389,7 +389,7 @@ class BehavLogsPanel(QWidget):
         layout.addLayout(controls)
         layout.addWidget(self.help.box)
 
-        # The Scan sessions tab shows this (the toolbox puts it on a tab of its own); it shares
+        # The Raw DICOMs tab shows this (the toolbox puts it on a tab of its own); it shares
         # this panel's data, Re-check and Save.
         self.sessions_view = self._build_sessions_tab(dicom_corrections)
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -432,7 +432,7 @@ class BehavLogsPanel(QWidget):
         return self.table
 
     def _build_sessions_tab(self, corrections: dict[str, str]) -> QWidget:
-        """The Scan sessions view: Re-check / Save, the session table, and its Mark / Un-mark
+        """The Raw DICOMs view: Re-check / Save, the session table, and its Mark / Un-mark
         crosschecked row underneath."""
         panel = QWidget()
         layout = QVBoxLayout(panel)
@@ -719,7 +719,7 @@ class BehavLogsPanel(QWidget):
         self.apply_filter()
 
     def show_sessions(self) -> None:
-        """Refresh the Scan sessions tab: resolved ID, BIDS session and matched logs."""
+        """Refresh the Raw DICOMs tab: resolved ID, BIDS session and matched logs."""
         by_folder = {s.folder: s for s in self.sessions}
         logs: dict[str, list[str]] = {}
         for m in self.matches:
@@ -767,7 +767,7 @@ class BehavLogsPanel(QWidget):
         self.session_table.horizontalHeader().setStretchLastSection(True)
 
     def selected_folders(self) -> list[str]:
-        """The DICOM folder names selected on the Scan sessions tab."""
+        """The DICOM folder names selected on the Raw DICOMs tab."""
         rows = sorted(i.row() for i in self.session_table.selectionModel().selectedRows())
         return [self.scanned[row][0].name for row in rows]
 
@@ -1077,7 +1077,7 @@ class BehavLogsPage(QWidget):
     ready when you get to it), and again when a folder changes or on Reload."""
 
     badge_changed = Signal(str)
-    panel_changed = Signal()  # loaded or dropped: the Scan sessions tab shows its part
+    panel_changed = Signal()  # loaded or dropped: the Raw DICOMs tab shows its part
     load_progress = Signal(int, int, str)  # (done, total, what), while reading
     logs_loaded = Signal(object)  # list[LogInfo] read ([] when dropped), for Scan lengths
 
@@ -1165,7 +1165,7 @@ class BehavLogsPage(QWidget):
     def drop_panel(self) -> None:
         if self.panel is not None:
             self.layout_.removeWidget(self.panel)
-            # The Scan sessions tab holds this part: it isn't deleted with the panel.
+            # The Raw DICOMs tab holds this part: it isn't deleted with the panel.
             self.panel.sessions_view.setParent(None)
             self.panel.sessions_view.deleteLater()
             self.panel.deleteLater()
@@ -1245,7 +1245,7 @@ class BehavLogsPage(QWidget):
 
 
 class ScanSessionsPage(QWidget):
-    """The Scan sessions tab: the DICOM session folders part of the Behaviour logs tab's
+    """The Raw DICOMs tab: the DICOM session folders part of the Behaviour logs tab's
     panel (one load, one Save for both), shown here on a tab of its own."""
 
     def __init__(self, behav: BehavLogsPage) -> None:

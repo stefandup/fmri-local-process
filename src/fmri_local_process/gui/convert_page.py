@@ -266,7 +266,7 @@ class ConvertPage(QWidget):
                 state,
                 "bids",
                 "BIDS Folder",
-                "Where Convert to BIDS writes. The Scan sessions, Behaviour logs, Scan lengths, "
+                "Where Convert to BIDS writes. The Raw DICOMs, Behaviour logs, Scan lengths, "
                 "BIDS Crosscheck and Preprocess tabs all work on it.",
                 home_base=True,
             )

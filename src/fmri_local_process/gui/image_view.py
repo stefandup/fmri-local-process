@@ -49,6 +49,7 @@ class ZoomableImageView(QWidget):
             toolbar.addWidget(button)
         toolbar.addStretch(1)
         layout.addLayout(toolbar)
+        self.toolbar = toolbar  # owners may add their own buttons (after the stretch: right)
 
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)

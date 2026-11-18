@@ -65,8 +65,8 @@ def test_first_level_tab_models_two_sessions_in_the_occipital_focus(
     ]
     assert ticked == ["Occipital Pole (L)"]  # ACTIVE is all at x < 0: no right half
 
-    page.on_run()
-    assert page.worker is not None
+    assert page.auto_run()  # at startup: the first subject, without a click
+    assert page.worker is not None and not page.auto_run()  # once at a time
     page.worker.wait()
     QApplication.processEvents()  # deliver the thread's done signal
     assert [r.run.label for r in page.results] == ["ses-1", "ses-2"]

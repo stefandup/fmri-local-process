@@ -109,7 +109,6 @@ def test_collect_iqms_reads_numbers_and_groups_by_subject_session(tmp_path: Path
     for subject, session in (("02", "1"), ("01", "2"), ("01", "1")):
         name = f"sub-{subject}_ses-{session}_task-rest_bold"
         write_iqms(out, f"sub-{subject}/ses-{session}/func/{name}.nii.gz", tsnr=40, fd_mean=0.1)
-        (out / f"{name}.html").write_text("<html></html>")
     bad = out / "sub-03/ses-1/func/sub-03_ses-1_task-rest_bold.json"
     bad.parent.mkdir(parents=True)
     bad.write_text("not json")
@@ -117,7 +116,8 @@ def test_collect_iqms_reads_numbers_and_groups_by_subject_session(tmp_path: Path
     runs, unreadable = mq.collect_iqms(out, "bold")
     assert len(runs) == 3 and len(unreadable) == 1
     assert runs[0].values == {"tsnr": 40.0, "fd_mean": 0.1}  # metadata blocks left out
-    assert runs[0].report is not None and runs[0].label == "task-rest_bold"
+    assert runs[0].label == "task-rest_bold"
+    assert runs[0].nifti == Path("sub-01/ses-1/func/sub-01_ses-1_task-rest_bold.nii.gz")
     grouped = mq.by_subject_session(runs)
     assert list(grouped) == ["01", "02"]
     assert list(grouped["01"]) == ["1", "2"]

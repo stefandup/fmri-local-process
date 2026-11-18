@@ -11,20 +11,25 @@ need pyarrow to read.
 
 MRIQC 24's output folder:
     sub-<s>/[ses-<n>/]<anat|func>/<scan name>.json   the run's IQMs (+ bids_meta, provenance)
-    <scan name>.html                                 the run's visual report
+    <scan name>.html                                 the run's visual report (not shown: the
+                                                     toolbox draws its own, mriqc_views.py)
     group_bold.tsv / .html, group_T1w.tsv / .html    the group step
+    toolbox_qc_ratings.tsv                           ours: each run's QC rating and comment
 """
 
+import csv
 import json
 import re
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
+from fmri_local_process.processing.action_log import current_user
 from fmri_local_process.processing.docker_pull import run_logged
 
 MRIQC_IMAGE = "nipreps/mriqc:24.0.2"
@@ -143,22 +148,12 @@ def iqm_file(output_root: Path, scan: Scan) -> Path:
     return output_root / scan.relative.with_name(f"{scan.name}.json")
 
 
-def report_file(output_root: Path, name: str) -> Path:
-    """The run's HTML report (name: the scan's file name without .nii.gz)."""
-    return output_root / f"{name}.html"
-
-
 def has_results(output_root: Path) -> bool:
     """True when MRIQC wrote IQMs for any BOLD or T1w run here."""
     return any(
         next(output_root.glob(f"sub-*/**/{MODALITY_FOLDER[m]}/*_{m}.json"), None) is not None
         for m in MODALITIES
     )
-
-
-def group_report(output_root: Path, modality: str) -> Path | None:
-    path = output_root / f"group_{modality}.html"
-    return path if path.is_file() else None
 
 
 def scan_state(bids_root: Path, output_root: Path, scan: Scan) -> str:
@@ -408,7 +403,7 @@ class RunIqms:
     subject: str
     values: dict[str, float] = field(default_factory=dict)
     state: str = DONE  # STALE when the BIDS file changed since
-    report: Path | None = None
+    nifti: Path | None = None  # the scan MRIQC read, relative to the BIDS root
 
     @property
     def session(self) -> str:
@@ -458,17 +453,7 @@ def collect_iqms(
         relative = path.relative_to(output_root)
         scan = Scan(relative.with_name(f"{path.stem}{NIFTI_SUFFIX}"), modality)
         state = scan_state(bids_root, output_root, scan) if bids_root is not None else DONE
-        report = report_file(output_root, scan.name)
-        runs.append(
-            RunIqms(
-                scan.name,
-                modality,
-                scan.subject,
-                values,
-                state,
-                report if report.is_file() else None,
-            )
-        )
+        runs.append(RunIqms(scan.name, modality, scan.subject, values, state, scan.relative))
     return runs, unreadable
 
 
@@ -517,3 +502,70 @@ def outlier_flags(values: Sequence[float | None], better: str | None) -> list[bo
         else:
             flags.append(value < low or value > high)
     return flags
+
+
+# ---- QC ratings ---------------------------------------------------------------------------------
+
+RATINGS_FILE = "toolbox_qc_ratings.tsv"  # in the MRIQC output folder, beside MRIQC's results
+RATINGS = {1: "bad: discard", 2: "unsure", 3: "keep"}
+RATING_COLUMNS = ("run", "rating", "meaning", "comment", "rater", "date")
+
+
+@dataclass(frozen=True)
+class QcRating:
+    """Someone's verdict on one run: 1 bad (discard), 2 unsure, 3 keep; None: only a comment."""
+
+    rating: int | None
+    comment: str = ""
+    rater: str = ""
+    date: str = ""
+
+    @property
+    def text(self) -> str:
+        """'3 keep', '' when not rated."""
+        return f"{self.rating} {RATINGS[self.rating]}" if self.rating in RATINGS else ""
+
+
+def read_ratings(output_root: Path) -> dict[str, QcRating]:
+    """{run name: its rating}, from the output folder's ratings file ({} without one)."""
+    try:
+        with (output_root / RATINGS_FILE).open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+    except OSError:
+        return {}
+    ratings = {}
+    for row in rows:
+        try:
+            rating = int(row.get("rating") or "")
+        except ValueError:
+            rating = None
+        ratings[row.get("run") or ""] = QcRating(
+            rating if rating in RATINGS else None,
+            row.get("comment") or "",
+            row.get("rater") or "",
+            row.get("date") or "",
+        )
+    ratings.pop("", None)
+    return ratings
+
+
+def save_rating(output_root: Path, run: str, rating: int | None, comment: str) -> QcRating | None:
+    """Set one run's rating and comment (who and when are added); no rating and no comment
+    removes it. Returns what is saved now. Raises OSError when the file can't be written."""
+    ratings = read_ratings(output_root)
+    comment = " ".join(comment.split())  # one line: tabs or newlines would break the TSV
+    saved = None
+    if rating is None and not comment:
+        ratings.pop(run, None)
+    else:
+        saved = QcRating(rating, comment, current_user(), datetime.now().isoformat("T", "seconds"))
+        ratings[run] = saved
+    with (output_root / RATINGS_FILE).open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow(RATING_COLUMNS)
+        for name, value in sorted(ratings.items()):
+            meaning = RATINGS.get(value.rating or 0, "")
+            writer.writerow(
+                [name, value.rating or "", meaning, value.comment, value.rater, value.date]
+            )
+    return saved

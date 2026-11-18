@@ -12,6 +12,7 @@ the toolbox on their tab.
 import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPixmap
@@ -82,10 +83,28 @@ def show_message(splash: QSplashScreen, text: str) -> None:
     QApplication.processEvents()  # paint it now: the next step blocks for a moment
 
 
+def hide_child_consoles() -> None:
+    """On Windows, start every console program (docker, dcm2niix, Rscript) without a window.
+
+    The toolbox exe is windowed: it has no console for them to share, so each `docker`
+    call (Docker is re-checked every 30 s) flashed a console window open and shut. The CLIs
+    keep their console: only the GUI calls this.
+    """
+    if sys.platform != "win32":
+        return
+    import subprocess
+
+    plain_init = subprocess.Popen.__init__
+
+    def init_without_window(self: subprocess.Popen, *args: Any, **kwargs: Any) -> None:
+        kwargs["creationflags"] = (kwargs.get("creationflags") or 0) | subprocess.CREATE_NO_WINDOW
+        plain_init(self, *args, **kwargs)  # pyright: ignore[reportCallIssue] -- Popen's overloads
+
+    subprocess.Popen.__init__ = init_without_window  # pyright: ignore[reportAttributeAccessIssue]
+
+
 def launch(start_tab: str | None = None) -> None:
-    # Qt's web engine (the MRIQC tab's report view, started later) needs this set before
-    # the application exists.
-    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+    hide_child_consoles()
     app = QApplication(sys.argv)
     splash = QSplashScreen(splash_pixmap())
     splash.show()
@@ -93,7 +112,7 @@ def launch(start_tab: str | None = None) -> None:
 
     from fmri_local_process.gui import toolbox  # the slow imports, behind the splash
 
-    show_message(splash, "Opening the tabs...")
+    show_message(splash, "Opening the tabs and starting the first-level stats...")
     window = toolbox.start(app, start_tab or toolbox.SETUP)
     splash.finish(window)  # closes once the window is up
     sys.exit(app.exec())

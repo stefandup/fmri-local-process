@@ -315,7 +315,7 @@ def write_dicom_session_corrections(bids_root: Path, labels: dict[str, str]) -> 
 
 
 def read_crosschecked_folders(bids_root: Path) -> set[str]:
-    """DICOM session folders the human marked as reviewed (Scan sessions tab)."""
+    """DICOM session folders the human marked as reviewed (Raw DICOMs tab)."""
     return set(read_folder_map(bids_root, DICOM_CROSSCHECKED_FILE))
 
 
@@ -418,7 +418,7 @@ def find_sessions(
         if session is None:
             log.warning(
                 "Skipping %s: name isn't <YYYYMMDD>_<x>_<subject id>; give it a Corrected ID "
-                "and Corrected date (Scan sessions tab) to convert it",
+                "and Corrected date (Raw DICOMs tab) to convert it",
                 folder.name,
             )
             continue
