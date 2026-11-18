@@ -43,10 +43,14 @@ def test_bold_measures_find_the_head_and_the_spike() -> None:
 def test_views_draw_bold_and_t1w_and_say_why_not(tmp_path: Path) -> None:
     bold = write_nifti(tmp_path / "sub-01_task-rest_bold.nii.gz", bold_series())
     figure = mv.run_figure(bold, "bold")
-    assert len(figure.axes) >= 2 * mv.MOSAIC_SLICES + 2  # two mosaics, the lines, the carpet
+    tiles = mv.MOSAIC_COLUMNS  # all 8 slices: one row of tiles per mosaic
+    assert len(figure.axes) == 2 * tiles + 3  # two mosaics, the lines (two axes), the carpet
 
     t1w = write_nifti(tmp_path / "sub-01_T1w.nii.gz", bold_series()[..., 0])
-    assert mv.run_figure(t1w, "T1w").axes  # sagittal / coronal / axial slices
+    assert len(mv.run_figure(t1w, "T1w").axes) == mv.MOSAIC_COLUMNS  # every axial slice
+    assert mv.filled_slices(np.pad(bold_series()[..., 0], ((0, 0), (0, 0), (2, 3)))) == list(
+        range(2, 10)
+    )  # empty slices of the field of view left out
 
     with pytest.raises(mv.ViewError, match="isn't a BOLD series"):
         mv.run_figure(t1w, "bold")
