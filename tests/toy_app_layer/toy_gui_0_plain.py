@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from toy_data import make_folder
-from toy_processing import count_lines, text_files
+from toy_processing import count_lines, text_files  # SDP we import the processing layer
 
 # ---- 1. The worker thread -------------------------------------------------------------------
 

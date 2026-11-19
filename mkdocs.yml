@@ -19,6 +19,7 @@ nav:
   - BIDS conversion: bids-conversion.md
   - Preprocessing: preprocessing.md
   - First-level stats: first-level-stats.md
+  - Checkerboard task protocol: checkerboard-protocol.md
   - Sequence overview: sequence-overview.md
   - Review packages: review-package.md
   - Roadmap: roadmap.md
