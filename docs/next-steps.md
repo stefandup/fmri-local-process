@@ -42,13 +42,14 @@ done in one overnight run and tweaks the next day.
    back. Say "Phase A/B/C" in the commit message.
 4. **If something blocks a phase**, write down what and why, and go on only with work that
    doesn't depend on it. Never commit a phase as done with failing checks.
-5. **The next day, on Windows:** the window on `safe_data_source/` and `build.ps1 -Full`. Neither
-   can be checked in WSL, so nothing is merged into `master` before this.
+5. **The next day, on Windows:** the window on `safe_data_source/` and `build.ps1 -Full`. The
+   Windows build and registry settings can't be checked in WSL, so nothing is merged into
+   `master` before this.
 
 **Keep the toy.** `tests/toy_app_layer/`, its "Debug toy step" entries in
-`.vscode/launch.json` (not in git, so only in the Windows checkout) and [its page](app-layer-toy.md) stay as they are: don't remove, move or
-rewrite them, also not once the real `app/` layer exists. The user still has to review the toy in
-depth. The plan as a whole looks good to the user.
+`.vscode/launch.json` (not in git, so only in the Windows checkout) and
+[its page](app-layer-toy.md) stay as they are: don't remove, move or rewrite them, also not once
+the real `app/` layer exists. The user still has to review the toy in depth. The plan as a whole looks good to the user.
 
 **Still open:** whether the toolbox itself is installed on the host (Decision 3) or goes in a
 container. The plan assumes the host; only phase C depends on it.
@@ -56,6 +57,7 @@ container. The plan assumes the host; only phase C depends on it.
 **Known before we start:** on Windows the whole test suite passes, but `pytest` then crashes as
 it exits (code -1073741819, an access violation). It did so before the merge too, and the
 cause isn't known. Read the pass/fail line, not only the exit code.
+
 ## Decision 1: how the code is organised
 
 **Chosen: a new Qt-free `app/` layer, and the window and the TUI both sit on it.**
