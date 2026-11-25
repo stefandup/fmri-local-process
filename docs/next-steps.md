@@ -220,16 +220,35 @@ app and the containers kept running; without a terminal, the app ended and the c
 **Not tested:** real C-PAC, MRIQC or defacer containers, the command-line tools, and the real server.
 The "when started again" column is from the code.
 
-| Option | Pros | Cons |
-|---|---|---|
-| **Run it in `tmux` (as now; recommended)** | Nothing to build; covers every job | Has to be remembered; may need `sudo apt install tmux` |
-| **Warn when `fmri_tui` starts over SSH without `tmux`** (small; worth adding) | Catches the forgotten `tmux` | Only a warning; `screen` has to count too |
-| Reconnect to containers still running | C-PAC and MRIQC are watched again after a disconnect | More code; the batch's queue has to be saved and continued; doesn't help Convert; `tmux` already covers it |
+**Possible next step: reconnecting as standard**, after a network drop or when leaving on purpose, so a
+choppy network doesn't mean restarts. Nothing is built or decided yet; the sizes are rough estimates.
+
+| Option | Survives a dropped connection | Extra code | Cons |
+|---|---|---|---|
+| Run it in `tmux` by hand (now) | Everything | None | Has to be remembered |
+| **A. `fmri_tui` starts in `tmux` by itself (recommended)**: typing `fmri_tui` again returns to where you were | Everything: all jobs, the open tab, and corrections typed but not saved | About 50 lines + tests | Needs `tmux` on the server |
+| B. Jobs in a separate background process, which reports through files | All jobs, also if the app crashes or is closed; not unsaved corrections | About 500-800 lines + tests | Large |
+| C. Reconnect to the containers still running | C-PAC and MRIQC only; not Convert | About 200-300 lines + tests | The batch's queue needs its own solution |
+
+A first: it is the only one that also protects crosschecking. B perhaps later, with the HPC runner: PBS
+jobs also run apart from the app and report through files. Skip C: A covers the same cases with less
+code, and B would replace it.
+
+For A:
+
+- Without `tmux` on the server, start as now, with a warning. Already inside `tmux` (or `screen`): don't
+  start another.
+- `Ctrl+Q` still quits, and asks about running jobs. Add a "Leave it running" key, to disconnect on purpose.
+- The command-line tools (`fmri_preprocess`, `fmri_mriqc`, `fmri_convert_to_bids`): the same, or still in
+  `tmux` by hand.
 
 To do:
 
-1. Try a disconnect on the real server with C-PAC and MRIQC, with and without `tmux`.
-2. Decide on the warning. Build the reconnecting only if `tmux` turns out not to be enough.
+1. On the real server: is `tmux` there, and are a user's programs ended at logout (`KillUserProcesses` in
+   `/etc/systemd/logind.conf`)?
+2. Try a disconnect there with C-PAC and MRIQC, with and without `tmux`.
+3. Do pictures still show in the terminal inside `tmux`? (The file path is given either way.)
+4. Plan A, then decide.
 
 ## Not in this branch: HPC runner
 
