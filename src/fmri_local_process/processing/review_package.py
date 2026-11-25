@@ -26,6 +26,7 @@ import logging
 import re
 import shutil
 import stat
+import textwrap
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -35,8 +36,10 @@ from fmri_local_process.processing.atlases import atlases_present, cache_files, 
 from fmri_local_process.processing.behav_logs import find_logs, log_subject_id, task_for_log
 from fmri_local_process.processing.behav_match import read_corrections
 from fmri_local_process.processing.cpac_outputs import bids_entities
+from fmri_local_process.processing.mriqc import RATINGS_FILE
 from fmri_local_process.processing.review_mode import DATA_DIR, MANIFEST
 from fmri_local_process.processing.session_sync import read_sessions_tsv
+from fmri_local_process.processing.tab_guide import TAB_INTROS, shown_tabs
 
 log = logging.getLogger(__name__)
 
@@ -556,14 +559,71 @@ def manifest(plan: Plan, folders: dict[str, str]) -> dict:
     }
 
 
-README = """Review package: {name}
+README_WIDTH = 90
 
-Open fmri_toolbox.exe. It starts on the data in review_data\\ (the folders on the Setup tab);
-choose another folder there to use it instead. Changes you make (crosscheck decisions, trims,
-notes) are made to the copy in review_data\\, never to the original.
 
-Shared: {subjects}. Raw DICOMs: {raw}. MRIQC results: {mriqc}.
-"""
+def wrapped(text: str, indent: str = "    ") -> str:
+    return textwrap.fill(text, README_WIDTH, initial_indent=indent, subsequent_indent=indent + "  ")
+
+
+def readme_text(plan: Plan, folders: dict[str, str], atlases: bool) -> str:
+    """README_REVIEW.txt: how to open the package, what is in it, what each tab it shows is
+    for, and what to send back."""
+    lines = [f"Review package: {plan.name}", f"Made {datetime.now():%Y-%m-%d %H:%M}.", ""]
+    lines += [
+        "HOW TO OPEN",
+        wrapped(
+            "Open fmri_toolbox.exe (a splash screen shows for a few seconds). It starts on the "
+            "data in review_data\\. Everything you change (ratings, notes, crosscheck marks) "
+            "changes this copy, never the original data."
+            + (
+                " This package is view only: nothing can be converted, trimmed or deleted."
+                if plan.view_only
+                else ""
+            )
+        ),
+        "",
+        "WHAT IS IN IT",
+    ]
+    by_session: dict[tuple[str, str], list[str]] = {}
+    for choice in sorted(plan.scans):
+        by_session.setdefault((choice.subject, choice.session), []).append(choice.scan)
+    lines.append(wrapped(f"Participants: {', '.join(f'sub-{s}' for s in plan.subjects)}"))
+    lines.append(wrapped("BIDS scans (raw scans in BIDS form):"))
+    for (subject, session), scans in by_session.items():
+        lines.append(wrapped(f"sub-{subject} ses-{session}: {', '.join(scans)}", "      "))
+    if "output" in folders:
+        lines.append(wrapped("C-PAC outputs (the preprocessing results):"))
+        lines += [wrapped(OUTPUT_KINDS[k], "      - ") for k in plan.outputs if k in OUTPUT_KINDS]
+    else:
+        lines.append(wrapped("C-PAC outputs: not included"))
+    included = {True: "included", False: "not included"}
+    lines += [
+        wrapped(f"MRIQC image quality results: {included['mriqc' in folders]}"),
+        wrapped(
+            f"Behaviour logs: {len(plan.behav_logs)} log(s)"
+            if "behav" in folders
+            else "Behaviour logs: not included"
+        ),
+        wrapped(f"Raw DICOMs: {included['dicom' in folders]}"),
+        wrapped(
+            "Atlases for the first-level stats: "
+            + ("included" if atlases else "not included (Docker is needed to get them)")
+        ),
+        "",
+        "THE TABS (in the order the app shows them)",
+    ]
+    tabs = shown_tabs(plan.view_only, folders)
+    for number, name in enumerate(tabs, start=1):
+        lines.append(wrapped(f"{number}. {name}: {TAB_INTROS[name]}"))
+    lines += ["", "WHAT TO SEND BACK"]
+    back = []
+    if "mriqc" in folders:
+        back.append(f"your QC ratings: review_data\\mriqc\\{RATINGS_FILE}")
+    back.append("your crosscheck marks and notes: review_data\\bids\\code\\")
+    lines += [wrapped(f"- {item}") for item in back]
+    lines.append(wrapped("Zipping the whole review_data\\ folder sends them all."))
+    return "\n".join(lines) + "\n"
 
 
 def assemble(
@@ -621,15 +681,7 @@ def assemble(
 
     write_text(target / MANIFEST, json.dumps(manifest(plan, folders), indent=2) + "\n")
     write_text(
-        target / "README_REVIEW.txt",
-        README.format(
-            name=plan.name,
-            subjects=", ".join(f"sub-{s}" for s in plan.subjects),
-            raw="included" if plan.include_dicom else "not included",
-            mriqc="included (view only: MRIQC can't be run)"
-            if "mriqc" in folders
-            else "not included",
-        ),
+        target / "README_REVIEW.txt", readme_text(plan, folders, (data / "atlases").is_dir())
     )
     if plan.make_zip:
         progress(f"Zipping {target.name}.zip")

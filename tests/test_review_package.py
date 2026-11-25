@@ -185,6 +185,15 @@ def test_mriqc_results_of_the_shared_scans_go_in(tmp_path: Path) -> None:
     assert manifest["folders"]["mriqc"] == "review_data/mriqc" and manifest["mriqc"]
     assert review_mode.packaged_mriqc(package)
 
+    readme = (package / "README_REVIEW.txt").read_text(encoding="utf-8")
+    assert "sub-A ses-1: task-Rest_bold" in readme  # what is in it
+    assert "Preprocessed BOLD (first-level stats need it)" in readme  # the C-PAC outputs
+    assert "MRIQC image quality results: included" in readme
+    assert "Raw DICOMs: not included" in readme
+    tabs = [line.strip() for line in readme.splitlines() if line.strip()[:3] in ("1. ", "2. ")]
+    assert tabs[0].startswith("1. Sequence overview:")  # no DICOMs, no logs: those tabs left out
+    assert "review_data\\mriqc\\toolbox_qc_ratings.tsv" in readme  # what to send back
+
     plan.include_mriqc = False  # left out when unticked
     package = rp.assemble(plan, tmp_path / "review", progress=lambda _text: None)
     assert not (package / "review_data" / "mriqc").exists()

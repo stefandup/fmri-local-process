@@ -65,44 +65,25 @@ from fmri_local_process.processing.review_mode import (
     package_root,
     view_only,
 )
-
-SETUP = "Setup & Convert to BIDS"
-SESSIONS = "Raw DICOMs"
-BEHAV = "Behaviour logs"
-SCAN_LENGTHS = "Scan lengths & trimming"
-CROSSCHECK = "BIDS Crosscheck"
-MRIQC = "Scan quality (MRIQC)"
-PREPROCESS = "Preprocess BIDS (C-PAC)"
-OVERVIEW = "Crosscheck overview"
-FIRST_LEVEL = "First-level stats"
-SEQUENCE = "Sequence overview"
-TAB_ORDER = (
-    SETUP, SESSIONS, SEQUENCE, BEHAV, SCAN_LENGTHS, CROSSCHECK, MRIQC, PREPROCESS, OVERVIEW,
+from fmri_local_process.processing.tab_guide import (  # noqa: F401 -- re-exported
+    BEHAV,
+    CROSSCHECK,
     FIRST_LEVEL,
-)  # fmt: skip
-# The first thing each tab says: what it is for (newcomers to the data read this first).
-TAB_INTROS = {
-    SETUP: "Choose the data folders, then convert the raw DICOM scans into a BIDS dataset.",
-    SESSIONS: "The raw scanner sessions per participant (DICOM folders): IDs, dates and scans.",
-    SEQUENCE: "A participant's runs of one scan side by side, with their scan settings: do "
-    "they match?",
-    BEHAV: "The task logs from the experiment, and which scan session each belongs to.",
-    SCAN_LENGTHS: "How long each scan is against the expected length; trim scans that ran on "
-    "too long. The task starts with the scanner trigger and the dummy scans are discarded "
-    "before it, so there are no dummy scans to trim.",
-    CROSSCHECK: "Go through each session's problems and mark it crosschecked once it is right.",
-    MRIQC: "Image quality of each raw scan: select a run, look at it, and rate it 1 (bad: "
-    "discard), 2 (unsure) or 3 (keep).",
-    PREPROCESS: "Preprocess the BIDS dataset with C-PAC (in Docker), one subject at a time.",
-    OVERVIEW: "Every session in one table: which scans are there, how long, and what still "
-    "needs a look.",
-    FIRST_LEVEL: "Does the task give the expected brain response? The first subject runs at "
-    "startup; pick another and Run to compare its runs.",
-}
+    HIDDEN_WHEN_VIEW_ONLY,
+    MRIQC,
+    NEEDS_PACKAGED_FOLDER,
+    OVERVIEW,
+    PREPROCESS,
+    SCAN_LENGTHS,
+    SEQUENCE,
+    SESSIONS,
+    SETUP,
+    TAB_INTROS,
+    TAB_ORDER,
+    shown_tabs,
+)
+
 HEADER_POINT_INCREASE = NAME_LABEL_FONT_POINT_INCREASE // 2
-HIDDEN_WHEN_VIEW_ONLY = (SETUP, PREPROCESS)  # they only change data
-# A review package without this folder leaves the tab out: there is nothing to show on it.
-NEEDS_PACKAGED_FOLDER = {SESSIONS: "dicom", BEHAV: "behav"}
 LOGO_IMAGE = Path(__file__).parent / "assets" / "table_mountain.png"  # top right corner
 LOGO_HEIGHT = 40
 
@@ -115,15 +96,6 @@ def scrolling(page: QWidget) -> QScrollArea:
     area.setWidget(page)
     area.setFrameShape(QFrame.Shape.NoFrame)
     return area
-
-
-def shown_tabs(view_only: bool, packaged: dict[str, Path] | None) -> list[str]:
-    """The tabs to show, in order. packaged: a review package's folders (None for a normal
-    install, which shows every tab but those view-only hides)."""
-    left_out = set(HIDDEN_WHEN_VIEW_ONLY) if view_only else set()
-    if packaged is not None:
-        left_out |= {name for name, key in NEEDS_PACKAGED_FOLDER.items() if key not in packaged}
-    return [name for name in TAB_ORDER if name not in left_out]
 
 
 def with_intro(page: QWidget, text: str) -> QWidget:
