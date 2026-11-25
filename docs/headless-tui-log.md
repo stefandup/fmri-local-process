@@ -8,7 +8,7 @@ made along the way, and what is blocked or not checked. The plan is in [Next ste
 | | |
 |---|---|
 | Place | WSL Ubuntu 26.04, the existing clone in `~/fmri_local_process` (remote: GitHub) instead of a new one in `~/src` |
-| With Qt | `.venv` in the repo: `pip install -e ".[gui,tui]" -r requirements-dev.txt` (first made with `uv`, remade as a plain venv with pip on request; Python 3.13 itself came from `uv`, as Ubuntu 26.04 has only 3.14) |
+| With Qt | `.venv` in the repo: `pip install -e ".[gui]" -r requirements-dev.txt` (first made with `uv`, remade as a plain venv with pip; the Python 3.13 itself came from `uv`, as Ubuntu 26.04 has only 3.14) |
 | Without Qt | `~/.venvs/fmri-noqt`, the same without PySide6 |
 | Data | `safe_data_source/`: same 84,902 files and sizes as the Windows folder; only read. Results in `results/wsl/` (not in git) |
 
@@ -19,7 +19,7 @@ cause is still not known. Without Qt, 55 tests failed and 9 files couldn't be lo
 
 ## Phase A: the app/ layer
 
-Done: PySide6 and Textual are optional installs (`[gui]`, `[tui]`); `app/` holds the events,
+Done: PySide6 and Textual are optional installs (`[gui]`, `[tui]`; later only `[gui]`); `app/` holds the events,
 settings, shared state, tab list, every background job, the texts and the figures; `gui/` wraps
 the jobs in QThreads and shows the rest. `processing/` is unchanged.
 
@@ -99,7 +99,6 @@ Choices:
 
 - **dcm2niix is built from source** at the pinned version. The release binary needs glibc 2.29 and
   doesn't start on Rocky 8 at all.
-- **Python 3.13 from `uv`** (pinned, checksum checked), as in development, not Rocky's own.
 - **Library paths:** a PyInstaller app passes its own library folder on to the programs it starts. A
   start-up hook undoes that, so docker and mri_deface use the server's libraries.
 - **UTF-8 always**, so the app also works with a plain C locale.
@@ -118,22 +117,33 @@ runs started from the bundle.
 
 - **What is typed is kept** (terminal app): corrections stay with their row until used or saved, notes are
   saved when their box is left, and quitting with unsaved corrections asks. Before, text typed for one
-  log was lost when another was highlighted before pressing Use.
-- **`fmri_behav_check --bids`** now applies the corrected DICOM folder IDs, dates and session numbers too, so
-  it agrees with the tab; on a narrow terminal it lists a block per log instead of a folded table.
-- **Commands for the checking on its own:** `fmri_behav_fix`, `fmri_bids_check`, `fmri_bids_fix`, `fmri_mriqc`.
-- **`fmri_folders`:** the folders are set once, shared with `fmri_tui`; after that no command needs one. Given
-  folders win and are never mixed with remembered ones. Converting and C-PAC ask before using them.
-- **`fmri_generate_sample_data`** (vr_lab_toolbox's command line): dummy logs and DICOMs. Presentation's documentation doesn't fix the log's
-  delimiter (a setting) or layout, so the yardstick is this repo's own reader: each dummy log has to be
-  read as its original is, and the command says how many aren't.
+  log was lost when another was highlighted before they were used.
+- **Changing tab by key didn't work** while a button, table or tick box was focused (Textual brought the old
+  tab back): fixed, with a test on every tab.
+- **Works like the window:** every control was compared with the window's, and a test makes the same
+  corrections in both and compares the saved files. *Use* is now *Re-check*, and takes
+  what is typed on both tabs, as there. Not in the terminal: *Reveal* (no file manager) and MRIQC's HTML reports.
+- **One toolbox folder on the PATH**, as vr_lab_toolbox's installer: `~/.local/opt/fmri_local_process` on Linux (before:
+  launchers in `~/.local/bin`, and the app beside the backups in a folder differing only in case). The
+  Windows installer did this already, but had only 2 of the command-line tools; it now has all 7
+  (`build.ps1`, not run yet). The terminal app is in the Linux bundle only.
+- **The commands point out problems; fixing is done in the window or the terminal app.**
+  `fmri_behav_check` lists the DICOM folders' problems too and applies every correction saved in the BIDS
+  folder, so it agrees with the tabs. New: `fmri_bids_check` and `fmri_mriqc`. (Commands to fix things, and
+  one that remembered the folders, were made and taken out again: commit `dd81424` has them.)
+- **`fmri_generate_sample_data`** (vr_lab_toolbox's command line): dummy logs and DICOMs. Presentation's
+  documentation doesn't fix the log's delimiter (a setting) or layout, so the yardstick is this repo's own
+  reader: each dummy log has to be read as its original is, and the command says how many aren't.
 - **`docker/setup_docker_image.sh`** in the bundle: the Docker part of the Windows installer. Tested
   with `--defacer pydeface`; not with `freesurfer` (5 GB download) or `local`.
+- **pip instead of uv:** `python -m venv` and `pip install -e .`, as vr_lab_toolbox. Textual is in
+  `requirements.txt`; only Qt stays optional (`[gui]`). The bundle is built with Rocky's own Python 3.12 and
+  pip, from `specs/linux.spec`, a list of tools as in vr_lab_toolbox's `specs/toolbox.spec`.
 
 ## Still to do
 
 1. **On Windows, before anything is merged:** update the environment (`python -m pip install -e
-   ".[gui,tui]" -r requirements-dev.txt`), run the tests, use the window on `safe_data_source/`,
+   ".[gui]" -r requirements-dev.txt`), run the tests, use the window on `safe_data_source/`,
    check that it remembers its folders (registry), and `build.ps1 -Full` and `-Review`.
 2. **On the server:** processor, Docker access, `noexec` mounts, then install the bundle.
 3. **Pictures** in Windows Terminal over SSH.

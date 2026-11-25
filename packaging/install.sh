@@ -1,91 +1,113 @@
 #!/usr/bin/env bash
-# Per-user install of fMRI Local Process on Linux/macOS -- no sudo, no manual PATH editing.
-#   app       -> ~/.local/share/fmri_local_process/
-#   commands  -> launchers in ~/.local/bin/ (added to PATH in your shell rc only if it isn't
-#                on PATH already -- most Linux distros already have it)
-# Usage: ./install.sh            install / upgrade
-#        ./install.sh --uninstall
+# Installs fMRI Local Process for you on Linux/macOS, without sudo: every tool goes into one toolbox
+# folder, and that folder is added to your PATH (as the Windows installer does).
+# Usage: ./install.sh [FOLDER]                install / upgrade
+#        ./install.sh --uninstall [FOLDER]
+# FOLDER: the toolbox folder, by default ~/.local/opt/fmri_local_process
 set -euo pipefail
 
 APP_NAME="fmri_local_process"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PREFIX="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_NAME"
-COMMANDS_FILE="commands.txt"  # in the app folder: one command per line
-BIN_DIR="$HOME/.local/bin"
+COMMANDS_FILE="commands.txt"  # in the toolbox folder: one command per line
 MARKER="# added by the $APP_NAME installer"
+# Before the toolbox folder was on PATH itself: the app here, launchers in ~/.local/bin.
+OLD_PREFIX="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_NAME"
+OLD_BIN_DIR="$HOME/.local/bin"
 
-shell_rc() {
-    case "$(basename "${SHELL:-bash}")" in
-        zsh) echo "$HOME/.zshrc" ;;
-        *) [[ "$(uname -s)" == Darwin ]] && echo "$HOME/.bash_profile" || echo "$HOME/.bashrc" ;;
-    esac
-}
-
-read_commands() {
-    # $1: an app folder. One from before commands.txt held the converter only.
-    if [[ -f "$1/$COMMANDS_FILE" ]]; then
-        mapfile -t COMMANDS < "$1/$COMMANDS_FILE"
-    else
-        COMMANDS=(fmri_convert_to_bids)
+startup_files() {
+    # Terminals read the first, logins (ssh, tmux) the others; .bash_profile hides .profile.
+    if [[ "$(basename "${SHELL:-bash}")" == zsh ]]; then
+        echo "$HOME/.zshrc"
+        return
     fi
-}
-
-remove_commands() {
-    for cmd in "${COMMANDS[@]}"; do
-        rm -f "$BIN_DIR/$cmd"
+    echo "$HOME/.bashrc"
+    echo "$HOME/.profile"
+    local file
+    for file in "$HOME/.bash_profile" "$HOME/.bash_login"; do
+        if [[ -f "$file" ]]; then echo "$file"; fi
     done
 }
 
-remove_path_line() {
-    local rc
-    rc="$(shell_rc)"
-    if [[ -f "$rc" ]] && grep -qF "$MARKER" "$rc"; then
-        grep -vF "$MARKER" "$rc" > "$rc.tmp" && mv "$rc.tmp" "$rc"
-        echo "Removed PATH entry from $rc"
+remove_from_path() {
+    local file kept
+    for file in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bash_login"; do
+        if [[ -f "$file" ]] && grep -qF "$MARKER" "$file"; then
+            kept="$(grep -vF "$MARKER" "$file" || true)"
+            if [[ -n "$kept" ]]; then printf '%s\n' "$kept" > "$file"; else rm -f "$file"; fi
+        fi
+    done
+}
+
+add_to_path() {
+    local quoted file
+    quoted="$(printf '%s' "$1" | sed 's/[\\"$`]/\\&/g')"
+    while IFS= read -r file; do
+        printf 'case ":$PATH:" in *":%s:"*) ;; *) export PATH="$PATH:%s" ;; esac %s\n' \
+            "$quoted" "$quoted" "$MARKER" >> "$file"
+    done < <(startup_files)
+}
+
+remove_toolbox() {
+    # Only ever a toolbox folder: never one that holds something else.
+    local folder="$1"
+    [[ -e "$folder" ]] || return 0
+    if [[ -f "$folder/$COMMANDS_FILE" && -d "$folder/_internal" ]]; then
+        rm -rf "$folder"
+    elif ! rmdir "$folder" 2>/dev/null; then
+        echo "$folder holds something else: choose another folder." >&2
+        exit 1
     fi
 }
 
-uninstall() {
-    read_commands "$PREFIX"
-    remove_commands
-    rm -rf "$PREFIX"
-    remove_path_line
-    echo "$APP_NAME uninstalled."
+remove_old_install() {
+    [[ -d "$OLD_PREFIX/_internal" && "$OLD_PREFIX" != "$FOLDER" ]] || return 0
+    local launcher
+    for launcher in "$OLD_BIN_DIR"/fmri_*; do
+        if [[ -f "$launcher" && ! -L "$launcher" ]] && grep -qF "exec \"$OLD_PREFIX/" "$launcher"; then
+            rm -f "$launcher"
+        fi
+    done
+    rm -rf "$OLD_PREFIX"
 }
 
 install() {
-    if [[ -d "$PREFIX" ]]; then  # an older version's commands may not all be in this one
-        read_commands "$PREFIX"
-        remove_commands
-    fi
-    rm -rf "$PREFIX"
-    mkdir -p "$PREFIX" "$BIN_DIR"
-    cp -R "$HERE/app/." "$PREFIX/"
-    read_commands "$PREFIX"
+    remove_toolbox "$FOLDER"
+    remove_old_install
+    mkdir -p "$FOLDER"
+    cp -R "$HERE/app/." "$FOLDER/"
+    if [[ -d "$HERE/docker" ]]; then cp -R "$HERE/docker" "$FOLDER/docker"; fi
     if [[ "$(uname -s)" == Darwin ]]; then
         # Unsigned binaries from a download are quarantined by Gatekeeper; clear it.
-        xattr -dr com.apple.quarantine "$PREFIX" 2>/dev/null || true
+        xattr -dr com.apple.quarantine "$FOLDER" 2>/dev/null || true
     fi
-
-    # A launcher script rather than a symlink, so the bundle always runs from its own folder.
-    for cmd in "${COMMANDS[@]}"; do
-        printf '#!/usr/bin/env bash\nexec "%s/%s" "$@"\n' "$PREFIX" "$cmd" > "$BIN_DIR/$cmd"
-        chmod +x "$BIN_DIR/$cmd" "$PREFIX/$cmd"
-    done
-
-    if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
-        local rc
-        rc="$(shell_rc)"
-        if ! grep -qF "$MARKER" "$rc" 2>/dev/null; then
-            printf '\nexport PATH="%s:$PATH" %s\n' "$BIN_DIR" "$MARKER" >> "$rc"
-        fi
-        echo "Added $BIN_DIR to PATH in $rc -- open a new terminal to use the commands."
-    fi
-    echo "$APP_NAME installed: ${COMMANDS[*]}"
+    remove_from_path
+    add_to_path "$FOLDER"
+    echo "Installed in $FOLDER, now on your PATH: open a new terminal (or log in again) to use"
+    sed 's/^/  /' "$FOLDER/$COMMANDS_FILE"
 }
 
-case "${1:-}" in
-    --uninstall) uninstall ;;
-    "") install ;;
-    *) echo "Usage: $0 [--uninstall]" >&2; exit 1 ;;
-esac
+ACTION=install
+if [[ "${1:-}" == --uninstall ]]; then
+    ACTION=uninstall
+    shift
+fi
+if [[ $# -gt 1 || "${1:-}" == -* ]]; then
+    echo "Usage: $0 [--uninstall] [FOLDER]" >&2
+    exit 1
+fi
+FOLDER="${1:-$HOME/.local/opt/$APP_NAME}"
+if [[ "$FOLDER" != /* ]]; then FOLDER="$PWD/$FOLDER"; fi
+FOLDER="${FOLDER%/}"
+if [[ "$FOLDER" == *:* ]]; then
+    echo "A folder on PATH can't have ':' in its name." >&2
+    exit 1
+fi
+
+if [[ "$ACTION" == install ]]; then
+    install
+else
+    remove_toolbox "$FOLDER"
+    remove_old_install
+    remove_from_path
+    echo "$APP_NAME uninstalled. Settings and backups are kept."
+fi

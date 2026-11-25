@@ -6,3 +6,5 @@ scipy
 matplotlib
 nibabel
 pydicom
+textual
+textual-image

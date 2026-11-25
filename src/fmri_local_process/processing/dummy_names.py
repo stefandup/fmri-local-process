@@ -10,7 +10,6 @@ import datetime as dt
 import random
 import re
 import string
-from collections.abc import Iterable
 
 TASK_WORDS = ("cogreappraisal", "emolabeling")  # the matching finds the task by these
 LOG_WORDS = frozenset({"scan", "log", "logs", "behav", "behavioural", "data", "task", "sub", "ses"})
@@ -47,9 +46,8 @@ def one_character_off(a: str, b: str) -> bool:
 class Disguise:
     """Learn every real ID, date and time first (learn_...), then ask for their disguises."""
 
-    def __init__(self, rng: random.Random, keep_words: Iterable[str] = ()) -> None:
+    def __init__(self, rng: random.Random) -> None:
         self.rng = rng
-        self.keep = {w.casefold() for w in keep_words}
         self.ids: dict[str, str] = {}  # real ID without punctuation or twin -> fake
         self.moments: dict[dt.date, set[dt.time]] = {}
         self.days: dict[dt.date, dt.date] = {}
@@ -182,7 +180,7 @@ class Disguise:
         """Words of a real name that may not come out: people's names, for example."""
         for word in re.findall(r"[A-Za-z]{4,}", text):
             lower = word.casefold()
-            if lower not in allowed and lower not in self.keep and lower not in TASK_WORDS:
+            if lower not in allowed and lower not in TASK_WORDS:
                 self.secrets.add(lower)
 
     def placeholder(self, word: str, kind: str = "word") -> str:
@@ -217,7 +215,7 @@ class Disguise:
         if token in self.ids:
             return self.fake_id(token)
         lower = token.casefold()
-        if lower in self.keep or lower in allowed:
+        if lower in allowed:
             return token
         for task in TASK_WORDS:
             if task in lower:

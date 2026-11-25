@@ -27,7 +27,7 @@ The mouse works too, in most terminals.
 
 ## What differs from the window
 
-- **Corrections** typed on Raw DICOMs and Behaviour logs stay with their row until you press **Use**,
+- **Corrections** typed on Raw DICOMs and Behaviour logs stay with their row until you press **Re-check**,
   a verdict button or **Save**, also when you look at other rows in between. Only **Save** writes them;
   quitting before that asks. Notes, comments and expected lengths are saved when you leave the box.
 - **Folders:** type the path and press Enter, or **Browse**. A BIDS, C-PAC or MRIQC output folder
@@ -50,5 +50,5 @@ The mouse works too, in most terminals.
 
 ## Installing
 
-From the repo: `pip install -e ".[tui]"` (no Qt). For a server without
+From the repo: `pip install -e .` in a virtual environment (no Qt). For a server without
 Python, use [the Linux bundle](linux-bundle.md).

@@ -4,20 +4,10 @@
 #   /work   a copy of the tracked files     /out    the bundle goes here     /cache  downloads
 set -euo pipefail
 
-UV_VERSION="0.13.10"
-UV_SHA256="bf65ac1a0af10f92c522d91ac096c7c0a39657647b155577e7836c2cbbb4526c"
-PYTHON_VERSION="3.13"
-export UV_CACHE_DIR=/cache/uv UV_PYTHON_INSTALL_DIR=/opt/python UV_LINK_MODE=copy
-
 echo "== Tools"
-dnf install -y -q --enablerepo=powertools binutils git gcc-c++ libstdc++-static make cmake tar gzip findutils \
-    >/dev/null
-
-UV_TAR="/cache/uv-$UV_VERSION.tar.gz"
-[[ -f "$UV_TAR" ]] || curl -fsSL -o "$UV_TAR" \
-    "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-x86_64-unknown-linux-gnu.tar.gz"
-echo "$UV_SHA256  $UV_TAR" | sha256sum -c --quiet
-tar -xzf "$UV_TAR" -C /usr/local/bin --strip-components=1
+dnf install -y -q --enablerepo=powertools python3.12 python3.12-pip binutils git gcc-c++ \
+    libstdc++-static make cmake tar gzip findutils >/dev/null
+export PIP_CACHE_DIR=/cache/pip PIP_DISABLE_PIP_VERSION_CHECK=1
 
 echo "== dcm2niix $(cat /work/tools/dcm2niix_version.txt)"
 # From source: the release's own binary needs a newer glibc (2.29) than RHEL/Rocky 8 has.
@@ -36,13 +26,14 @@ fi
 "$DCM2NIIX_DIR/dcm2niix" -v | head -n 1 || true
 
 echo "== Python and packages"
-uv venv -q --python "$PYTHON_VERSION" /opt/venv
-uv pip install -q --python /opt/venv/bin/python pyinstaller "/work[tui]"
+python3.12 -m venv /opt/venv
+/opt/venv/bin/pip install -q --upgrade pip
+/opt/venv/bin/pip install -q pyinstaller /work
 
 echo "== Bundle"
 cd /work
 /opt/venv/bin/python -m PyInstaller --noconfirm --log-level WARN \
-    --distpath /tmp/dist --workpath /tmp/build packaging/linux/fmri_tui.spec
+    --distpath /tmp/dist --workpath /tmp/build specs/linux.spec
 if find /tmp/dist -iname "*pyside*" -o -iname "libQt*" | grep -q .; then
     echo "Qt got into the bundle" >&2
     exit 1
@@ -53,12 +44,7 @@ PACKAGE="fmri_tui-$VERSION-linux-x86_64"
 STAGE="/tmp/stage/$PACKAGE"
 mkdir -p "$STAGE"
 cp -R /tmp/dist/fmri_tui "$STAGE/app"
-# One program; the other commands are links to it (see entry.py).
-/opt/venv/bin/python -c "import runpy; print(*runpy.run_path('packaging/linux/entry.py')['COMMANDS'], sep='\n')" \
-    | sort > "$STAGE/app/commands.txt"
-grep -v '^fmri_tui$' "$STAGE/app/commands.txt" | while read -r command; do
-    ln -s fmri_tui "$STAGE/app/$command"
-done
+(cd "$STAGE/app" && find . -maxdepth 1 -type f -perm -u+x -printf '%P\n' | sort) > "$STAGE/app/commands.txt"
 cp packaging/install.sh "$STAGE/install.sh"
 mkdir "$STAGE/docker"  # the C-PAC / MRIQC / defacer images, as in the Windows installer
 cp packaging/docker/Dockerfile packaging/docker/setup_docker_image.sh "$STAGE/docker/"

@@ -23,7 +23,6 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from fmri_local_process.cli.folders import find_folders
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
     HANG_ACTIONS,
@@ -95,10 +94,8 @@ def print_summary(summary: PreprocSummary, output_root: Path) -> None:
 
 @click.command(epilog=EXAMPLES_EPILOG)
 @click.version_option(package_name="fmri-local-process")
-@click.argument(
-    "bids_root", required=False, type=click.Path(exists=True, file_okay=False, path_type=Path)
-)
-@click.argument("output_folder", required=False, type=click.Path(file_okay=False, path_type=Path))
+@click.argument("bids_root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("output_folder", type=click.Path(file_okay=False, path_type=Path))
 @click.option("--subject_id", default="", help="Only preprocess this subject (no 'sub-').")
 @click.option(
     "--task",
@@ -155,11 +152,10 @@ def print_summary(summary: PreprocSummary, output_root: Path) -> None:
     "of deleting it. Only needed to rerun it later reusing its steps.",
 )
 @click.option("--image", default=CPAC_IMAGE, show_default=True, help="C-PAC Docker image to run.")
-@click.option("--yes", "-y", is_flag=True, help="Don't ask before using the folders set.")
 @click.option("--verbose", "-v", is_flag=True, help="Debug logging.")
 def main(
-    bids_root: Path | None,
-    output_folder: Path | None,
+    bids_root: Path,
+    output_folder: Path,
     subject_id: str,
     tasks: tuple[str, ...],
     rerun: bool,
@@ -171,11 +167,9 @@ def main(
     max_restarts: int,
     keep_working: bool,
     image: str,
-    yes: bool,
     verbose: bool,
 ) -> None:
     """Preprocess BIDS_ROOT with C-PAC's standard 'preproc' pipeline into OUTPUT_FOLDER.
-    Without folders: those set with fmri_folders (asks first).
 
     \b
     C-PAC 'preproc' (default pipeline minus derivatives) runs, per BOLD run:
@@ -198,10 +192,6 @@ def main(
         format="%(message)s",
         handlers=[RichHandler(console=console, show_path=False)],
     )
-    roots, _more, remembered = find_folders({"bids": bids_root, "output": output_folder})
-    bids_root, output_folder = roots["bids"], roots["output"]
-    if remembered and not yes:
-        click.confirm("Preprocess this?", abort=True)
     try:
         docker = find_docker()
     except DockerUnavailableError as e:

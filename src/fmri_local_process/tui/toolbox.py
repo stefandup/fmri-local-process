@@ -10,7 +10,7 @@ import click
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.widgets import Footer, Static, TabbedContent, TabPane
+from textual.widgets import Footer, Static, TabbedContent, TabPane, Tabs
 
 from fmri_local_process.app.figures import figures_dir
 from fmri_local_process.app.settings import MakeSettings, json_settings
@@ -176,13 +176,19 @@ class ToolboxApp(App[None]):
             tab = self.tabs.get_tab(pane_id(name))
             tab.label = tab_text(self.tab_names.index(name) + 1, name, badge)
 
+    def open_tab(self, name: str) -> None:
+        # The focus leaves the old tab first: Textual moves it to another widget in the tab being
+        # hidden otherwise, and opens that tab again because of it.
+        self.tabs.query_one(Tabs).focus()
+        self.tabs.active = pane_id(name)
+
     def action_step_tab(self, step: int) -> None:
         names = [pane_id(n) for n in self.tab_names]
-        self.tabs.active = names[(names.index(self.tabs.active) + step) % len(names)]
+        self.open_tab(self.tab_names[(names.index(self.tabs.active) + step) % len(names)])
 
     def action_open_tab(self, number: int) -> None:
         if number <= len(self.tab_names):
-            self.tabs.active = pane_id(self.tab_names[number - 1])
+            self.open_tab(self.tab_names[number - 1])
 
     def action_help(self) -> None:
         page = self.current_page()

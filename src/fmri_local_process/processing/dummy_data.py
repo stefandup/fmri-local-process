@@ -123,34 +123,15 @@ class StudyCopy:
         behav_root: Path | None,
         dicom_root: Path | None,
         rng: random.Random,
-        keep_words: Iterable[str] = (),
-        participants: int | None = None,
         progress: Progress | None = None,
     ) -> None:
         self.behav_root, self.dicom_root, self.rng = behav_root, dicom_root, rng
-        self.disguise = Disguise(rng, keep_words)
+        self.disguise = Disguise(rng)
         self.progress = progress or (lambda _what, _done, _total: None)
         self.logs = list(find_logs(behav_root)) if behav_root else []
         self.folders = sorted(d for d in dicom_root.iterdir() if d.is_dir()) if dicom_root else []
-        if participants is not None:
-            self.only_first(participants)
         self.texts: dict[Path, str] = {}
         self.learn()
-
-    def only_first(self, participants: int) -> None:
-        """Keep the first participants' folders and logs (a twin counts as one of them)."""
-
-        def person(raw: str) -> str:
-            base, _twin = Disguise.split_id(raw.strip())
-            return "".join(c for c in base if c.isalnum())
-
-        ids = [person(p[2]) for f in self.folders if (p := session_name_parts(f.name))]
-        ids += [person(id_in_name(path)) for path in self.logs]
-        wanted = set(list(dict.fromkeys(ids))[:participants])
-        self.folders = [
-            f for f in self.folders if (p := session_name_parts(f.name)) and person(p[2]) in wanted
-        ]
-        self.logs = [path for path in self.logs if person(id_in_name(path)) in wanted]
 
     def learn(self) -> None:
         """Every ID, date, time and name, before anything is written."""
@@ -546,9 +527,7 @@ def generate_dummy_dataset(
     with_errors: bool = False,
     reference_behav: Path | None = None,
     reference_dicom: Path | None = None,
-    n_reference: int | None = None,
     images: bool = False,
-    keep_words: Iterable[str] = (),
     seed: int | None = None,
     progress: Progress | None = None,
 ) -> DummyReport:
@@ -563,7 +542,7 @@ def generate_dummy_dataset(
     report = DummyReport()
     copy = None
     if reference_behav is not None or reference_dicom is not None:
-        copy = StudyCopy(reference_behav, reference_dicom, rng, keep_words, n_reference, progress)
+        copy = StudyCopy(reference_behav, reference_dicom, rng, progress)
         if not copy.logs and not copy.folders:
             raise DummyDataError("No .log files and no session folders found there.")
     elif not n_clean and not with_errors:

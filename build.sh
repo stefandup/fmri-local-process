@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Linux/macOS build: PyInstaller onedir bundle (with dcm2niix inside) + a .tar.gz containing
-# packaging/install.sh, which installs per-user and puts the commands on PATH.
+# packaging/install.sh, which installs per-user into one toolbox folder and puts that on PATH.
 # Windows uses build.ps1 + Inno Setup instead. Everything lands under build_output/.
 #
 #   ./build.sh          the converter (fmri_convert_to_bids), built on this computer

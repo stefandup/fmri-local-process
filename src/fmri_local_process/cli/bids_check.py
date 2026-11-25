@@ -1,6 +1,6 @@
 """fmri_bids_check: go through a converted BIDS folder: each session's problems, the scan lengths
-and (with --dicom) missing volumes, as the crosscheck tabs show them. Read only; record decisions
-with fmri_bids_fix."""
+and (with --dicom) missing volumes, as the crosscheck tabs show them. Read only: decisions are
+made in the toolbox."""
 
 from pathlib import Path
 
@@ -12,7 +12,6 @@ from fmri_local_process.app import dicom_volumes as adv
 from fmri_local_process.app.crosscheck import ICONS, needs_a_look, problem_text, scanned_text
 from fmri_local_process.app.overview import summary_lines
 from fmri_local_process.app.scan_lengths import ScanLengths, length_note, trimmed_note
-from fmri_local_process.cli.folders import find_folders
 from fmri_local_process.processing import dicom_volumes as dv
 from fmri_local_process.processing.action_log import read_actions
 from fmri_local_process.processing.crosscheck import (
@@ -31,12 +30,14 @@ EPILOG = """
 Examples:
 
 \b
-  fmri_bids_check                      what still needs a look (the folder set with fmri_folders)
-  fmri_bids_check --all --files        every session, with its files
-  fmri_bids_check --lengths            expected lengths, and runs to trim
-  fmri_bids_check --volumes            volumes missing from the NIfTIs or the DICOMs
-  fmri_bids_check --csv overview.csv
-  fmri_bids_check D:\\other_bids       another folder
+  fmri_bids_check path/to/bids                           what still needs a look
+  fmri_bids_check path/to/bids --all --files             every session, with its files
+  fmri_bids_check path/to/bids --lengths                 expected lengths, and runs to trim
+  fmri_bids_check path/to/bids --dicom path/to/dicoms    missing volumes
+  fmri_bids_check path/to/bids --csv overview.csv
+
+Fix what it finds in the toolbox (fmri_toolbox, or fmri_tui without a display): BIDS Crosscheck and
+Scan lengths & trimming.
 """
 
 
@@ -100,20 +101,18 @@ def print_volumes(bids_root: Path, dicom_root: Path) -> None:
 
 @click.command(epilog=EPILOG)
 @click.version_option(package_name="fmri-local-process")
-@click.argument("bids_root", required=False, type=FOLDER)
+@click.argument("bids_root", type=FOLDER, required=True)
 @click.option("--all", "everything", is_flag=True, help="Also the sessions with nothing to do.")
 @click.option("--files", is_flag=True, help="List each session's files.")
 @click.option("--lengths", is_flag=True, help="Scan lengths: expected, found, too long.")
-@click.option("--volumes", is_flag=True, help="Check the DICOMs for missing volumes.")
-@click.option("--dicom", "dicom_root", type=FOLDER, help="With --volumes: the DICOM folder.")
+@click.option("--dicom", "dicom_root", type=FOLDER, help="Check the DICOMs for missing volumes.")
 @click.option("--actions", type=click.IntRange(1), help="The last changes made to this folder.")
 @click.option("--csv", "csv_path", type=click.Path(path_type=Path), help="Save the overview.")
 def main(
-    bids_root: Path | None,
+    bids_root: Path,
     everything: bool,
     files: bool,
     lengths: bool,
-    volumes: bool,
     dicom_root: Path | None,
     actions: int | None,
     csv_path: Path | None,
@@ -122,9 +121,6 @@ def main(
 
     Nothing is changed (but the --csv file is written).
     """
-    wanted = {"bids": bids_root, "dicom": dicom_root} if volumes else {"bids": bids_root}
-    roots, _more, _remembered = find_folders(wanted)
-    bids_root = roots["bids"]
     reviews = [r for r in review_bids_folder(bids_root) if r.session is not None]
     excluded = len(read_excluded_sessions(bids_root))
     for line in summary_lines(reviews, read_expected_sessions(bids_root), excluded):
@@ -134,8 +130,8 @@ def main(
             print_session(review, bids_root, files)
     if lengths:
         print_lengths(bids_root)
-    if volumes:
-        print_volumes(bids_root, roots["dicom"])
+    if dicom_root is not None:
+        print_volumes(bids_root, dicom_root)
     for action in list(reversed(read_actions(bids_root)))[: actions or 0]:
         say("  ".join(str(value) for value in action.values()))
     if csv_path is not None:

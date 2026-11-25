@@ -282,8 +282,9 @@ class SharedPage(Page):
         self.show_status()
 
     def recheck(self) -> bool:
-        """Use what is typed and match again; False (and why is shown) when some is wrong."""
-        if problem := self.use_drafts():
+        """Use what is typed on both tabs and match again; False (and why is shown) when some is
+        wrong."""
+        if problem := self.shared.take_typed():
             self.query_one("#problem", Line).set(problem, ERROR_COLOR)
             return False
         self.shared.recheck()
@@ -329,7 +330,7 @@ class SessionsPage(SharedPage):
             yield Input(placeholder="YYYY-MM-DD", id="folder-date", max_length=10)
             yield Static("Set session:", classes="label")
             yield Input(placeholder="by date", id="folder-session", max_length=2)
-            yield Button("Use", id="use")
+            yield Button("Re-check", id="use")
         yield Line(id="problem")
         yield Line(id="ticked")
         with Horizontal(classes="row"):
@@ -468,7 +469,7 @@ class BehavPage(SharedPage):
             yield Input(id="log-id")
             yield Static("Corrected date:", classes="label")
             yield Input(placeholder="YYYY-MM-DD", id="log-date", max_length=10)
-            yield Button("Use", id="use")
+            yield Button("Re-check", id="use")
         yield Line(id="problem")
         with Horizontal(classes="row"):
             yield Input(

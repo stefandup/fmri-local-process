@@ -98,7 +98,7 @@ class LogDisguiser:
         return "\t".join(self.column(name) for name in line.split("\t"))
 
     def column(self, name: str) -> str:
-        if name in COLUMNS or not name.strip() or name.casefold() in self.disguise.keep:
+        if name in COLUMNS or not name.strip():
             return name
         return self.disguise.placeholder(name, "extra") + ("(str)" if "(str)" in name else "")
 
@@ -195,7 +195,7 @@ class LogDisguiser:
         if NUMBER.fullmatch(stripped):
             return self.noisy(stripped)
         lower = stripped.casefold()
-        if lower in KEPT_VALUES or lower in self.disguise.keep or CONDITION.fullmatch(lower):
+        if lower in KEPT_VALUES or CONDITION.fullmatch(lower):
             return stripped
         return self.disguise.placeholder(stripped, "stim")
 

@@ -10,7 +10,6 @@ from rich.progress import Progress, TaskID
 from rich.table import Table
 
 from fmri_local_process.app.convert import ConvertJob, report_lines, report_rows
-from fmri_local_process.cli.folders import find_folders
 from fmri_local_process.processing.dummy_data import (
     BEHAV_DIR,
     DICOM_DIR,
@@ -30,27 +29,23 @@ Examples:
 
 \b
   {DEFAULT_N_CLEAN} clean participants, reproducible:
-  fmri_generate_sample_data dummy --seed 42
+  fmri_generate_sample_data path/to/dummy --seed 42
 
 \b
   Also add one participant per known error scenario (typos, duplicate or
   aborted logs, twins, missing scans, ...):
-  fmri_generate_sample_data dummy --with-errors --seed 42
+  fmri_generate_sample_data path/to/dummy --with-errors --seed 42
 
 \b
   A dummy twin of a real study, without exposing its data: IDs and dates match,
-  or don't, where the real ones do; everything else is made up. Of the
-  folders set with fmri_folders (logs in every folder below are found):
-  fmri_generate_sample_data dummy --reference
-
-\b
-  Of other folders, the first 5 participants, with the error scenarios too:
-  fmri_generate_sample_data dummy --reference-behav <logs> \\
-    --reference-dicom <dicoms> --n-reference 5 --with-errors
+  or don't, where the real ones do; everything else is made up. The logs are
+  looked for in every folder below --reference-behav:
+  fmri_generate_sample_data path/to/dummy --reference-behav path/to/logs \\
+    --reference-dicom path/to/dicoms
 
 \b
   Generate straight into a BIDS folder in the same call (makes whole series):
-  fmri_generate_sample_data dummy --with-errors --bids-folder dummy_bids
+  fmri_generate_sample_data path/to/dummy --with-errors --bids-folder path/to/dummy_bids
 
 \b
   Every run writes "{DUMMY_DATA_LOG_FILENAME}" inside output_folder -- a plain-text,
@@ -76,11 +71,6 @@ Examples:
 @click.option("--seed", type=int, default=None, help="Seed for reproducible generation")
 @click.option("--verbose", is_flag=True, help="Give verbose output")
 @click.option(
-    "--reference",
-    is_flag=True,
-    help="Make dummy twins of the DICOM sessions and logs folders set with fmri_folders.",
-)
-@click.option(
     "--reference-behav",
     type=FOLDER,
     default=None,
@@ -92,18 +82,6 @@ Examples:
     default=None,
     help="Real DICOM session folders to make dummy twins of. Only names are looked at (with "
     "--images, numbers in the headers too).",
-)
-@click.option(
-    "--n-reference",
-    type=click.IntRange(1),
-    default=None,
-    help="Only the first so many participants of the reference folders.",
-)
-@click.option(
-    "--keep-word",
-    multiple=True,
-    help="A word of the reference folders to keep as it is, repeatable, e.g. a scan's name in your "
-    "own scan rules. Never a person's name.",
 )
 @click.option(
     "--images",
@@ -124,11 +102,8 @@ def main(
     with_errors: bool,
     seed: int | None,
     verbose: bool,
-    reference: bool,
     reference_behav: Path | None,
     reference_dicom: Path | None,
-    n_reference: int | None,
-    keep_word: tuple[str, ...],
     images: bool,
     bids_folder: Path | None,
 ) -> None:
@@ -142,16 +117,7 @@ def main(
     of their events, and which of them were answered.
     """
     logging.basicConfig(level=logging.INFO if verbose else logging.ERROR, format="%(message)s")
-    if reference:
-        roots, _more, _remembered = find_folders(
-            {"behav": reference_behav, "dicom": reference_dicom}
-        )
-        reference_behav, reference_dicom = roots["behav"], roots["dicom"]
     has_reference = reference_behav is not None or reference_dicom is not None
-    if n_reference is not None and not has_reference:
-        raise click.UsageError(
-            "--n-reference needs --reference, --reference-behav or --reference-dicom."
-        )
     if n_clean is None:
         n_clean = 0 if has_reference else DEFAULT_N_CLEAN
     with Progress(console=console, transient=True) as bars:
@@ -169,9 +135,7 @@ def main(
                 with_errors,
                 reference_behav,
                 reference_dicom,
-                n_reference,
                 images or bids_folder is not None,
-                keep_word,
                 seed,
                 progress,
             )

@@ -34,105 +34,87 @@ Full details and a step-by-step "test it yourself" plan:
    raw) rather than moved to `trash/`, and no `selected_runs.json` is written.
 3. **Check the dummy-scan assumption.** Events onsets assume the first logged pulse is the
    first volume saved in the BOLD file.
-4. **Packaging.** Add `fmri_behav_events` to the PyInstaller and installer builds if it
-   should ship. It is only on PATH via `pip install -e .` for now.
-5. **Linux build.** Run `./build.sh` and `packaging/install.sh` on Ubuntu.
+4. **Windows build.** Run `build.ps1 -Full` and check that a new terminal finds every tool.
 
 ## Linux: one PC or server (e.g. OpenMediaVault)
 
-The whole toolbox without a display: the terminal app `fmri_tui` and command-line tools that do the
-checking on their own. Needs a 64-bit Intel/AMD PC and, for C-PAC, MRIQC and defacing, Docker.
-Details: [the Linux bundle](docs/linux-bundle.md), [the terminal app](docs/tui.md).
+The whole toolbox without a display: the terminal app `fmri_tui`, which works like the window, and
+command-line tools that point out problems on their own. Needs a 64-bit Intel/AMD PC and, for C-PAC,
+MRIQC and defacing, Docker. Details: [the terminal app](docs/tui.md), [the Linux
+bundle](docs/linux-bundle.md).
 
-### Build (here) and install (there)
+### From this repo
 
 ```bash
-./build.sh --tui                                   # in WSL or Linux, with Docker: like build.ps1 -Full
-packaging/linux/check_bundle.sh                    # optional: tries it in clean containers
+python -m venv .venv                 # Python 3.12 or later
+source .venv/bin/activate            # Windows: .venv\Scripts\Activate.ps1
+pip install -e .                     # the terminal app and every command; ".[gui]" adds the window
+```
+
+With the environment active, every command is on the PATH.
+
+### As a bundle, for a server without Python
+
+```bash
+./build.sh --tui                     # in WSL or Linux, with Docker: like build.ps1 -Full
+packaging/linux/check_bundle.sh      # optional: tries it in clean containers
 
 scp build_output/installer/fmri_tui-*-linux-x86_64.tar.gz user@server:
 ssh user@server
 tar -xzf fmri_tui-*-linux-x86_64.tar.gz && cd fmri_tui-*/
-./install.sh                                       # no sudo; then open a new terminal
-docker/setup_docker_image.sh --defacer pydeface --mriqc   # C-PAC, MRIQC, defacer (~20 GB)
+./install.sh                         # no sudo; one toolbox folder, added to your PATH: open a new terminal
+~/.local/opt/fmri_local_process/docker/setup_docker_image.sh --defacer pydeface --mriqc    # C-PAC, MRIQC, defacer (~20 GB)
 ```
 
 On OpenMediaVault, check first: your user has a home folder (Users > Settings) and SSH access,
-`docker info` works without sudo, and the home folder isn't on a disk mounted `noexec`. Keep the
-data on the data disk; the app needs about 400 MB.
-
-### In WSL or Linux, from this repo (no bundle)
-
-As in vr_lab_toolbox: a virtual environment and `pip install -e`. The commands are in `pyproject.toml`
-(`[project.scripts]`), and an active environment puts them on the PATH.
-
-```bash
-python3.13 -m venv .venv                     # once
-source .venv/bin/activate                    # in each new terminal (VS Code does it for you)
-pip install -e ".[gui,tui]"                  # once, and again when pyproject.toml changes
-```
-
-`[tui]` adds the terminal app and `[gui]` the window; `pip install -e .` alone is enough for the
-commands. The bundle's `install.sh` needs no environment: its commands are on the PATH everywhere.
-
-### Set the folders once
-
-```bash
-fmri_folders --dicom DICOMS --behav LOGS --bids BIDS --output CPAC_OUT --mriqc MRIQC_OUT
-```
-
-Shared with `fmri_tui`. After this no command needs a folder. (Given folders win, and are never mixed
-with the remembered ones. The Windows window keeps its own.)
+`docker info` works without sudo, and the home folder isn't on a disk mounted `noexec`.
 
 ### Crosscheck the behaviour logs
 
-Back up first (`fmri_bids_fix backup`, or Save now on the Setup tab). If the logs are on OneDrive,
-make sure it is running and synced.
+1. If the logs are on OneDrive, make sure it is running and synced. Back up: **Save now** on the Setup
+   tab.
+2. See what is wrong (nothing is changed):
 
-| Step | Terminal app (or window) | Command |
-|---|---|---|
-| See what doesn't match | **Behaviour logs**, tick *Needs review only* | `fmri_behav_check --problems-only` |
-| Wrong ID, date or session number of a scan: do these first, one folder can leave several logs unmatched | **Raw DICOMs**, type, **Use** | `fmri_behav_fix folder FOLDER --id P001 --session 2` |
-| Wrong ID or date of a log | **Behaviour logs**, type, **Use** | `fmri_behav_fix log LOG --id P001 --date 2024-04-03` |
-| Look at a log's events, and whether they fit the BOLD run | highlight it | `fmri_behav_check --log LOG` |
-| Several logs on one day | **Use this one** | `fmri_behav_fix use LOG` |
-| Verdict on a short or odd log | **Mark OK** / **Mark error** | `fmri_behav_fix log LOG --verdict error --note "why"` |
-| Been through it | tick, **Mark ticked crosschecked** | `fmri_behav_fix log LOG --crosschecked` |
-| Keep it | **Save** | (saved at once) |
-| Apply it | **Convert to BIDS** | `fmri_convert_to_bids` |
+   ```bash
+   fmri_behav_check path/to/logs path/to/dicoms --bids path/to/bids --problems-only
+   fmri_behav_check path/to/logs path/to/dicoms --bids path/to/bids --log emolabeling/2024/P001-....log
+   ```
 
-`LOG` is any part of the log's path that only it has, e.g. `P001-emo`. Nothing changes the raw files:
-decisions are saved in `BIDS/code/`, the same files for the window, the terminal app and the commands.
+3. Fix it in the window (`fmri_toolbox`) or the terminal app (`fmri_tui`): wrong IDs, dates and session
+   numbers of scans first (**Raw DICOMs**: one wrong folder can leave several logs unmatched), then
+   the logs (**Behaviour logs**: ID, date, **Use this one**, **Mark OK** / **Mark error**, **Mark
+   crosschecked**). **Save**, then **Convert to BIDS**.
+4. Run the check again.
 
 What to look for: *unknown ID* (a typo, or a twin: `12345-1` becomes `12345T1`), *date mismatch*, *duplicate*,
 *no task scan*, *no task* (the path needs `cogreappraisal` or `emolabeling`), and *aborted* logs, which
 match but need a verdict. A match only says that ID and date agree: look at the events too.
 
-### The rest by commands
+### The other checks
 
 ```bash
-fmri_bids_check                    # each session's problems; --files --lengths --volumes --csv out.csv
-fmri_bids_fix --help               # mark, note, keep, trim, expect, delete-..., backup
-fmri_mriqc                         # run MRIQC, list the metrics; --results, --rate
-fmri_preprocess                    # C-PAC
+fmri_bids_check path/to/bids                            # each session's problems
+fmri_bids_check path/to/bids --lengths                  # scans too short or too long
+fmri_bids_check path/to/bids --dicom path/to/dicoms     # missing volumes
+fmri_mriqc path/to/bids path/to/mriqc                   # run MRIQC; metrics with the outliers marked
 ```
 
 ### Dummy data to try it on
 
 ```bash
-fmri_generate_sample_data dummy --with-errors --seed 42      # 5 clean participants, one per problem
-fmri_generate_sample_data dummy --reference                  # like the real study (fmri_folders)
-fmri_generate_sample_data dummy --with-errors --bids-folder dummy_bids         # and convert it
+fmri_generate_sample_data path/to/dummy --with-errors --seed 42
+fmri_generate_sample_data path/to/dummy --reference-behav path/to/logs --reference-dicom path/to/dicoms
+fmri_generate_sample_data path/to/dummy --with-errors --bids-folder path/to/dummy_bids
 ```
 
-The same command line as vr_lab_toolbox's `..._generate_sample_data`; `dummy_data_log.txt` in the folder
-says what each participant is for. `--reference` finds the `.log` files in every folder below the logs
-folder and gives each log and session folder a dummy twin: IDs and dates match, or don't, exactly
-where the real ones do. IDs, dates, times, answers, names and images are made up; the real data is only
-read, the link between real and dummy IDs is never written down, and the result is deleted if anything
-real is found in it. What stays is the shape: how many logs and sessions, the order of the dates, the
-logs' layout, the number and kind of their events, and which of them were answered. Look through it
-before sharing it. The dummy folder must be new, and outside the real data.
+The first makes 5 clean participants and one per known problem; `dummy_data_log.txt` says what each is
+for. The second finds the `.log` files in every folder below the logs folder and gives each log and
+session folder a dummy twin: IDs and dates match, or don't, exactly where the real ones do. IDs, dates,
+times, answers, names and images are made up; the real data is only read, the link between real and
+dummy IDs is never written down, and the result is deleted if anything real is found in it. What stays
+is the shape: how many logs and sessions, the order of the dates, the logs' layout, the number and kind
+of their events, and which of them were answered. Look through it before sharing it. The dummy folder
+must be new, and outside the real data.
 
 ## 1a. Preprocessing via C-PAC in Docker (built, not yet run on real data)
 
@@ -243,8 +225,8 @@ tests/
 ## Development
 
 - Python 3.13, `.venv` in the repo root:
-  `.venv\Scripts\python -m pip install -e ".[gui,tui]" -r requirements-dev.txt`
-  (the base install has no Qt; `[gui]` adds the window, `[tui]` the terminal app)
+  `pip install -e ".[gui]" -r requirements-dev.txt`, with the environment active
+  (`pip install -e .` leaves out Qt, and with it the window)
 - Style: [Golden Rules](docs/golden-rules.md) and [AI Style Guide](docs/ai-style-guide.md).
   Agent rules are in [AGENTS.md](AGENTS.md).
 - Build: `.\build.ps1 -Exe | -Full | -Inno` (all output goes to `build_output/`); the bundle for

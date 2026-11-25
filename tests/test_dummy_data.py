@@ -180,12 +180,6 @@ def test_the_dummy_keeps_what_tells_participants_apart(
     assert any(one_character_off(u, s) for u in unknown for s in scanned)  # still a typo
 
 
-def test_only_the_first_participants(study: tuple[Path, Path], tmp_path: Path) -> None:
-    out = tmp_path / "dummy"
-    report = dd.generate_dummy_dataset(out, 0, False, *study, n_reference=1, seed=1)
-    assert report.sessions == 2 and report.logs == 3  # 48213's two visits
-
-
 def test_the_real_folders_are_never_written_into(study: tuple[Path, Path], tmp_path: Path) -> None:
     behav, dicom = study
     before = everything(tmp_path / "real")
@@ -306,8 +300,6 @@ def test_the_command_lists_the_participants(tmp_path: Path) -> None:
     assert "Generated fMRI dummy data" in result.output
     assert all(name in result.output for name in dd.SCENARIOS)
     assert (out / dd.DUMMY_DATA_LOG_FILENAME).is_file()
-    wrong = CliRunner().invoke(main, [str(tmp_path / "x"), "--n-reference", "3"])
-    assert wrong.exit_code == 2 and "needs --reference" in wrong.output
 
 
 def test_generate_and_convert_in_one_call(tmp_path: Path) -> None:

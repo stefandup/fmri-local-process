@@ -1,7 +1,7 @@
 """fmri_behav_check: which behavioural log goes with which scan session, and what's off.
 
 Thin report around processing/behav_match.py -- the same matching the converter uses. Read
-only: decisions are made in the toolbox (window or terminal) or with fmri_behav_fix, and saved in
+only: decisions are made in the toolbox (window or terminal) and saved in
 the BIDS folder.
 """
 
@@ -12,8 +12,17 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from fmri_local_process.app.behav import COLUMNS, event_rows, fit_text, log_cells, log_title
-from fmri_local_process.cli.folders import find_folders
+from fmri_local_process.app.behav import (
+    COLUMNS,
+    S_NOTES,
+    S_SESSION,
+    BehavWork,
+    event_rows,
+    fit_text,
+    load_behav_data,
+    log_cells,
+    log_title,
+)
 from fmri_local_process.processing.behav_logs import read_log_lines
 from fmri_local_process.processing.behav_match import (
     ABORTED,
@@ -22,21 +31,10 @@ from fmri_local_process.processing.behav_match import (
     UNREADABLE,
     LogMatch,
     events_summary,
-    inspect_logs,
     inventory,
-    match_logs,
     needs_review,
-    read_corrections,
 )
 from fmri_local_process.processing.crosscheck import bold_run_length
-from fmri_local_process.processing.philani_bids import (
-    read_dicom_corrections,
-    read_dicom_date_corrections,
-    read_dicom_session_corrections,
-    read_excluded_sessions,
-    read_scan_rules,
-    scan_sessions,
-)
 
 console = Console()
 FOLDER = click.Path(exists=True, file_okay=False, path_type=Path)
@@ -48,23 +46,20 @@ EXAMPLES_EPILOG = """
 Examples:
 
 \b
-  Every log against every scan session, of the folders set with fmri_folders:
-  fmri_behav_check
+  Every log against every scan session, with the corrections saved in the BIDS folder:
+  fmri_behav_check path/to/logs path/to/dicoms --bids path/to/bids
 
 \b
-  Only the logs that need a look:
-  fmri_behav_check --problems-only
+  Only what needs a look:
+  fmri_behav_check path/to/logs path/to/dicoms --bids path/to/bids --problems-only
 
 \b
-  One log's events, and whether they fit its converted BOLD run (a part of
-  its name is enough):
-  fmri_behav_check --log P001-emolabeling
+  One log's events (its path as listed), and whether they fit its BOLD run:
+  fmri_behav_check path/to/logs path/to/dicoms --bids path/to/bids \\
+    --log emolabeling/2024/P001-....log
 
-\b
-  Other folders, with the corrections saved in the BIDS folder:
-  fmri_behav_check D:\\philani_behavioural_logs D:\\philani --bids D:\\philani_bids
-
-Record what you decide with fmri_behav_fix.
+Fix what it finds in the toolbox (fmri_toolbox, or fmri_tui without a display): Raw DICOMs and
+Behaviour logs.
 """
 
 
@@ -75,31 +70,29 @@ def date_text(m: LogMatch) -> str:
     return f"{info.time_text} ({info.date_source})"
 
 
-def find_matches(behav_root: Path, dicom_root: Path, bids_root: Path | None) -> list[LogMatch]:
-    """As the Behaviour logs tab matches them: every correction saved in the BIDS folder."""
-    if bids_root is None:
-        return match_logs(inspect_logs(behav_root, {}), scan_sessions(dicom_root))
-    sessions = scan_sessions(
-        dicom_root,
-        read_dicom_corrections(bids_root),
-        read_excluded_sessions(bids_root),
-        read_dicom_date_corrections(bids_root),
-        read_dicom_session_corrections(bids_root),
-        read_scan_rules(bids_root),
-    )
-    return match_logs(inspect_logs(behav_root, read_corrections(bids_root)), sessions)
+def read_work(behav_root: Path, dicom_root: Path, bids_root: Path | None) -> BehavWork:
+    """As the Raw DICOMs and Behaviour logs tabs read them, with every correction saved in the
+    BIDS folder (none without one)."""
+    bids = bids_root or dicom_root / "(no BIDS folder)"  # isn't there: nothing saved in it
+    return BehavWork(bids, behav_root, dicom_root, load_behav_data(bids, behav_root, dicom_root))
 
 
-def one_log(text: str, keys: list[str]) -> str:
-    """The log meant by its path as listed, or by a part of it that only one log has."""
-    wanted = Path(text).as_posix()
-    found = [k for k in keys if k == wanted] or [k for k in keys if wanted in k]
-    if len(found) == 1:
-        return found[0]
-    if not found:
-        raise click.ClickException(f"No such log: {text}")
-    listing = "\n".join(f"  {k}" for k in found[:10])
-    raise click.ClickException(f"{len(found)} logs have {text!r} in their path:\n{listing}")
+def print_folders(work: BehavWork, problems_only: bool) -> None:
+    """The DICOM session folders: what they resolve to, and what is wrong with them."""
+    console.print("DICOM session folders", style="bold")
+    shown = 0
+    for row, (folder, _tasks) in enumerate(work.scanned):
+        cells = work.folder_cells(row)
+        if problems_only and not cells[S_NOTES]:
+            continue
+        shown += 1
+        console.print(
+            f"{folder.name} -> {cells[S_SESSION] or 'not converted'}", markup=False, highlight=False
+        )
+        if cells[S_NOTES]:
+            console.print(f"   {cells[S_NOTES]}", style="yellow", markup=False, highlight=False)
+    if not shown:
+        console.print("   no problems")
 
 
 def notes_text(m: LogMatch) -> str:
@@ -201,8 +194,8 @@ def write_csv(matches: list[LogMatch], path: Path) -> None:
 
 @click.command(epilog=EXAMPLES_EPILOG)
 @click.version_option(package_name="fmri-local-process")
-@click.argument("behav_root", required=False, type=FOLDER)
-@click.argument("dicom_root", required=False, type=FOLDER)
+@click.argument("behav_root", type=FOLDER, required=True)
+@click.argument("dicom_root", type=FOLDER, required=True)
 @click.option(
     "--bids",
     "bids_root",
@@ -215,18 +208,17 @@ def write_csv(matches: list[LogMatch], path: Path) -> None:
     help="List only logs that need review: not matched, incomplete or with notes, and no "
     "verdict (OK / error / not used) recorded in the crosscheck yet.",
 )
-@click.option("--log", "log_key", help="Show one log's events (its path as listed, or a part).")
+@click.option("--log", "log_key", help="Show one log's events (its path as listed).")
 @click.option("--csv", "csv_path", type=click.Path(path_type=Path), help="Also save the list.")
 def main(
-    behav_root: Path | None,
-    dicom_root: Path | None,
+    behav_root: Path,
+    dicom_root: Path,
     bids_root: Path | None,
     problems_only: bool,
     log_key: str | None,
     csv_path: Path | None,
 ) -> None:
-    """Match every behavioural log in BEHAV_ROOT to the DICOM sessions in DICOM_ROOT (without
-    folders: those set with fmri_folders, with the corrections saved in that BIDS folder).
+    """Match every behavioural log in BEHAV_ROOT to the DICOM sessions in DICOM_ROOT.
 
     A log matches a session by subject ID (file name before the first '-') and date (the
     YYYYMMDD of <ID>-<task>_scan-YYYYMMDD-HHMMSS-<uid>.log, else the log's "Logfile
@@ -237,15 +229,18 @@ def main(
     (OK, error, not used) are shown; error and not used logs are left out of BIDS. Nothing
     is written, but the --csv file.
     """
-    roots, more, _remembered = find_folders(
-        {"behav": behav_root, "dicom": dicom_root}, {"bids": bids_root}
-    )
     with console.status("Reading logs and scan sessions..."):
-        matches = find_matches(roots["behav"], roots["dicom"], more["bids"])
+        work = read_work(behav_root, dicom_root, bids_root)
+    matches = work.matches
     if log_key is not None:
-        key = one_log(log_key, [m.info.key for m in matches])
-        print_log(next(m for m in matches if m.info.key == key), more["bids"])
+        key = Path(log_key).as_posix()
+        match = next((m for m in matches if m.info.key == key), None)
+        if match is None:
+            raise click.ClickException(f"No such log: {log_key}")
+        print_log(match, bids_root)
         return
+    print_folders(work, problems_only)
+    console.print()
     shown = [m for m in matches if not problems_only or needs_review(m)]
     print_matches(shown)
     print_inventory(matches)

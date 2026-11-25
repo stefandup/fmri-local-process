@@ -27,6 +27,11 @@ $CliDir = Join-Path $PSScriptRoot "src\fmri_local_process\cli"
 $Apps = [ordered]@{
     "fmri_convert_to_bids" = Join-Path $CliDir "convert_to_bids.py"
     "fmri_preprocess"      = Join-Path $CliDir "preprocess.py"
+    "fmri_mriqc"           = Join-Path $CliDir "mriqc.py"
+    "fmri_behav_events"    = Join-Path $CliDir "behav_events.py"
+    "fmri_behav_check"     = Join-Path $CliDir "behav_check.py"
+    "fmri_bids_check"      = Join-Path $CliDir "bids_check.py"
+    "fmri_generate_sample_data" = Join-Path $CliDir "generate_sample_data.py"
 }
 $AppName = "fmri_convert_to_bids"
 $PackageName = "fmri-local-process"
@@ -84,7 +89,7 @@ function Build-Exes {
     & $Python -m pip install -e . --no-deps
     Assert-Success "pip install -e ."
     foreach ($app in $Apps.Keys) {
-        # Only the converter needs dcm2niix; fmri_preprocess shells out to docker instead.
+        # The converter brings dcm2niix; in the toolbox folder the others share its _internal\.
         $appBundleArgs = if ($app -eq $AppName) { $bundleArgs } else { @() }
         # --noconfirm: skip PyInstaller's interactive "will be REMOVED! Continue?" prompt.
         & $Python -m PyInstaller --noconfirm --workpath $WorkPath --distpath $DistPath `

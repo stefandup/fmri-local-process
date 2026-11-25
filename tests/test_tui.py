@@ -236,6 +236,32 @@ def test_every_button_can_be_reached_in_a_small_terminal(
     run_sized(tmp_path, scenario, SETUP, size, {"bids": bids})
 
 
+def test_the_keys_leave_every_tab_whatever_is_focused(tmp_path: Path) -> None:
+    """Hiding a tab moves the focus; it must not bring that tab back."""
+    folders, _folder, _log = behav_study(tmp_path)
+    stuck: list[str] = []
+
+    async def scenario(app: ToolboxApp, pilot: Pilot) -> None:
+        for number, name in enumerate(app.tab_names, start=1):
+            for kind in (Button, Table, Checkbox):
+                app.action_open_tab(number)
+                await settle(app, pilot)
+                widget = next((w for w in app.pages[name].query(kind) if w.focusable), None)
+                if widget is None:
+                    continue
+                widget.focus()
+                await pilot.pause()
+                await pilot.press(
+                    "]" if kind is Table else str(number % len(app.tab_names) + 1)[-1]
+                )
+                await settle(app, pilot)
+                if app.tabs.active == pane_id(name):
+                    stuck.append(f"{name}: from {widget}")
+
+    run_app(tmp_path, scenario, **folders)
+    assert not stuck
+
+
 def test_review_package_is_view_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     package = tmp_path / "package"
     (package / "review_data" / "bids").mkdir(parents=True)

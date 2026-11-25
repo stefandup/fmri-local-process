@@ -10,7 +10,6 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
-from fmri_local_process.cli.folders import find_folders
 from fmri_local_process.processing.dcm2niix import (
     Dcm2niixNotFoundError,
     find_dcm2niix,
@@ -82,12 +81,8 @@ def print_report(report: ConversionReport) -> None:
 
 @click.command(epilog=EXAMPLES_EPILOG)
 @click.version_option(package_name="fmri-local-process")
-@click.argument(
-    "dicom_root",
-    required=False,
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-)
-@click.argument("bids_root", required=False, type=click.Path(file_okay=False, path_type=Path))
+@click.argument("dicom_root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("bids_root", type=click.Path(file_okay=False, path_type=Path))
 @click.option("--no-deface", is_flag=True, help="Skip T1w face removal.")
 @click.option(
     "--freesurfer",
@@ -124,8 +119,8 @@ def print_report(report: ConversionReport) -> None:
 @click.option("-y", "--yes", is_flag=True, help="Don't prompt (create BIDS_ROOT, confirm reset).")
 @click.option("-v", "--verbose", is_flag=True, help="Debug logging.")
 def main(
-    dicom_root: Path | None,
-    bids_root: Path | None,
+    dicom_root: Path,
+    bids_root: Path,
     no_deface: bool,
     freesurfer: Path | None,
     reset: bool,
@@ -136,7 +131,6 @@ def main(
     verbose: bool,
 ) -> None:
     """Convert DICOM_ROOT (one folder per scan session) into a BIDS dataset at BIDS_ROOT.
-    Without folders: those set with fmri_folders, the logs too (asks first).
 
     Every session is written as sub-<id>/ses-<n>/, n = 1, 2, ... in calendar order of the
     YYYYMMDD date in the session folder name (sub-<id>_sessions.tsv records which folder each
@@ -160,12 +154,6 @@ def main(
         handlers=[RichHandler(console=console, show_path=False)],
     )
 
-    roots, more, remembered = find_folders(
-        {"dicom": dicom_root, "bids": bids_root}, {"behav": behav_root}
-    )
-    dicom_root, bids_root, behav_root = roots["dicom"], roots["bids"], more["behav"]
-    if remembered and not yes:
-        click.confirm("Convert these?", abort=True)
     try:
         exe = find_dcm2niix(dcm2niix_path)
         deface = None if no_deface else make_deface(freesurfer)
