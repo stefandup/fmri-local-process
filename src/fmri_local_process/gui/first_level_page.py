@@ -15,10 +15,8 @@ first subject is modelled at startup (auto_run), so the tab opens on results.
   between runs, the BIDS scan parameters (differences highlighted) and C-PAC's QC values.
 """
 
-import csv
 from pathlib import Path
 
-import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, QThread, Signal
@@ -45,6 +43,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fmri_local_process.app.first_level import (
+    DIFFERS_COLOR,
+    NO_ATLAS,
+    SHOW_CURSOR,
+    SHOW_PEAK,
+    SHOW_REGION,
+    Cursor,
+    FirstLevelModel,
+    ModelJob,
+    differs,
+    fetch_atlases,
+    modelled_text,
+    subject_notices,
+)
 from fmri_local_process.gui.qt_common import (
     PROCESS_ACCENT_COLOR,
     PROCESS_ACCENT_HOVER_COLOR,
@@ -58,20 +70,7 @@ from fmri_local_process.processing import atlases as at
 from fmri_local_process.processing import first_level as fl
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
-    DockerUnavailableError,
-    find_docker,
 )
-
-VIEWS = (("Sagittal", 0), ("Coronal", 1), ("Axial", 2))
-RUN_COLORS = ("#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e")
-ROI_COLOR = "#00e5ff"
-DIFFERS_COLOR = "#f9e79f"
-SHOW_PEAK, SHOW_CURSOR, SHOW_REGION = (
-    "Peak voxel (each run's own)",
-    "Voxel at cursor",
-    "Region mean",
-)
-NO_ATLAS = "No atlas: whole brain"
 
 
 class ModelThread(QThread):
@@ -83,48 +82,24 @@ class ModelThread(QThread):
         self, runs: list[fl.RunFile], design: fl.BlockDesign, reg: str, bids_root: Path | None
     ) -> None:
         super().__init__()
-        self.runs, self.design, self.reg, self.bids_root = runs, design, reg, bids_root
+        self.job = ModelJob(runs, design, reg, bids_root)
 
     def run(self) -> None:
-        results, errors = [], []
-        for run in self.runs:
-            try:
-                result = fl.model_run(run, self.design)
-            except (fl.FirstLevelError, MemoryError) as e:
-                errors.append(str(e))
-                continue
-            result.extra.update(fl.scan_details(self.bids_root, run))
-            result.extra.update(fl.cpac_qc_values(run, self.reg))
-            results.append(result)
-        self.done.emit(results, "\n".join(errors))
+        self.done.emit(*self.job.run())
 
 
 class FetchAtlasThread(QThread):
     done = Signal(str)  # error text, "" on success
 
     def run(self) -> None:
-        try:
-            at.fetch_atlases(find_docker(), CPAC_IMAGE, at.default_cache())
-        except (at.AtlasError, DockerUnavailableError, OSError) as e:
-            self.done.emit(str(e))
-            return
-        self.done.emit("")
+        self.done.emit(fetch_atlases())
 
 
 class FirstLevelPage(QWidget):
     def __init__(self, state: ToolboxState) -> None:
         super().__init__()
         self.state = state
-        self.cache = at.default_cache()
-        self.atlas: at.Atlas | None = None
-        self.template: tuple[np.ndarray, np.ndarray] | None = None
-        self.ticked: dict[str, set[int]] = {}  # atlas key -> ticked region values
-        self.results: list[fl.RunResult] = []
-        self.stats: list[fl.RoiStats] = []
-        self.on_grid: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}  # grid -> (bg, labels)
-        # One cursor per run (MNI mm, None: the volume's centre). Locked: a click moves all.
-        self.cursors: list[tuple[float, float, float] | None] = []
-        self.last_cursor_row = 0  # the run whose cursor moved last: locking copies it
+        self.model = FirstLevelModel()
         self.worker: ModelThread | None = None
         self.formulas_dialog: QDialog | None = None
         self.fetcher: FetchAtlasThread | None = None
@@ -228,7 +203,7 @@ class FirstLevelPage(QWidget):
         self.fetch_button.setToolTip(
             wrap_tooltip(
                 f"Copy FSL's atlases and the MNI152 template out of {CPAC_IMAGE} (Docker must "
-                f"be running) into {self.cache}. Once only."
+                f"be running) into {self.model.cache}. Once only."
             )
         )
         self.fetch_button.clicked.connect(self.on_fetch_atlases)
@@ -328,8 +303,27 @@ class FirstLevelPage(QWidget):
 
     @property
     def setup(self) -> fl.FirstLevelSetup:
-        key = self.setup_box.currentData()
-        return next(s for s in fl.SETUPS if s.key == key)
+        return self.model.setup
+
+    @property
+    def atlas(self) -> at.Atlas | None:
+        return self.model.atlas
+
+    @property
+    def results(self) -> list[fl.RunResult]:
+        return self.model.results
+
+    @property
+    def stats(self) -> list[fl.RoiStats]:
+        return self.model.stats
+
+    @property
+    def cursors(self) -> list[Cursor]:
+        return self.model.cursors
+
+    @property
+    def axes_owner(self) -> dict:
+        return self.model.axes_owner
 
     def design(self) -> fl.BlockDesign:
         return fl.BlockDesign(
@@ -340,15 +334,16 @@ class FirstLevelPage(QWidget):
         )
 
     def on_setup_changed(self) -> None:
-        design = self.setup.design
+        key = self.setup_box.currentData()
+        setup = next(s for s in fl.SETUPS if s.key == key)
+        first_atlas = self.model.use_setup(setup)
+        design = setup.design
         self.first_block.setCurrentText(design.first_block)
         self.on_s.setValue(design.on_s)
         self.off_s.setValue(design.off_s)
         self.total_s.setValue(design.total_s)
         self.about.setText(self.setup.about)
-        self.ticked.clear()
-        first_atlas = next(iter(self.setup.focus), "")
-        index = self.atlas_box.findData(first_atlas) if at.atlases_present(self.cache) else 0
+        index = self.atlas_box.findData(first_atlas) if first_atlas else 0
         self.atlas_box.setCurrentIndex(max(index, 0))
         self.on_atlas_changed()
         self.fill_subjects()
@@ -357,7 +352,7 @@ class FirstLevelPage(QWidget):
         output = self.state.folder("output")
         if output != self.seen_output:
             self.fill_subjects()
-        self.fetch_button.setVisible(not at.atlases_present(self.cache))
+        self.fetch_button.setVisible(not at.atlases_present(self.model.cache))
 
     def fill_subjects(self) -> None:
         output = self.state.folder("output")
@@ -368,17 +363,7 @@ class FirstLevelPage(QWidget):
         self.subject_box.addItems(subjects)
         if current in subjects:
             self.subject_box.setCurrentText(current)
-        notices = []
-        if output is None:
-            notices.append(
-                "No C-PAC output folder chosen: choose it on the Preprocess BIDS (C-PAC) tab."
-            )
-        elif not subjects:
-            notices.append(
-                f"No preprocessed task-{self.setup.task} runs in {output}: preprocess them on "
-                "the Preprocess BIDS (C-PAC) tab first."
-            )
-        self.banner.set_messages(notices)
+        self.banner.set_messages(subject_notices(output, subjects, self.setup.task))
         self.status.setText(
             f"{len(subjects)} subject(s) with task-{self.setup.task}." if subjects else ""
         )
@@ -402,41 +387,31 @@ class FirstLevelPage(QWidget):
             QMessageBox.warning(self, "Atlases not copied", error)
             self.status.setText("Atlases not copied.")
             return
-        self.status.setText(f"Atlases copied to {self.cache}.")
+        self.status.setText(f"Atlases copied to {self.model.cache}.")
         self.fetch_button.setVisible(False)
         self.on_setup_changed()
 
     def on_atlas_changed(self) -> None:
-        key = self.atlas_box.currentData()
-        self.atlas = None
-        self.on_grid.clear()
-        if key and at.atlases_present(self.cache):
-            try:
-                self.atlas = at.load_atlas(self.cache, key)
-                if self.template is None:
-                    self.template = at.load_template(self.cache)
-            except (at.AtlasError, OSError) as e:
-                QMessageBox.warning(self, "Atlas not read", str(e))
-        elif key:
-            self.status.setText("Get the atlases from the C-PAC image first.")
+        key = str(self.atlas_box.currentData() or "")
+        problem = self.model.use_atlas(key)
+        if problem and at.atlases_present(self.model.cache):
+            QMessageBox.warning(self, "Atlas not read", problem)
+        elif problem:
+            self.status.setText(problem)
         self.fill_regions()
         self.update_stats()
 
     def fill_regions(self) -> None:
         self.region_list.blockSignals(True)
         self.region_list.clear()
-        if self.atlas is not None:
-            key = self.atlas.spec.key
-            if key not in self.ticked:
-                keywords = self.setup.focus.get(key, ())
-                self.ticked[key] = at.matching_regions(self.atlas.regions, keywords)
-            for region in sorted(self.atlas.regions, key=lambda r: r.name):
-                item = QListWidgetItem(region.name)
-                item.setData(Qt.ItemDataRole.UserRole, region.value)
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                ticked = region.value in self.ticked[key]
-                item.setCheckState(Qt.CheckState.Checked if ticked else Qt.CheckState.Unchecked)
-                self.region_list.addItem(item)
+        ticked_values = self.model.ticked_values()
+        for region in self.model.regions():
+            item = QListWidgetItem(region.name)
+            item.setData(Qt.ItemDataRole.UserRole, region.value)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            ticked = region.value in ticked_values
+            item.setCheckState(Qt.CheckState.Checked if ticked else Qt.CheckState.Unchecked)
+            self.region_list.addItem(item)
         self.region_list.blockSignals(False)
         self.filter_regions()
         self.update_region_count()
@@ -447,40 +422,32 @@ class FirstLevelPage(QWidget):
             item = self.region_list.item(row)
             item.setHidden(not all(word in item.text().lower() for word in words))
 
-    def ticked_values(self) -> set[int]:
-        return set() if self.atlas is None else self.ticked.get(self.atlas.spec.key, set())
-
     def update_region_count(self) -> None:
-        if self.atlas is None:
-            self.region_count.setText("Region: the whole brain (no atlas)")
-        else:
-            self.region_count.setText(
-                f"{len(self.ticked_values())} of {len(self.atlas.regions)} regions ticked"
-            )
+        self.region_count.setText(self.model.region_text())
 
     def on_region_ticked(self, item: QListWidgetItem) -> None:
         if self.atlas is None:
             return
-        values = self.ticked.setdefault(self.atlas.spec.key, set())
+        values = set(self.model.ticked_values())
         value = int(item.data(Qt.ItemDataRole.UserRole))
         if item.checkState() == Qt.CheckState.Checked:
             values.add(value)
         else:
             values.discard(value)
+        self.model.tick(values)
         self.update_region_count()
         self.update_stats()
 
     def _tick(self, values: set[int]) -> None:
         if self.atlas is None:
             return
-        self.ticked[self.atlas.spec.key] = values
+        self.model.tick(values)
         self.fill_regions()
         self.update_stats()
 
     def tick_focus(self) -> None:
         if self.atlas is not None:
-            keywords = self.setup.focus.get(self.atlas.spec.key, ())
-            self._tick(at.matching_regions(self.atlas.regions, keywords))
+            self._tick(self.model.focus_regions())
 
     def tick_all(self) -> None:
         if self.atlas is not None:
@@ -527,49 +494,17 @@ class FirstLevelPage(QWidget):
             self.worker.wait()
         self.worker = None
         self.run_button.setEnabled(True)
-        self.results = results
-        self.on_grid.clear()
-        self.cursors = [None] * len(results)
-        self.last_cursor_row = 0
+        self.model.set_results(results)
         if errors:
             QMessageBox.warning(self, "Some runs not modelled", errors)
-        self.status.setText(
-            f"{len(results)} run(s) modelled: " + ", ".join(r.run.label for r in results)
-        )
+        self.status.setText(modelled_text(results))
         self.update_stats()
         self.cursor_to_peak()
 
-    def grid_images(self, result: fl.RunResult) -> tuple[np.ndarray | None, np.ndarray | None]:
-        """The template and atlas labels on the run's voxel grid (cached per grid)."""
-        if self.atlas is None or self.template is None:
-            return None, None
-        key = (result.mask.shape, result.affine.round(3).tobytes(), self.atlas.spec.key)
-        if key not in self.on_grid:
-            background = at.resample_nearest(
-                self.template[0], self.template[1], result.mask.shape, result.affine
-            )
-            labels = at.resample_nearest(
-                self.atlas.data, self.atlas.affine, result.mask.shape, result.affine
-            )
-            self.on_grid[key] = (background, labels)
-        return self.on_grid[key]
-
-    def region_on(self, result: fl.RunResult) -> np.ndarray:
-        """The ticked regions on the run's grid; the whole brain with no atlas."""
-        _background, labels = self.grid_images(result)
-        if labels is None:
-            return result.mask.copy()
-        values = list(self.ticked_values())
-        return np.isin(labels, values) if values else np.zeros(labels.shape, bool)
-
     def update_stats(self) -> None:
-        if not self.results:
-            self.fill_table()
-            self.draw_brain()
-            self.draw_time_courses()
-            return
-        threshold = self.threshold.value()
-        self.stats = [fl.roi_stats(r, self.region_on(r), threshold) for r in self.results]
+        self.model.threshold = self.threshold.value()
+        if self.results:
+            self.model.update_stats()
         self.fill_table()
         self.draw_brain()
         self.draw_time_courses()
@@ -578,178 +513,40 @@ class FirstLevelPage(QWidget):
 
     def cursor_to_peak(self) -> None:
         """Unlocked: each run's cursor to its own peak. Locked: all to the first run's."""
-        peaks = [s.peak_mm for s in self.stats]
-        if self.lock_box.isChecked():
-            first = next((p for p in peaks if p is not None), None)
-            self.cursors = [first] * len(self.results)
-        else:
-            self.cursors = list(peaks)
+        self.model.cursors_to_peak()
         self.draw_brain()
         self.draw_time_courses()
 
     def on_lock_toggled(self, locked: bool) -> None:
         """Locking brings every run's cursor to the one moved last."""
+        self.model.lock(locked)
         if locked and self.cursors:
-            self.cursors = [self.cursors[self.last_cursor_row]] * len(self.cursors)
             self.draw_brain()
             self.draw_time_courses()
 
-    def cursor_ijk(self, row: int) -> tuple[int, int, int]:
-        result = self.results[row]
-        cursor = self.cursors[row] if row < len(self.cursors) else None
-        if cursor is None:
-            return tuple(int(n // 2) for n in result.mask.shape)  # type: ignore[return-value]
-        inverse = np.linalg.inv(result.affine)
-        ijk = inverse[:3, :3] @ np.asarray(cursor) + inverse[:3, 3]
-        clipped = np.clip(np.round(ijk).astype(int), 0, np.asarray(result.mask.shape) - 1)
-        return int(clipped[0]), int(clipped[1]), int(clipped[2])
-
     def draw_brain(self) -> None:
-        figure = self.brain_figure
-        figure.clear()
-        if not self.results:
-            figure.text(
-                0.5,
-                0.5,
-                "Run first-level stats to see the maps",
-                color="white",
-                ha="center",
-                va="center",
-            )
-            self.brain_canvas.draw_idle()
-            return
-        threshold = self.threshold.value()
-        axes_grid = figure.subplots(len(self.results), len(VIEWS), squeeze=False)
-        self.axes_owner: dict = {}
-        cursor_text = []
-        for row, result in enumerate(self.results):
-            background, _labels = self.grid_images(result)
-            if background is None:
-                background = np.where(result.mask, 1.0, 0.0)
-            region = self.region_on(result)
-            ijk = self.cursor_ijk(row)
-            t_here = float(result.t[ijk])
-            x, y, z = result.world(ijk)
-            cursor_text.append(f"{result.run.label}: MNI {x:.0f}, {y:.0f}, {z:.0f}  t={t_here:.1f}")
-            for column, (view, axis) in enumerate(VIEWS):
-                axes = axes_grid[row][column]
-                axes.set_axis_off()
-                self.axes_owner[axes] = (row, axis)
-                shown = [a for a in range(3) if a != axis]
-                base = np.take(background, ijk[axis], axis=axis).T
-                axes.imshow(base, cmap="gray", origin="lower", interpolation="nearest")
-                t_slice = np.take(result.t, ijk[axis], axis=axis).T
-                masked = np.ma.masked_where(t_slice <= threshold, t_slice)
-                axes.imshow(
-                    masked,
-                    cmap="hot",
-                    origin="lower",
-                    interpolation="nearest",
-                    vmin=threshold,
-                    vmax=max(threshold * 3, float(result.t.max())),
-                )
-                roi_slice = np.take(region, ijk[axis], axis=axis).T
-                if roi_slice.any() and not roi_slice.all():
-                    axes.contour(
-                        roi_slice.astype(float), levels=[0.5], colors=ROI_COLOR, linewidths=0.7
-                    )
-                axes.axvline(ijk[shown[0]], color="#55ff55", linewidth=0.5)
-                axes.axhline(ijk[shown[1]], color="#55ff55", linewidth=0.5)
-                if column == 0:
-                    axes.set_title(result.run.label, color="white", fontsize=9, loc="left")
-                elif row == 0:
-                    axes.set_title(view, color="white", fontsize=9)
-        self.cursor_label.setText("Cursor   " + "   |   ".join(cursor_text))
-        figure.subplots_adjust(
-            left=0.01, right=0.99, bottom=0.01, top=0.93, wspace=0.02, hspace=0.15
-        )
+        text = self.model.draw_brain(self.brain_figure)
+        if text:
+            self.cursor_label.setText(text)
         self.brain_canvas.draw_idle()
 
     def on_brain_click(self, event) -> None:  # noqa: ANN001 -- matplotlib MouseEvent
-        owner = getattr(self, "axes_owner", {}).get(event.inaxes)
-        if owner is None or event.xdata is None or event.ydata is None:
+        if event.xdata is None or event.ydata is None:
             return
-        row, axis = owner
-        result = self.results[row]
-        ijk = list(self.cursor_ijk(row))
-        shown = [a for a in range(3) if a != axis]
-        ijk[shown[0]] = int(round(event.xdata))
-        ijk[shown[1]] = int(round(event.ydata))
-        cursor = result.world((ijk[0], ijk[1], ijk[2]))
-        if self.lock_box.isChecked():
-            self.cursors = [cursor] * len(self.results)
-        else:
-            self.cursors[row] = cursor
-        self.last_cursor_row = row
+        if not self.model.click(event.inaxes, event.xdata, event.ydata):
+            return
         self.show_box.setCurrentText(SHOW_CURSOR)
         self.draw_brain()
         self.draw_time_courses()
 
-    def series_for(self, row: int) -> tuple[np.ndarray | None, str]:
-        result, stats = self.results[row], self.stats[row] if self.stats else None
-        mode = self.show_box.currentText()
-        if mode == SHOW_REGION:
-            return fl.roi_mean_series(result, self.region_on(result)), "region mean"
-        if mode == SHOW_PEAK and stats is not None and stats.peak is not None:
-            x, y, z = stats.peak_mm or (0, 0, 0)
-            return result.voxel_series(stats.peak), f"peak voxel ({x:.0f}, {y:.0f}, {z:.0f})"
-        ijk = self.cursor_ijk(row)
-        x, y, z = result.world(ijk)
-        return result.voxel_series(ijk), f"cursor voxel ({x:.0f}, {y:.0f}, {z:.0f})"
-
     def draw_time_courses(self) -> None:
-        figure = self.time_figure
-        figure.clear()
-        if not self.results:
-            self.time_canvas.draw_idle()
-            return
-        n = len(self.results)
-        grid = figure.add_gridspec(n, 2, width_ratios=(3, 1))
-        average_axes = figure.add_subplot(grid[:, 1])
-        unit = ""
-        for row, result in enumerate(self.results):
-            color = RUN_COLORS[row % len(RUN_COLORS)]
-            axes = figure.add_subplot(grid[row, 0])
-            y, where = self.series_for(row)
-            for onset, duration in result.design.on_blocks():
-                axes.axvspan(onset, onset + duration, color="#ffd54f", alpha=0.3, linewidth=0)
-            if y is None:
-                axes.text(0.5, 0.5, "no signal here", transform=axes.transAxes, ha="center")
-                continue
-            times = np.arange(y.size) * result.tr
-            axes.plot(times, y, color=color, linewidth=0.8, label="signal")
-            axes.plot(times, fl.fitted(result, y), color="black", linewidth=1.2, label="GLM fit")
-            axes.set_title(f"{result.run.label}: {where}", fontsize=8, loc="left")
-            axes.tick_params(labelsize=7)
-            if row == n - 1:
-                axes.set_xlabel("time from scan start (s)", fontsize=8)
-            if row == 0:
-                axes.legend(fontsize=7, loc="upper right")
-            centres, means, sems, unit = fl.block_average(result, y)
-            average_axes.plot(centres, means, color=color, label=result.run.label)
-            average_axes.fill_between(centres, means - sems, means + sems, color=color, alpha=0.2)
-        first = self.results[0].design
-        on_start = 0.0 if first.first_block == "on" else first.off_s
-        average_axes.axvspan(
-            on_start, on_start + first.on_s, color="#ffd54f", alpha=0.3, linewidth=0
-        )
-        average_axes.axhline(0, color="grey", linewidth=0.5)
-        average_axes.set_title("Average ON/OFF cycle", fontsize=8)
-        average_axes.set_xlabel("s into the cycle", fontsize=8)
-        average_axes.set_ylabel(unit, fontsize=8)
-        average_axes.tick_params(labelsize=7)
-        if average_axes.get_legend_handles_labels()[0]:  # nothing drawn without a region
-            average_axes.legend(fontsize=7)
-        figure.tight_layout()
+        self.model.draw_time_courses(self.time_figure, self.show_box.currentText())
         self.time_canvas.draw_idle()
 
     # ---- the comparison table -----------------------------------------------------------------
 
-    def comparison(self) -> list[tuple[str, list[str]]]:
-        return fl.comparison_rows(self.results, self.stats) if self.results else []
-
     def fill_table(self) -> None:
-        rows = self.comparison()
+        rows = self.model.comparison()
         self.table.clear()
         self.table.setRowCount(len(rows))
         self.table.setColumnCount(len(self.results))
@@ -760,10 +557,10 @@ class FirstLevelPage(QWidget):
             header = self.table.verticalHeaderItem(row)
             if header is not None and name in fl.METRIC_HELP:
                 header.setToolTip(wrap_tooltip(fl.METRIC_HELP[name]))
-            differs = name in fl.SCAN_FIELDS and len(set(values)) > 1
+            highlight = differs(name, values)
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                if differs:
+                if highlight:
                     item.setBackground(QColor(DIFFERS_COLOR))
                     item.setForeground(black)
                     item.setToolTip("Differs between the runs")
@@ -781,20 +578,16 @@ class FirstLevelPage(QWidget):
         self.formulas_dialog.raise_()
 
     def on_export_csv(self) -> None:
-        rows = self.comparison()
+        rows = self.model.comparison()
         output = self.state.folder("output")
         if not rows or output is None:
             return
-        subject = self.results[0].run.subject
-        start = str(output / f"sub-{subject}_{self.setup.key}_first_level.csv")
+        start = str(output / self.model.csv_name())
         chosen, _ = QFileDialog.getSaveFileName(self, "Export CSV", start, "CSV files (*.csv)")
         if not chosen:
             return
         try:
-            with Path(chosen).open("w", encoding="utf-8", newline="") as handle:
-                writer = csv.writer(handle)
-                writer.writerow(["metric", *[r.run.label for r in self.results]])
-                writer.writerows([name, *values] for name, values in rows)
+            self.model.export_csv(Path(chosen))
         except OSError as e:
             QMessageBox.warning(self, "Not exported", str(e))
 
@@ -802,11 +595,9 @@ class FirstLevelPage(QWidget):
         output = self.state.folder("output")
         if not self.results or output is None:
             return
-        subject = self.results[0].run.subject
-        folder = output / "first_level" / f"sub-{subject}" / self.setup.key
         try:
-            written = [p for r in self.results for p in fl.save_maps(r, folder)]
+            written, folder = self.model.save_maps(output)
         except OSError as e:
             QMessageBox.warning(self, "Maps not saved", str(e))
             return
-        QMessageBox.information(self, "Saved", f"{len(written)} map(s) saved in {folder}")
+        QMessageBox.information(self, "Saved", f"{written} map(s) saved in {folder}")

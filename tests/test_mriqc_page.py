@@ -12,8 +12,10 @@ from PySide6.QtCore import QSettings, Qt  # noqa: E402 -- needs QT_QPA_PLATFORM 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 from test_mriqc import make_bids, write_iqms  # noqa: E402
 
+from fmri_local_process.app import convert  # noqa: E402
+from fmri_local_process.app import image_download as app_download  # noqa: E402
+from fmri_local_process.app.state import VIEW_ONLY  # noqa: E402
 from fmri_local_process.gui import (  # noqa: E402
-    convert_page,
     docker_controls,
     image_download,
     mriqc_page,
@@ -149,7 +151,7 @@ def test_download_bar_is_busy_until_docker_reports_layers(
 
     log = tmp_path / "pull.txt"
     log.write_text("latest: Pulling from x\nfailed to copy: TLS handshake timeout\n\n")
-    assert image_download.last_line(log) == "failed to copy: TLS handshake timeout"
+    assert app_download.last_line(log) == "failed to copy: TLS handshake timeout"
 
 
 def test_remove_image_asks_then_offers_download_again(
@@ -161,8 +163,8 @@ def test_remove_image_asks_then_offers_download_again(
     assert not widget.remove_button.isEnabled()  # never while in use
     widget.set_locked("")
     removed: list[str] = []
-    monkeypatch.setattr(image_download, "remove_image", lambda docker, image: removed.append(image))
-    monkeypatch.setattr(image_download.shutil, "which", lambda _name: "docker")
+    monkeypatch.setattr(app_download, "remove_image", lambda docker, image: removed.append(image))
+    monkeypatch.setattr(app_download.shutil, "which", lambda _name: "docker")
     answers = iter([image_download.QMessageBox.StandardButton.No,
                     image_download.QMessageBox.StandardButton.Yes])  # fmt: skip
     monkeypatch.setattr(image_download.QMessageBox, "question", lambda *_: next(answers))
@@ -218,8 +220,8 @@ def test_unfinished_download_offers_continue_or_remove(
     assert "background-color: #e74c3c" in second.remove_partial_button.styleSheet()  # red
 
     calls: list[str] = []
-    monkeypatch.setattr(image_download, "remove_partial", lambda d, image: calls.append(image))
-    monkeypatch.setattr(image_download.shutil, "which", lambda _name: "docker")
+    monkeypatch.setattr(app_download, "remove_partial", lambda d, image: calls.append(image))
+    monkeypatch.setattr(app_download.shutil, "which", lambda _name: "docker")
     monkeypatch.setattr(image_download.QMessageBox, "question",
                         lambda *_: image_download.QMessageBox.StandardButton.Yes)  # fmt: skip
     second.on_remove_partial()
@@ -317,7 +319,7 @@ def test_docker_start_and_restart_like_preprocess(
 
 
 def test_view_only_hides_running(state: toolbox_state.ToolboxState) -> None:
-    state.set_busy(toolbox_state.VIEW_ONLY, True)
+    state.set_busy(VIEW_ONLY, True)
     page = mriqc_page.MriqcPage(state)
     page.show_page()
     assert page.probe is None  # no Docker questions in a view-only package
@@ -345,12 +347,12 @@ def test_a_review_package_with_mriqc_results_only_shows_them(
 
 
 def test_other_tabs_say_what_is_missing(state: toolbox_state.ToolboxState, tmp_path: Path) -> None:
-    assert any("No DICOM sessions folder" in m for m in convert_page.setup_notices(state))
-    assert any("No behavioural logs folder" in m for m in convert_page.setup_notices(state))
+    assert any("No DICOM sessions folder" in m for m in convert.setup_notices(state))
+    assert any("No behavioural logs folder" in m for m in convert.setup_notices(state))
     dicom = tmp_path / "dicom"
     dicom.mkdir()
     state.set_folder("dicom", dicom)
-    assert any("No session folders in" in m for m in convert_page.setup_notices(state))
+    assert any("No session folders in" in m for m in convert.setup_notices(state))
 
     overview = overview_page.OverviewPage(state)
     assert overview.banner.shown == [

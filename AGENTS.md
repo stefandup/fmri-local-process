@@ -112,6 +112,10 @@ one-line note on what it demonstrates. Only add a row for a real shift in approa
 * Follow [Golden Rules](docs/golden-rules.md) and the [AI Style Guide](docs/ai-style-guide.md):
   established stack only, `Path` not strings, EAFP with specific exceptions, type hints on
   every signature, thin CLI / logic in `processing/`, no flashy patterns.
+* **Two front ends**: logic goes in `processing/` or `app/` (neither imports Qt or Textual);
+  `gui/` (the window) and `tui/` (the terminal app) only display it. A change to the window comes
+  with the matching TUI change, or with the tab on `NOT_YET_IN_TUI` in `app/tabs.py`, which the
+  parity test enforces.
 * **Tests alongside code**: new processing logic gets a `pytest` test in the same change,
   using synthetic data (small generated arrays / NIfTI images). Tests may also use
   `safe_data_source/`, but skip cleanly when it's absent, since it's gitignored and won't

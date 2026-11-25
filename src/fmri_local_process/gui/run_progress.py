@@ -12,12 +12,10 @@ one yet, the bar is a moving 'busy' bar and the title counts the steps. Shown on
 batch runs.
 """
 
-import time
-from dataclasses import dataclass
-
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QGroupBox, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
 
+from fmri_local_process.app.run_progress import SPINNER, BatchProgress
 from fmri_local_process.gui.qt_common import (
     PROCESS_ACCENT_COLOR,
     accent_group_box_stylesheet,
@@ -25,15 +23,7 @@ from fmri_local_process.gui.qt_common import (
     style_secondary_label,
 )
 
-SPINNER = "◐◓◑◒"
 SPINNER_MS = 150
-
-
-@dataclass
-class RunningSubject:
-    started_at: float
-    steps: int = 0
-    last_step: str = ""
 
 
 class RunProgress(QGroupBox):
@@ -65,9 +55,8 @@ class RunProgress(QGroupBox):
         self.subject_bar = QProgressBar()
         layout.addWidget(self.subject_bar)
 
-        self.running: dict[str, RunningSubject] = {}  # in start order
-        self.estimate: int | None = None  # steps a subject took last time (None: unknown)
-        self.stage = ""  # shown while no subject runs, e.g. 'Checking Docker...'
+        self.batch = BatchProgress()
+        self.running = self.batch.running
         self.spinner_index = 0
         self.spinner_timer = QTimer(self)
         self.spinner_timer.setInterval(SPINNER_MS)
@@ -78,14 +67,21 @@ class RunProgress(QGroupBox):
         self.head.addWidget(button)
 
     @property
+    def estimate(self) -> int | None:
+        return self.batch.estimate
+
+    @estimate.setter
+    def estimate(self, steps: int | None) -> None:
+        self.batch.estimate = steps
+
+    @property
     def spinner(self) -> str:
         return SPINNER[self.spinner_index]
 
     # ---- the batch -----------------------------------------------------------------------------
 
     def start(self, n_subjects: int, estimate: int | None, stage: str) -> None:
-        self.running.clear()  # cleared, not replaced: owners may hold this dict
-        self.estimate, self.stage = estimate, stage
+        self.batch.start(n_subjects, estimate, stage)
         self.step_bar.setRange(0, 0)
         self.last_step_label.setText("")
         self.subject_bar.setRange(0, n_subjects)
@@ -96,27 +92,23 @@ class RunProgress(QGroupBox):
         self.update_title()
 
     def set_stage(self, stage: str) -> None:
-        self.stage = stage
+        self.batch.stage = stage
         self.update_title()
 
     def subject_started(self, subject: str) -> None:
-        self.running[subject] = RunningSubject(time.monotonic())
+        self.batch.subject_started(subject)
         self.update_bars()
         self.update_title()
 
     def step(self, subject: str, steps: int, last_step: str) -> None:
-        state = self.running.get(subject)
-        if state is None:
+        if not self.batch.step(subject, steps, last_step):
             return
-        state.steps, state.last_step = steps, last_step
         self.update_bars()
         self.update_title()
 
     def subject_finished(self, subject: str) -> None:
-        self.running.pop(subject, None)
-        if not self.running:
-            self.stage = "Next subject..."
-        self.subject_bar.setValue(self.subject_bar.value() + 1)
+        self.batch.subject_finished(subject)
+        self.subject_bar.setValue(self.batch.done)
         self.update_bars()
         self.update_title()
 
@@ -128,19 +120,11 @@ class RunProgress(QGroupBox):
     # ---- showing -------------------------------------------------------------------------------
 
     def step_count(self, steps: int) -> str:
-        return f"step {steps} of ~{self.estimate}" if self.estimate else f"step {steps}"
+        return self.batch.step_count(steps)
 
     def update_title(self) -> None:
         self.spinner_index = (self.spinner_index + 1) % len(SPINNER)
-        if not self.running:
-            self.title_label.setText(f"{self.spinner}  {self.stage}")
-        elif len(self.running) == 1:
-            subject, state = next(iter(self.running.items()))
-            count = self.step_count(state.steps)
-            self.title_label.setText(f"{self.spinner}  sub-{subject}  -  {count}")
-        else:
-            names = ", ".join(f"sub-{subject}" for subject in self.running)
-            self.title_label.setText(f"{self.spinner}  {len(self.running)} at once: {names}")
+        self.title_label.setText(f"{self.spinner}  {self.batch.title()}")
 
     def update_bars(self) -> None:
         """One subject: its steps; several: their average (against the last run's count)."""
@@ -149,15 +133,8 @@ class RunProgress(QGroupBox):
         if not self.estimate:
             self.step_bar.setRange(0, 0)  # first run: busy bar; the title shows steps
         else:
-            mean = sum(state.steps for state in self.running.values()) // len(self.running)
+            mean = self.batch.mean_steps()
             self.step_bar.setRange(0, max(self.estimate, mean + 1))
             self.step_bar.setValue(mean)
-            average = " on average" if len(self.running) > 1 else ""
-            self.step_bar.setFormat(f"%p%{average}  (estimated from the last complete run)")
-        self.last_step_label.setText(
-            "\n".join(
-                f"sub-{subject}: {self.step_count(state.steps)}"
-                f"{f' - last finished: {state.last_step}' if state.last_step else ''}"
-                for subject, state in self.running.items()
-            )
-        )
+            self.step_bar.setFormat(f"%p%{self.batch.bar_note()}")
+        self.last_step_label.setText(self.batch.details())

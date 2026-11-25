@@ -38,15 +38,31 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fmri_local_process.app.colors import WARNING_COLOR
+from fmri_local_process.app.crosscheck import (
+    COLORS,
+    CROSSCHECKED_COLOR,
+    CROSSCHECKED_ICON,
+    HELP_TEXT,
+    ICONS,
+    LEGEND,
+    NOTE_COLUMN,
+    PROBLEMS_COLUMN,
+    TABLE_COLUMNS,
+    badge_text,
+    delete_question,
+    delete_sessions,
+    mark_text,
+    note_text,
+    problem_color,
+    review_cells,
+    scanned_text,
+    summary_text,
+)
+from fmri_local_process.app.notices import bids_notices
 from fmri_local_process.gui.folder_panel import FolderPanel
 from fmri_local_process.gui.image_view import HelpToggle
-from fmri_local_process.gui.qt_common import (
-    WARNING_COLOR,
-    NoticeBanner,
-    bids_notices,
-    primary_action_stylesheet,
-    reveal,
-)
+from fmri_local_process.gui.qt_common import NoticeBanner, primary_action_stylesheet, reveal
 from fmri_local_process.gui.toolbox_state import ToolboxState
 from fmri_local_process.gui.trimming import Trimmer
 from fmri_local_process.processing.crosscheck import (
@@ -54,7 +70,6 @@ from fmri_local_process.processing.crosscheck import (
     DataFile,
     SessionReview,
     delete_data_file,
-    delete_session,
     keep_run,
     review_bids_folder,
     set_crosschecked,
@@ -62,69 +77,10 @@ from fmri_local_process.processing.crosscheck import (
     sidecar_note,
 )
 
-ICONS = {
-    "pending": "⚠",
-    "short": "❗",
-    "long": "✂",
-    "missing": "○",
-    "check": "⚑",
-    "extra": "⊕",
-}
-COLORS = {
-    "pending": "#f39c12",
-    "short": "#e74c3c",
-    "long": "#3498db",
-    "missing": "#9b59b6",
-    "check": "#e67e22",
-    "extra": "#16a085",
-    "ok": "#2ecc71",
-}
-TABLE_COLUMNS = ("ID", "Date", "Session", "Files", "Problems", "Note")
-PROBLEMS_COLUMN = 4
-NOTE_COLUMN = 5
-MAX_LISTED = 15
-OK_ICON = "●"
-CROSSCHECKED_ICON = "☑"  # vr_lab_toolbox's mark for "reviewed by a human"
-CROSSCHECKED_COLOR = "#3498db"
 # vr_lab_toolbox's "Mark crosschecked" button: filled green, the main thing to click.
 MARK_COLOR = "#2ecc71"
 MARK_HOVER_COLOR = "#27ae60"
 MARK_BUTTON_HEIGHT = 34
-LEGEND = (
-    f"{CROSSCHECKED_ICON} crosschecked: marked as reviewed by you\n"
-    f"{OK_ICON} nothing to resolve\n"
-    f"{ICONS['pending']} a scan converted as several runs: keep one\n"
-    f"{ICONS['short']} shorter than expected (or than the same scan elsewhere), or no events\n"
-    f"{ICONS['long']} longer than expected: trim it\n"
-    f"{ICONS['missing']} expected file missing\n"
-    f"{ICONS['check']} events from a log dated other than the scan: check it's the right log\n"
-    f"{ICONS['extra']} the subject has more sessions than expected: is one a dud to delete?"
-)
-
-
-HELP_TEXT = (
-    "Click a session to see its files and problems on the right. Once you have been "
-    "through it, <b>Mark crosschecked</b> (it then shows "
-    f"{CROSSCHECKED_ICON}, whatever its problems). Tick sessions (the box beside the ID; "
-    "<b>Select all</b> / <b>Select none</b>) to mark, note or delete several at once. "
-    "Deleting a session leaves its DICOM folder out of conversion from now on; converting "
-    "again renumbers the remaining sessions. Every change is logged (Overview tab, Action "
-    "log) and kept in the crosscheck backup (tab 1).<br><br>"
-    "<b>Problems</b>:<br>" + LEGEND.replace("\n", "<br>")
-)
-
-
-def problem_text(review: SessionReview) -> str:
-    if review.crosschecked:
-        return f"{CROSSCHECKED_ICON} crosschecked"
-    counts = {kind: sum(i.kind == kind for i in review.issues) for kind in ICONS}
-    parts = [f"{ICONS[kind]} {n}" for kind, n in counts.items() if n]
-    return "   ".join(parts) or f"{OK_ICON} ok"
-
-
-def needs_a_look(review: SessionReview) -> bool:
-    """Problems, and not marked as crosschecked yet."""
-    return bool(review.issues) and not review.crosschecked
 
 
 def mark_button(text: str, tooltip: str) -> QPushButton:
@@ -134,14 +90,6 @@ def mark_button(text: str, tooltip: str) -> QPushButton:
     button.setMinimumHeight(MARK_BUTTON_HEIGHT)
     button.setStyleSheet(primary_action_stylesheet(MARK_COLOR, MARK_HOVER_COLOR))
     return button
-
-
-def problem_color(review: SessionReview) -> str:
-    if review.crosschecked:
-        return CROSSCHECKED_COLOR
-    kinds = {i.kind for i in review.issues}
-    order = ("short", "pending", "check", "extra", "long", "missing")
-    return next((COLORS[k] for k in order if k in kinds), COLORS["ok"])
 
 
 class CrosscheckPage(QWidget):
@@ -296,8 +244,7 @@ class CrosscheckPage(QWidget):
         self.select_all_button.setEnabled(n < len(self.reviews))
 
     def badge(self) -> str:
-        waiting = sum(needs_a_look(r) for r in self.reviews)
-        return f"{waiting} to check" if waiting else ""
+        return badge_text(self.reviews)
 
     # ---- scanning ---------------------------------------------------------------------------
 
@@ -311,14 +258,7 @@ class CrosscheckPage(QWidget):
         self.table.blockSignals(True)  # no itemChanged (tick) signals while filling
         self.table.setRowCount(len(self.reviews))
         for row, review in enumerate(self.reviews):
-            cells = (
-                review.subject,
-                review.date or "?",
-                f"ses-{review.session}" if review.session else "-",
-                str(len(review.files) + len(review.pending)),
-                problem_text(review),
-                review.note,
-            )
+            cells = review_cells(review)
             for column, text in enumerate(cells):
                 item = QTableWidgetItem(text)
                 if column == 0:
@@ -336,13 +276,7 @@ class CrosscheckPage(QWidget):
         self.table.blockSignals(False)
         self.table.resizeColumnsToContents()
         self.update_ticked()
-        waiting = sum(needs_a_look(r) for r in self.reviews)
-        marked = sum(r.crosschecked for r in self.reviews)
-        self.summary.setText(
-            f"{len(self.reviews)} session(s): {marked} crosschecked, {waiting} still to check"
-            if bids_root
-            else "Choose the BIDS folder on the Setup & Convert to BIDS tab."
-        )
+        self.summary.setText(summary_text(self.reviews, bids_root))
         names = [r.name for r in self.reviews]
         if selected and selected.name in names:
             self.table.selectRow(names.index(selected.name))
@@ -386,9 +320,8 @@ class CrosscheckPage(QWidget):
         bids_root = self.state.folder("bids")
         if bids_root is None or not reviews:
             return
-        names = ", ".join(r.name for r in reviews[:MAX_LISTED])
-        what = "Marked crosschecked" if marked else "Un-marked"
-        self.run_action(f"{what}: {names}", partial(set_crosschecked, bids_root, reviews, marked))
+        action = partial(set_crosschecked, bids_root, reviews, marked)
+        self.run_action(mark_text(reviews, marked), action)
 
     # ---- detail pane -------------------------------------------------------------------------
 
@@ -400,10 +333,8 @@ class CrosscheckPage(QWidget):
         if review is None or bids_root is None:
             layout.addWidget(QLabel("Select a session."))
         else:
-            scanned = f"scanned {review.date}" if review.date else "scan date unknown"
-            source = f" from {review.source_folder}" if review.source_folder else ""
             title_row = QHBoxLayout()
-            title_row.addWidget(QLabel(f"<h2>{review.name}</h2>{scanned}{source}"), 1)
+            title_row.addWidget(QLabel(f"<h2>{review.name}</h2>{scanned_text(review)}"), 1)
             title_row.addWidget(self.crosscheck_widget(review))
             layout.addLayout(title_row)
             layout.addLayout(self.session_row(review, bids_root))
@@ -570,9 +501,7 @@ class CrosscheckPage(QWidget):
         bids_root = self.state.folder("bids")
         if bids_root is None:
             return
-        names = ", ".join(r.name for r in reviews)
-        self.run_action(f"Note for {names}: {text.strip() or '(cleared)'}",
-                        partial(set_note, bids_root, reviews, text))  # fmt: skip
+        self.run_action(note_text(reviews, text), partial(set_note, bids_root, reviews, text))
 
     def on_note_ticked(self) -> None:
         reviews = self.ticked_reviews()
@@ -600,29 +529,12 @@ class CrosscheckPage(QWidget):
         if reason := self.lock_reason():
             QMessageBox.information(self, "Not now", f"Can't delete now: {reason}.")
             return
-        listing = "\n".join(
-            f"  {r.name}  scanned {r.date or '?'}  from {r.source_folder or '?'}"
-            + (f"  ({len(r.issues)} problem(s))" if r.issues else "")
-            for r in reviews[:MAX_LISTED]
-        )
-        more = f"\n  ... and {len(reviews) - MAX_LISTED} more" if len(reviews) > MAX_LISTED else ""
-        if not self.confirm(
-            f"Delete {len(reviews)} session folder(s) from the BIDS folder?\n{listing}{more}\n\n"
-            "Their DICOM folders are left out of conversion from now on (listed in "
-            "code/excluded_sessions.json; remove a line there to convert it again). Convert "
-            "to BIDS afterwards to renumber the remaining sessions."
-        ):
+        if not self.confirm(delete_question(reviews)):
             return
-        for review in reviews:
-            try:
-                delete_session(bids_root, review, review.note)
-            except (CrosscheckError, OSError) as e:
-                QMessageBox.warning(self, "Not deleted", str(e))
-                self.log_line(f"ERROR  deleting {review.name}: {e}")
-                continue
-            self.ticked.discard(review.name)
-            self.log_line(f"Deleted {review.name} (from {review.source_folder})")
-        self.log_line("Convert to BIDS to renumber the remaining sessions.")
+        deleted, errors = delete_sessions(bids_root, reviews, self.log_line)
+        self.ticked -= set(deleted)
+        if errors:
+            QMessageBox.warning(self, "Not deleted", "\n".join(errors))
         self.state.bump()
         self.rescan()
 

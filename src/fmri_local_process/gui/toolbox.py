@@ -34,6 +34,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fmri_local_process.app.colors import WARNING_COLOR
+from fmri_local_process.app.state import CONVERTING, PREPROCESSING, TRIMMING, VIEW_ONLY
+from fmri_local_process.app.tabs import header_texts, tab_names, tab_text, title_text
 from fmri_local_process.gui.behav_logs_dialog import BehavLogsPage, ScanSessionsPage
 from fmri_local_process.gui.convert_page import ConvertPage
 from fmri_local_process.gui.crosscheck_gui import CrosscheckPage
@@ -44,25 +47,15 @@ from fmri_local_process.gui.preprocess_gui import PreprocessWindow
 from fmri_local_process.gui.qt_common import (
     HOME_BASE_ACCENT_COLOR,
     NAME_LABEL_FONT_POINT_INCREASE,
-    WARNING_COLOR,
     apply_app_style,
     shrinkable,
     style_secondary_label,
 )
 from fmri_local_process.gui.scan_lengths import ScanLengthsPage
 from fmri_local_process.gui.sequence_page import SequencePage
-from fmri_local_process.gui.toolbox_state import (
-    CONVERTING,
-    PREPROCESSING,
-    TRIMMING,
-    VIEW_ONLY,
-    ToolboxState,
-)
+from fmri_local_process.gui.toolbox_state import ToolboxState
 from fmri_local_process.gui.trimming import Trimmer
 from fmri_local_process.processing.review_mode import (
-    package_folders,
-    package_name,
-    package_root,
     view_only,
 )
 from fmri_local_process.processing.tab_guide import (  # noqa: F401 -- re-exported
@@ -114,21 +107,16 @@ def with_intro(page: QWidget, text: str) -> QWidget:
     return box
 
 
-def tab_text(number: int, name: str, badge: str = "") -> str:
-    """'4. Crosscheck (6 to check)'; '&' doubled, or Qt shows it as a shortcut underline."""
-    return f"{number}. {name}".replace("&", "&&") + (f" ({badge})" if badge else "")
+def shown_text(number: int, name: str, badge: str = "") -> str:
+    """The tab's text; '&' doubled, or Qt shows it as a shortcut underline."""
+    return tab_text(number, name, badge).replace("&", "&&")
 
 
 class ToolboxWindow(QMainWindow):
     def __init__(self, start_tab: str = SETUP) -> None:
         super().__init__()
-        review = package_name()
         self.view_only = view_only()
-        self.setWindowTitle(
-            "Philani fMRI toolbox"
-            + (f"  —  review package: {review}" if review else "")
-            + (" (view only)" if self.view_only else "")
-        )
+        self.setWindowTitle(title_text(self.view_only))
         self.resize(1400, 900)
         self.state = ToolboxState()
         if self.view_only:  # locks every tab's changing actions, for good
@@ -164,10 +152,11 @@ class ToolboxWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.addLayout(self._build_header())
         self.tabs = QTabWidget()
-        packaged = package_folders() if package_root() is not None else None
-        self.tab_names = shown_tabs(self.view_only, packaged)  # left out: built, never shown
+        self.tab_names = tab_names(self.view_only)  # left out: built, never shown
         for number, name in enumerate(self.tab_names, start=1):
-            self.tabs.addTab(with_intro(self.pages[name], TAB_INTROS[name]), tab_text(number, name))
+            self.tabs.addTab(
+                with_intro(self.pages[name], TAB_INTROS[name]), shown_text(number, name)
+            )
         if start_tab not in self.tab_names:
             start_tab = self.tab_names[0]
         layout.addWidget(self.tabs, 1)
@@ -233,11 +222,11 @@ class ToolboxWindow(QMainWindow):
 
     def update_header(self) -> None:
         bids_root = self.state.folder("bids")
-        self.bids_name.setText(bids_root.name if bids_root else "No BIDS folder chosen")
-        self.bids_path.setText(str(bids_root.parent) if bids_root else "(first tab)")
+        name, where, busy = header_texts(self.state)
+        self.bids_name.setText(name)
+        self.bids_path.setText(where)
         self.bids_path.setToolTip(str(bids_root) if bids_root else "")
-        busy = self.state.lock_reason(VIEW_ONLY)  # the title says view only
-        self.busy_label.setText(f"⏳ {busy}" if busy else "")
+        self.busy_label.setText(busy)
 
     def on_folder_changed(self, key: str) -> None:
         if key in ("bids", "output"):
@@ -284,7 +273,7 @@ class ToolboxWindow(QMainWindow):
     def set_badge(self, name: str, text: str) -> None:
         if name in self.tab_names:
             number = self.tab_names.index(name) + 1
-            self.tabs.setTabText(number - 1, tab_text(number, name, text))
+            self.tabs.setTabText(number - 1, shown_text(number, name, text))
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 -- Qt override
         working = CONVERTING in self.state.busy or TRIMMING in self.state.busy

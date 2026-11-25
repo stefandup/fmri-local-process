@@ -14,7 +14,7 @@ ALL_DOCS = [doc for docs in MRIQC_DOCS.values() for doc in docs]
 
 @pytest.mark.parametrize("tex", sorted({tex for doc in ALL_DOCS for tex in doc.equations}))
 def test_every_equation_renders(tex: str) -> None:
-    from fmri_local_process.gui.metric_help_dialog import formula_png
+    from fmri_local_process.app.metric_help import formula_png
 
     assert formula_png(tex).startswith(b"\x89PNG")
 
@@ -30,6 +30,7 @@ def test_references_are_links() -> None:
 
 
 def test_dialog_shows_typical_values_and_references() -> None:
+    pytest.importorskip("PySide6")
     from PySide6.QtWidgets import QApplication
 
     from fmri_local_process.gui.metric_help_dialog import MetricHelpDialog

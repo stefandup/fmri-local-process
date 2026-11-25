@@ -1,44 +1,11 @@
-"""What the toolbox's tabs share: the folders, what is running, and when the BIDS folder
-last changed.
+"""The window's shared state: app/state.py with its choices remembered in QSettings (the
+registry on Windows; in a review package, a file in the package)."""
 
-* Folders (DICOM sessions, behavioural logs, BIDS, C-PAC output) are chosen once, on the
-  Setup tab, and remembered (the MRIQC output folder on the MRIQC tab). The first time,
-  they are taken over from the separate crosscheck and preprocess windows' remembered
-  folders. In a review package they start on its own data (processing/review_mode.py).
-* A job that changes the BIDS folder (converting, trimming, C-PAC reading it) is registered
-  as busy; the other tabs lock their own changing actions until it ends.
-* Every change to the BIDS folder bumps a generation number, so a tab refreshes when it is
-  shown next rather than on every change.
-"""
+from PySide6.QtCore import QSettings
 
-from pathlib import Path
-
-from PySide6.QtCore import QObject, QSettings, Signal
-
+from fmri_local_process.app.state import ToolboxState as AppState
 from fmri_local_process.gui.qt_common import SETTINGS_ORGANIZATION
-from fmri_local_process.processing.review_mode import package_folders, package_root, settings_dir
-
-SETTINGS_APP = "FmriToolbox"
-FOLDER_KEYS = ("dicom", "behav", "bids", "output", "mriqc")
-# Where the separate windows kept their folders before the toolbox: {app: {their key: ours}}.
-OLD_SETTINGS = {
-    "FmriCrosscheck": {"bids": "bids", "dicom": "dicom", "behav": "behav"},
-    "FmriPreprocess": {"bids": "bids", "output": "output"},
-}
-
-# Jobs that can be busy; the text is what the tabs say while it runs.
-CONVERTING = "converting"
-TRIMMING = "trimming"
-PREPROCESSING = "preprocessing"
-QUALITY_CHECKING = "quality checking"  # MRIQC reading the BIDS folder
-VIEW_ONLY = "view only"  # never ends: a view-only review package (review_mode.view_only)
-JOB_TEXT = {
-    CONVERTING: "Converting DICOMs to BIDS",
-    TRIMMING: "Trimming runs",
-    PREPROCESSING: "C-PAC is preprocessing",
-    QUALITY_CHECKING: "MRIQC is checking the scans",
-    VIEW_ONLY: "View-only review package",
-}
+from fmri_local_process.processing.review_mode import package_root, settings_dir
 
 
 def make_settings(app: str) -> QSettings:
@@ -49,67 +16,6 @@ def make_settings(app: str) -> QSettings:
     return QSettings(SETTINGS_ORGANIZATION, app)
 
 
-class ToolboxState(QObject):
-    folder_changed = Signal(str)  # key
-    busy_changed = Signal()
-    data_changed = Signal()  # something in the BIDS folder changed
-
+class ToolboxState(AppState):
     def __init__(self) -> None:
-        super().__init__()
-        self.settings = make_settings(SETTINGS_APP)
-        self.folders: dict[str, Path | None] = {}
-        packaged = package_folders()  # a review package: start on its data
-        for key in FOLDER_KEYS:
-            saved = str(self.settings.value(key, "") or "") or self._old_folder(key)
-            if saved and Path(saved).is_dir():
-                self.folders[key] = Path(saved)
-            else:  # e.g. a package unzipped elsewhere: its own data again
-                self.folders[key] = packaged.get(key)
-        self.busy: dict[str, str] = {}  # job -> text
-        self.generation = 0
-
-    @staticmethod
-    def _old_folder(key: str) -> str:
-        for app, keys in OLD_SETTINGS.items():
-            for old_key, new_key in keys.items():
-                if new_key == key and (value := str(make_settings(app).value(old_key, "") or "")):
-                    return value
-        return ""
-
-    # ---- folders ------------------------------------------------------------------------------
-
-    def folder(self, key: str) -> Path | None:
-        return self.folders.get(key)
-
-    def set_folder(self, key: str, folder: Path | None) -> None:
-        if self.folders.get(key) == folder:
-            return
-        self.folders[key] = folder
-        self.settings.setValue(key, str(folder) if folder else "")
-        self.settings.sync()  # on disk now (a review package's settings file, too)
-        self.folder_changed.emit(key)
-        if key == "bids":
-            self.bump()
-
-    # ---- busy jobs ----------------------------------------------------------------------------
-
-    def set_busy(self, job: str, running: bool) -> None:
-        if running == (job in self.busy):
-            return
-        if running:
-            self.busy[job] = JOB_TEXT.get(job, job)
-        else:
-            del self.busy[job]
-        self.busy_changed.emit()
-
-    def lock_reason(self, *allowed: str) -> str:
-        """Why changing actions are locked now ('' if they aren't); jobs in `allowed`
-        (usually the asking tab's own) don't count."""
-        texts = [text for job, text in self.busy.items() if job not in allowed]
-        return "; ".join(texts)
-
-    # ---- BIDS changes -------------------------------------------------------------------------
-
-    def bump(self) -> None:
-        self.generation += 1
-        self.data_changed.emit()
+        super().__init__(lambda app: make_settings(app))  # looked up now: tests replace it

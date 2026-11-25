@@ -235,6 +235,7 @@ def test_a_folder_that_is_not_a_package_is_never_replaced(tmp_path: Path) -> Non
 def test_picker_starts_from_the_toolbox_folders_and_the_last_plan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pytest.importorskip("PySide6")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QApplication
@@ -286,9 +287,11 @@ def test_picker_starts_from_the_toolbox_folders_and_the_last_plan(
 def test_preprocess_keeps_its_settings_in_the_package(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pytest.importorskip("PySide6")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
 
+    from fmri_local_process.app import preprocess
     from fmri_local_process.gui import preprocess_gui
 
     _app = QApplication.instance() or QApplication([])
@@ -298,9 +301,9 @@ def test_preprocess_keeps_its_settings_in_the_package(
     monkeypatch.setenv(review_mode.ENV_VAR, str(package))
 
     def no_docker() -> Path:
-        raise preprocess_gui.DockerUnavailableError("Docker isn't running (test).")
+        raise preprocess.DockerUnavailableError("Docker isn't running (test).")
 
-    monkeypatch.setattr(preprocess_gui, "find_docker", no_docker)
+    monkeypatch.setattr(preprocess, "find_docker", no_docker)
     window = preprocess_gui.PreprocessWindow()
     window.memory_probe.wait()
     settings_file = Path(window.settings.fileName())
@@ -340,6 +343,7 @@ def test_the_manifest_says_whether_the_package_is_view_only(tmp_path: Path) -> N
 def test_the_app_opens_on_the_packaged_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pytest.importorskip("PySide6")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from fmri_local_process.gui import toolbox_state
 

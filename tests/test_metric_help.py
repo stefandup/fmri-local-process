@@ -12,16 +12,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 @pytest.mark.parametrize("tex", [tex for doc in METRIC_DOCS for tex in doc.equations])
 def test_every_equation_renders(tex: str) -> None:
-    from fmri_local_process.gui.metric_help_dialog import formula_png
+    from fmri_local_process.app.metric_help import formula_png
 
     assert formula_png(tex).startswith(b"\x89PNG")
 
 
 def test_equations_have_a_transparent_background() -> None:
     """Light text for a dark theme must not land on a white box."""
+    pytest.importorskip("PySide6")
     from PySide6.QtGui import QImage
 
-    from fmri_local_process.gui.metric_help_dialog import formula_png
+    from fmri_local_process.app.metric_help import formula_png
 
     image = QImage.fromData(formula_png(r"\dfrac{a}{b}", "#ffffff"))
     assert image.pixelColor(0, 0).alpha() == 0
@@ -45,6 +46,7 @@ def test_references_are_links() -> None:
 
 
 def test_dialog_shows_equations_and_links() -> None:
+    pytest.importorskip("PySide6")
     from PySide6.QtWidgets import QApplication
 
     from fmri_local_process.gui.metric_help_dialog import MetricHelpDialog

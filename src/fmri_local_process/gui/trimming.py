@@ -6,10 +6,10 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import QMessageBox, QWidget
 
-from fmri_local_process.gui.toolbox_state import TRIMMING, ToolboxState
-from fmri_local_process.processing.crosscheck import CrosscheckError, DataFile, trim_run
-
-MAX_LISTED = 15
+from fmri_local_process.app.state import TRIMMING
+from fmri_local_process.app.trimming import TrimJob, confirm_text
+from fmri_local_process.gui.toolbox_state import ToolboxState
+from fmri_local_process.processing.crosscheck import DataFile
 
 
 class TrimThread(QThread):
@@ -19,28 +19,10 @@ class TrimThread(QThread):
 
     def __init__(self, bids_root: Path, jobs: list[tuple[DataFile, int]]):
         super().__init__()
-        self.bids_root, self.jobs = bids_root, jobs
+        self.job = TrimJob(bids_root, jobs, self.line.emit)
 
     def run(self) -> None:
-        for number, (data, volumes) in enumerate(self.jobs, start=1):
-            try:
-                trim_run(self.bids_root, data, volumes)
-            except (CrosscheckError, OSError, ValueError) as e:
-                self.line.emit(f"NOT TRIMMED  {e}")
-                continue
-            self.line.emit(
-                f"Trimmed {data.path.name} to {volumes} volumes ({number}/{len(self.jobs)})"
-            )
-
-
-def confirm_text(jobs: list[tuple[DataFile, int]]) -> str:
-    names = "\n".join(f"  {d.path.name}: {d.volumes} -> {n}" for d, n in jobs[:MAX_LISTED])
-    more = f"\n  ... and {len(jobs) - MAX_LISTED} more" if len(jobs) > MAX_LISTED else ""
-    return (
-        f"Trim {len(jobs)} run(s), keeping the first volumes?\n{names}{more}\n\n"
-        "The cut volumes are deleted from the BIDS folder (the raw DICOMs keep them: "
-        "delete the file and convert again to restore it)."
-    )
+        self.job.run()
 
 
 class Trimmer(QObject):

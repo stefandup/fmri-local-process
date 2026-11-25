@@ -138,14 +138,16 @@ raw BOLD (BIDS) ──► fmri_process (CLI) ──► derivatives/ ──► QC
 src/fmri_local_process/
   cli/          # thin click entry points (convert_to_bids, behav_events)
   processing/   # the actual logic (philani_bids, behav_logs, dcm2niix, deface, ...)
-  gui/          # PySide6 timeseries viewer (planned)
+  app/          # what both front ends share, without Qt: state, jobs, tab list, texts
+  gui/          # the PySide6 window (display only)
 tests/
 ```
 
 ## Development
 
 - Python 3.13, `.venv` in the repo root:
-  `.venv\Scripts\python -m pip install -r requirements.txt -r requirements-dev.txt`
+  `.venv\Scripts\python -m pip install -e ".[gui,tui]" -r requirements-dev.txt`
+  (the base install has no Qt; `[gui]` adds the window, `[tui]` the terminal app)
 - Style: [Golden Rules](docs/golden-rules.md) and [AI Style Guide](docs/ai-style-guide.md).
   Agent rules are in [AGENTS.md](AGENTS.md).
 - Build: `.\build.ps1 -Exe | -Full | -Inno` (all output goes to `build_output/`).

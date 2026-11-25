@@ -10,12 +10,7 @@ Scan quality.
 * Docker not running (unknown): nothing shown, the tab's own warning says why.
 """
 
-import re
-import shutil
-import tempfile
-from pathlib import Path
-
-from PySide6.QtCore import QSettings, QThread, Signal
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -25,19 +20,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fmri_local_process.app.colors import ERROR_COLOR
+from fmri_local_process.app.image_download import ImageState, PullJob, remove
+from fmri_local_process.app.settings import Settings
 from fmri_local_process.gui.qt_common import (
-    ERROR_COLOR,
     PROCESS_ACCENT_COLOR,
     RAW_ACCENT_COLOR,
     primary_action_stylesheet,
     style_secondary_label,
     wrap_tooltip,
-)
-from fmri_local_process.processing.docker_pull import (
-    PullProgress,
-    pull_image,
-    remove_image,
-    remove_partial,
 )
 
 PROGRESS_STEPS = 1000  # the bar's resolution
@@ -46,42 +37,16 @@ DOWNLOAD_HOVER_COLOR = "#1e8449"
 REMOVE_HOVER_COLOR = "#c0392b"  # over ERROR_COLOR: giving up on a partial download
 
 
-def pull_log(image: str) -> Path:
-    return Path(tempfile.gettempdir()) / f"fmri_docker_pull_{re.sub(r'[^\w.-]', '_', image)}.txt"
-
-
 class PullThread(QThread):
     progress = Signal(float, str)  # 0..1 (-1: not measurable yet), what is done
     done = Signal(str)  # why it failed, "" when it worked
 
     def __init__(self, image: str) -> None:
         super().__init__()
-        self.image = image
+        self.job = PullJob(image, self.progress.emit)
 
     def run(self) -> None:
-        exe = shutil.which("docker")
-        if exe is None:
-            self.done.emit("Docker isn't installed.")
-            return
-        log_path = pull_log(self.image)
-        try:
-            code = pull_image(Path(exe), self.image, log_path, self.relay)
-        except OSError as e:
-            self.done.emit(str(e))
-            return
-        if code == 0:
-            self.done.emit("")
-            return
-        self.done.emit(
-            f"{last_line(log_path) or f'docker pull exit {code}'}. Check the internet "
-            "connection and click Download again: the parts already downloaded are kept."
-        )
-
-    def relay(self, progress: PullProgress) -> None:
-        if not progress.stages:  # docker hasn't reported a layer yet: no measure to show
-            self.progress.emit(-1.0, "Starting the download...")
-        else:
-            self.progress.emit(progress.fraction(), progress.text())
+        self.done.emit(self.job.run())
 
 
 class RemoveThread(QThread):
@@ -92,22 +57,7 @@ class RemoveThread(QThread):
         self.image, self.partial = image, partial
 
     def run(self) -> None:
-        exe = shutil.which("docker")
-        if exe is None:
-            self.done.emit("Docker isn't installed.")
-            return
-        remove = remove_partial if self.partial else remove_image
-        self.done.emit(remove(Path(exe), self.image) or "")
-
-
-def last_line(log_path: Path) -> str:
-    """docker's last words in a pull log (its error, when it failed)."""
-    try:
-        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return ""
-    text = next((line.strip() for line in reversed(lines) if line.strip()), "")
-    return text if len(text) <= 300 else text[:300] + "..."
+        self.done.emit(remove(self.image, self.partial))
 
 
 class ImageDownload(QWidget):
@@ -123,15 +73,12 @@ class ImageDownload(QWidget):
         what: str,
         size_text: str,
         remove_note: str = "",
-        settings: QSettings | None = None,
+        settings: Settings | None = None,
     ) -> None:
         super().__init__()
+        # With settings, an unfinished download is remembered across restarts.
+        self.info = ImageState(image, what, size_text, remove_note, settings)
         self.image, self.what, self.size_text = image, what, size_text
-        self.remove_note = remove_note  # added to the 'Remove?' question
-        # Where an unfinished download is remembered across restarts (None: this session only).
-        self.settings = settings
-        self.partial = str(settings.value(self.partial_key, "") or "") if settings else ""
-        self.present: bool | None = None
         self.lock_reason = ""
         self.thread_: PullThread | None = None
         self.remover: RemoveThread | None = None
@@ -183,21 +130,19 @@ class ImageDownload(QWidget):
         return self.thread_ is not None or self.remover is not None
 
     @property
-    def partial_key(self) -> str:
-        return f"partial_downloads/{re.sub(r'[^\w.-]', '_', self.image)}"
+    def partial(self) -> str:
+        return self.info.partial
+
+    @property
+    def present(self) -> bool | None:
+        return self.info.present
 
     def set_partial(self, text: str) -> None:
-        """Remember how far an unfinished download got ('' when none is unfinished)."""
-        self.partial = text
-        if self.settings is not None:
-            if text:
-                self.settings.setValue(self.partial_key, text)
-            else:
-                self.settings.remove(self.partial_key)
+        self.info.set_partial(text)
 
     def set_present(self, present: bool | None) -> None:
         """Whether the image is on this computer (None: unknown, Docker not running)."""
-        self.present = present
+        self.info.present = present
         if present and self.partial and not self.busy:  # finished some other way
             self.set_partial("")
         self.update_buttons()
@@ -213,9 +158,7 @@ class ImageDownload(QWidget):
         self.button.setVisible(self.present is False or downloading)
         self.button.setEnabled(not self.busy)
         self.button.setText(
-            f"Continue download ({self.partial})"
-            if self.partial and not downloading
-            else f"Download {self.what} ({self.size_text})"
+            f"Download {self.what} ({self.size_text})" if downloading else self.info.download_text()
         )
         self.remove_partial_button.setVisible(
             self.present is False and bool(self.partial) and not downloading
@@ -272,7 +215,7 @@ class ImageDownload(QWidget):
             self.bar.setValue(PROGRESS_STEPS)
             self.bar.setVisible(False)
             self.label.setText(f"{self.what} downloaded.")
-            self.present = True
+            self.info.present = True
             self.set_partial("")
         self.update_buttons()
         self.finished.emit(error)
@@ -282,14 +225,7 @@ class ImageDownload(QWidget):
     def on_remove(self) -> None:
         if self.busy or self.lock_reason:
             return
-        note = f"\n\n{self.remove_note}" if self.remove_note else ""
-        answer = QMessageBox.question(
-            self,
-            f"Remove {self.what}?",
-            f"Remove {self.image} from this computer, freeing its disk space "
-            f"({self.size_text})?\n\nIt has to be downloaded again before it can be used. "
-            f"Your data and results aren't touched.{note}",
-        )
+        answer = QMessageBox.question(self, f"Remove {self.what}?", self.info.remove_question())
         if answer != QMessageBox.StandardButton.Yes:
             return
         self.start_removing(partial=False)
@@ -298,12 +234,7 @@ class ImageDownload(QWidget):
         if self.busy:
             return
         answer = QMessageBox.question(
-            self,
-            "Remove the partial download?",
-            f"Give up on the unfinished download of {self.image} ({self.partial}) and clear "
-            "what it left on disk?\n\nThis also removes other unused, untagged Docker images "
-            "(old versions nothing refers to). Your data and results aren't touched. "
-            "Downloading later starts from the beginning.",
+            self, "Remove the partial download?", self.info.remove_partial_question()
         )
         if answer == QMessageBox.StandardButton.Yes:
             self.start_removing(partial=True)
@@ -327,7 +258,7 @@ class ImageDownload(QWidget):
             self.label.setText(f"⚠ Not removed: {error}")
         else:
             self.label.setText(f"{self.what} removed.")
-            self.present = False
+            self.info.present = False
             self.set_partial("")
         self.update_buttons()
         self.removed.emit(error)

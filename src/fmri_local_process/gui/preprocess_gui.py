@@ -11,10 +11,7 @@ import html
 import logging
 import os
 import threading
-import time
 import zlib
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -50,11 +47,54 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from fmri_local_process.gui.docker_controls import (
-    DOCKER_RECHECK_MS,
-    DockerControlThread,
-    DockerStatus,
+from fmri_local_process.app.colors import (
+    ERROR_COLOR,
+    RUNNING_COLOR,
 )
+from fmri_local_process.app.docker import DOCKER_RECHECK_MS
+from fmri_local_process.app.output_help import MOTION_HELP, qc_figure_help, slice_help
+from fmri_local_process.app.preprocess import (
+    RUN_MODES,
+    SETTINGS_APP,
+    STATUS_ICON,
+    STATUS_LEGEND,
+    DockerProbe,
+    PreprocessJob,
+    Problem,
+    RunSettings,
+    RunSummary,
+    done_lines,
+    estimate_key,
+    failure_problem,
+    log_text,
+    mark_all_stopped,
+    memory_text,
+    missing_problem,
+    motion_rows,
+    notices,
+    overload_question,
+    partial_problem,
+    probe_docker,
+    read_choices,
+    rename_question,
+    rename_subject,
+    renumbered_problem,
+    roster,
+    save_choices,
+    save_unticked_tasks,
+    saved_estimate,
+    scratch_question,
+    start_text,
+    stop_now_question,
+    subject_status,
+    suggested_plan,
+    summary_text,
+    task_filter,
+    tasks_to_do,
+)
+from fmri_local_process.app.run_progress import RunningSubject
+from fmri_local_process.app.state import paths_conflict
+from fmri_local_process.gui.docker_controls import DockerControlThread, DockerStatus
 from fmri_local_process.gui.image_download import ImageDownload
 from fmri_local_process.gui.image_view import (
     HelpToggle,
@@ -62,22 +102,15 @@ from fmri_local_process.gui.image_view import (
     figure_to_pixmap,
     load_figure,
 )
-from fmri_local_process.gui.output_help import MOTION_HELP, qc_figure_help, slice_help
 from fmri_local_process.gui.qt_common import (
-    ERROR_COLOR,
     HOME_BASE_ACCENT_COLOR,
     HOME_BASE_NAME_EXTRA_POINT_INCREASE,
-    OK_COLOR,
     PROCESS_ACCENT_COLOR,
     PROCESS_ACCENT_HOVER_COLOR,
-    RUNNING_COLOR,
     SETTINGS_ORGANIZATION,
-    UNKNOWN_COLOR,
-    WARNING_COLOR,
     NoticeBanner,
     accent_group_box_stylesheet,
     default_browse_dir,
-    paths_conflict,
     primary_action_stylesheet,
     reveal,
     set_path_display,
@@ -85,124 +118,38 @@ from fmri_local_process.gui.qt_common import (
     style_secondary_label,
     wrap_tooltip,
 )
-from fmri_local_process.gui.run_progress import RunningSubject, RunProgress
+from fmri_local_process.gui.run_progress import RunProgress
 from fmri_local_process.processing.brain_slices import SlicePreview, render_slices, slice_previews
 from fmri_local_process.processing.cpac_docker import (
     CPAC_IMAGE,
     HANG_ACTIONS,
     MIN_CPUS_PER_SUBJECT,
     MIN_MEM_GB,
-    RESTART_MARKER,
-    START_GAP_S,
     SUGGESTED_MEM_GB,
     DockerUnavailableError,
     HangPolicy,
     ParallelPlan,
-    StartGate,
-    bids_subjects,
     bids_tasks,
     bold_sessions,
-    clear_subject_results,
-    clear_working_volume,
-    docker_memory_gb,
-    docker_resources,
-    explain_failure,
-    find_docker,
-    finished_node,
     host_memory_gb,
-    image_present,
-    is_subject_done,
-    mark_stopped,
-    memory_problem,
-    missing_outputs,
-    parallel_warning,
-    preprocess_subject,
     preprocessed_bolds,
-    run_cpac,
-    stop_containers,
-    subject_console_log,
-    subject_tasks_in,
-    suggest_plan,
-    was_stopped,
 )
 from fmri_local_process.processing.cpac_outputs import (
     QcFigure,
-    bids_entities,
     motion_summaries,
     qc_figures,
-    read_tsv,
 )
 from fmri_local_process.processing.review_mode import package_root, settings_dir
 from fmri_local_process.processing.session_sync import (
     SessionChange,
-    adopt_sessions,
-    rename_outputs,
     session_changes,
 )
 
 log = logging.getLogger(__name__)
 
-SETTINGS_APP = "FmriPreprocess"
 TASK_LIST_HEIGHT = 96  # ~4 rows; more tasks scroll
 SUMMARY_MIN_WIDTH = 200
-LOG_TAIL_LINES = 400
-MAX_MISSING_SHOWN = 12
 SLICE_CACHE_SIZE = 40  # rendered slice previews kept (~3 MB each)
-STATUS_ICON = {
-    "done": ("✓", OK_COLOR),
-    "partial": ("◐", WARNING_COLOR),
-    "failed": ("✗", ERROR_COLOR),
-    "stopped": ("■", WARNING_COLOR),
-    "renumbered": ("⇄", WARNING_COLOR),
-    "running": ("▶", RUNNING_COLOR),
-    "not run": ("○", UNKNOWN_COLOR),
-}
-STATUS_LEGEND = (
-    "✓ every session has a preprocessed BOLD (of each ticked task) and every output C-PAC "
-    "expected\n"
-    "◐ (several tasks ticked) some are preprocessed, others not yet\n"
-    "✗ C-PAC ran (a log exists) but its output is incomplete\n"
-    "■ stopped by you before it finished; running it again resumes it\n"
-    "⇄ the BIDS sessions were renumbered since it was preprocessed (an earlier session was "
-    "added): its output carries the old numbers. Run it again (old results are cleared "
-    "first) or rename its output -- select it for both options\n"
-    "▶ running now\n"
-    "○ not run yet"
-)
-# Run mode -> dropdown label. Every mode reuses C-PAC's working folder except "scratch".
-RUN_MODES = {
-    "skip": "Skip done, resume the rest",
-    "resume": "Resume all (reuse finished steps)",
-    "scratch": "Rerun from scratch (delete previous results)",
-}
-
-
-def task_names(tasks: list[str]) -> str:
-    """['Rest', 'Matching'] -> 'task-Rest, task-Matching'; [] -> 'all tasks'."""
-    return ", ".join(f"task-{label}" for label in tasks) or "all tasks"
-
-
-@dataclass
-class RunSettings:
-    bids_root: Path
-    output_root: Path
-    subjects: list[str]
-    tasks: list[str]  # BOLD task labels to run; [] for all
-    n_cpus: int  # per subject
-    mem_gb: float  # per subject
-    mode: str = "skip"  # a RUN_MODES key
-    image: str = CPAC_IMAGE
-    parallel: int = 1  # subjects at once, each in its own container
-    hang: HangPolicy = field(default_factory=HangPolicy)
-    keep_working: bool = False  # keep a finished subject's working folder in Docker
-
-
-@dataclass
-class RunSummary:
-    done: list[str] = field(default_factory=list)
-    skipped: list[str] = field(default_factory=list)
-    failed: list[tuple[str, str]] = field(default_factory=list)
-    stopped: bool = False
 
 
 class PreprocessThread(QThread):
@@ -217,157 +164,26 @@ class PreprocessThread(QThread):
 
     def __init__(self, run: RunSettings) -> None:
         super().__init__()
-        self.run_settings = run
-        self.stop_requested = False
-        self.docker: Path | None = None
-        # Stop now: `docker stop` the running containers. One that is still starting (no
-        # container to stop yet) is stopped at its first console line instead.
-        self.stop_now_requested = False
-        self.lock = threading.Lock()
-        self.active: set[str] = set()  # subjects whose container is (about to be) running
-        self.stopping: set[str] = set()  # ... and of those, the ones docker was told to stop
+        self.job = PreprocessJob(run, listener=self)
 
     def run(self) -> None:
-        run = self.run_settings
-        try:
-            docker = find_docker()
-        except DockerUnavailableError as e:
-            self.batch_done.emit(str(e))
-            return
-        self.docker = docker
-        problem = memory_problem(run.mem_gb, docker_memory_gb(docker), host_memory_gb())
-        if problem is not None:
-            self.batch_done.emit(problem)
-            return
-        if not image_present(docker, run.image):
-            self.message.emit(
-                f"Pulling C-PAC image {run.image} (~15 GB, one-time; can take 30+ min)...", False
-            )
-            pull_log = run.output_root / "log" / "docker_pull.txt"
-            pull_cmd = [str(docker), "pull", run.image]
-            if run_cpac(pull_cmd, pull_log, self.relay_pull_line) != 0:
-                self.batch_done.emit(f"docker pull {run.image} failed; see {pull_log}")
-                return
+        self.job.run()
 
-        summary = RunSummary()
-        gate = StartGate(START_GAP_S if run.parallel > 1 else 0.0)
-        # Each subject runs on a pool thread; Qt queues the signals to the GUI thread.
-        with ThreadPoolExecutor(max_workers=run.parallel) as pool:
-            for index, subject in enumerate(run.subjects):
-                pool.submit(self.run_subject, docker, index, subject, gate, summary)
-        self.batch_done.emit(summary)
+    # The PreprocessListener methods: each call becomes a signal, queued to the GUI thread.
+    def on_message(self, text: str, is_error: bool, /) -> None:
+        self.message.emit(text, is_error)
 
-    def run_subject(
-        self, docker: Path, index: int, subject: str, gate: StartGate, summary: RunSummary
-    ) -> None:
-        run = self.run_settings
-        if self.stop_requested:
-            summary.stopped = True
-            return
-        done = is_subject_done(run.bids_root, run.output_root, subject, run.tasks)
-        if run.mode == "skip" and done:
-            summary.skipped.append(subject)
-            self.subject_finished.emit(subject, 0, False)
-            return
-        gate.wait()
-        with self.lock:  # under the lock, so stop_now() can't miss a starting subject
-            if self.stop_requested:  # pressed while waiting for a start slot
-                summary.stopped = True
-                return
-            self.active.add(subject)
-        self.subject_started.emit(index, len(run.subjects), subject)
-        steps_done = 0
+    def on_subject_started(self, index: int, total: int, subject: str, /) -> None:
+        self.subject_started.emit(index, total, subject)
 
-        def on_line(line: str) -> None:
-            nonlocal steps_done
-            if self.stop_now_requested and subject not in self.stopping:
-                self.stop_container(subject)
-            if line == RESTART_MARKER:  # the resumed run counts its steps again
-                steps_done = 0
-                self.step.emit(subject, "restarted after a hang", 0)
-                return
-            node = finished_node(line)
-            if node is not None:
-                steps_done += 1
-                self.step.emit(subject, node, steps_done)
+    def on_step(self, subject: str, node: str, steps_done: int, /) -> None:
+        self.step.emit(subject, node, steps_done)
 
-        try:
-            if run.mode == "scratch":
-                removed = [
-                    *clear_subject_results(run.output_root, subject),
-                    *clear_working_volume(docker, run.image, run.output_root, subject),
-                ]
-                self.message.emit(
-                    f"sub-{subject}: deleted {len(removed)} previous working/output folder(s)",
-                    False,
-                )
-            failure = preprocess_subject(
-                docker,
-                run.bids_root,
-                run.output_root,
-                subject,
-                run.image,
-                run.n_cpus,
-                run.mem_gb,
-                run.tasks,
-                on_line,
-                hang=run.hang,
-                tell=lambda text: self.message.emit(
-                    text, any(word in text for word in ("hung", "lost contact", "didn't come"))
-                ),
-                may_restart=lambda: not self.stop_now_requested,
-                keep_working=run.keep_working,
-            )
-        except Exception as e:  # noqa: BLE001 -- one subject's crash mustn't end the batch
-            log.exception("sub-%s crashed", subject)
-            failure = f"{type(e).__name__}: {e}"
-        with self.lock:
-            self.active.discard(subject)
-            stopped = subject in self.stopping
-        if failure is None:
-            summary.done.append(subject)
-            self.message.emit(f"sub-{subject}: preprocessed ({steps_done} steps)", False)
-        elif stopped:
-            mark_stopped(subject_console_log(run.output_root, subject))
-            summary.stopped = True
-            self.message.emit(
-                f"sub-{subject}: stopped after {steps_done} steps; running it again resumes it",
-                False,
-            )
-        else:
-            summary.failed.append((subject, failure))
-            self.message.emit(f"sub-{subject} FAILED: {failure}", True)
-        self.subject_finished.emit(subject, steps_done, failure is None)
+    def on_subject_finished(self, subject: str, steps: int, preprocessed: bool, /) -> None:
+        self.subject_finished.emit(subject, steps, preprocessed)
 
-    def stop_container(self, subject: str) -> None:
-        """`docker stop` one subject's container (blocks up to ~10 s)."""
-        with self.lock:
-            if self.docker is None or subject not in self.active or subject in self.stopping:
-                return
-            self.stopping.add(subject)
-        error = stop_containers(self.docker, [subject])
-        if error is not None and "No such container" in error:
-            with self.lock:  # still starting: stopped at its first console line instead
-                self.stopping.discard(subject)
-        elif error is not None:
-            self.message.emit(f"sub-{subject}: couldn't stop its container: {error}", True)
-
-    def stop_now(self) -> list[str]:
-        """Start no new subjects and stop the running containers, freeing their CPUs and
-        memory; returns the subjects stopped (blocks on docker: call it off the GUI thread)."""
-        with self.lock:
-            self.stop_requested = True
-            self.stop_now_requested = True
-            running = sorted(self.active)
-        for subject in running:
-            self.stop_container(subject)
-        return running
-
-    def relay_pull_line(self, line: str) -> None:
-        # Without a TTY docker prints one line per layer event; only completions matter.
-        text = line.strip()
-        if text.endswith("Pull complete") or text.startswith(("Digest:", "Status:")):
-            self.message.emit(f"docker pull: {text}", False)
+    def on_batch_done(self, result: RunSummary | str, /) -> None:
+        self.batch_done.emit(result)
 
 
 class MemoryProbeThread(QThread):
@@ -378,22 +194,8 @@ class MemoryProbeThread(QThread):
     done = Signal(object, object, str, object)
 
     def run(self) -> None:
-        try:
-            docker = find_docker()
-        except DockerUnavailableError as e:
-            self.done.emit(None, None, str(e), None)
-            return
-        self.done.emit(*docker_resources(docker), "", image_present(docker, CPAC_IMAGE))
-
-
-def read_log_tail(path: Path, n_lines: int = LOG_TAIL_LINES) -> str:
-    """Last n_lines of a (possibly multi-MB) C-PAC console log."""
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    skipped = len(lines) - n_lines
-    head = (
-        [f"... {skipped} earlier lines, open the file for all of it ...", ""] if skipped > 0 else []
-    )
-    return "\n".join(head + lines[-n_lines:])
+        probe = probe_docker()
+        self.done.emit(probe.gb, probe.cpus, probe.error, probe.has_image)
 
 
 class PreprocessWindow(QMainWindow):
@@ -850,32 +652,22 @@ class PreprocessWindow(QMainWindow):
     # ---- folders & settings ------------------------------------------------------------------
 
     def _restore_settings(self) -> None:
-        self.parallel_spin.setValue(int(str(self.settings.value("parallel", 1))))
-        self.cpus_spin.setValue(int(str(self.settings.value("n_cpus", 1))))
-        self.mem_spin.setValue(max(MIN_MEM_GB, float(str(self.settings.value("mem_gb", 0)))))
-        # A deleting mode is never restored as the default for the next session.
-        saved_mode = str(self.settings.value("run_mode", "skip"))
-        if saved_mode != "scratch" and (index := self.mode_combo.findData(saved_mode)) >= 0:
-            self.mode_combo.setCurrentIndex(index)
-        default_hang = HangPolicy()
-        self.hang_spin.setValue(
-            int(float(str(self.settings.value("hang_minutes", default_hang.minutes))))
-        )
-        action = str(self.settings.value("hang_action", default_hang.action))
-        self.hang_action_combo.setCurrentIndex(max(0, self.hang_action_combo.findData(action)))
-        self.restarts_spin.setValue(
-            int(str(self.settings.value("max_restarts", default_hang.max_restarts)))
-        )
-        self.keep_working_check.setChecked(
-            str(self.settings.value("keep_working", "false")).lower() == "true"
-        )
+        saved = read_choices(self.settings)
+        self.parallel_spin.setValue(saved.plan.parallel)
+        self.cpus_spin.setValue(saved.plan.n_cpus)
+        self.mem_spin.setValue(saved.plan.mem_gb)
+        self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(saved.mode)))
+        self.hang_spin.setValue(int(saved.hang.minutes))
+        index = self.hang_action_combo.findData(saved.hang.action)
+        self.hang_action_combo.setCurrentIndex(max(0, index))
+        self.restarts_spin.setValue(saved.hang.max_restarts)
+        self.keep_working_check.setChecked(saved.keep_working)
         self._update_hang_widgets()
         self.memory_probe = MemoryProbeThread()
         self.memory_probe.done.connect(self._on_memory_probed)
         self.memory_probe.start()
         self.docker_timer.start()
-        unticked_tasks = str(self.settings.value("unticked_tasks", "") or "")
-        self.unticked_tasks = set(filter(None, unticked_tasks.split(",")))
+        self.unticked_tasks = saved.unticked_tasks
         bids = str(self.settings.value("bids", "") or "")
         output = str(self.settings.value("output", "") or "")
         if output and Path(output).is_dir():
@@ -988,8 +780,7 @@ class PreprocessWindow(QMainWindow):
     def _tasks(self) -> list[str]:
         """The task filter for C-PAC and the roster: the ticked tasks, or [] (every task)
         when all are ticked."""
-        ticked = self._ticked_tasks()
-        return [] if ticked == self._all_task_labels() else ticked
+        return task_filter(self._all_task_labels(), self.unticked_tasks)
 
     def _set_ticked_tasks(self, labels: list[str]) -> None:
         self.task_list.blockSignals(True)
@@ -1014,48 +805,25 @@ class PreprocessWindow(QMainWindow):
 
     def _on_tasks_changed(self) -> None:
         # Untick-list rather than tick-list, so new tasks start ticked.
-        self.settings.setValue("unticked_tasks", ",".join(sorted(self.unticked_tasks)))
+        save_unticked_tasks(self.settings, self.unticked_tasks)
         self._refresh_roster()
 
     # ---- roster ------------------------------------------------------------------------------
 
     def _subject_status(self, subject: str) -> str:
-        if subject in self.running:
-            return "running"
-        if self.bids_folder is None or self.output_folder is None:
-            return "not run"
-        if session_changes(self.bids_folder, self.output_folder, subject):
-            return "renumbered"
-        tasks = self._tasks()
-        if is_subject_done(self.bids_folder, self.output_folder, subject, tasks):
-            return "done"
-        if self._tasks_to_do(subject) != subject_tasks_in(self.bids_folder, subject, tasks):
-            return "partial"  # several tasks ticked, some already preprocessed on their own
-        console_log = subject_console_log(self.output_folder, subject)
-        if console_log.is_file():
-            return "stopped" if was_stopped(console_log) else "failed"
-        return "not run"
+        return subject_status(
+            self.bids_folder, self.output_folder, subject, self._tasks(), subject in self.running
+        )
 
     def _tasks_to_do(self, subject: str) -> list[str]:
         """This subject's ticked tasks that aren't fully preprocessed yet."""
-        if self.bids_folder is None or self.output_folder is None:
-            return []
-        return [
-            label
-            for label in subject_tasks_in(self.bids_folder, subject, self._tasks())
-            if not is_subject_done(self.bids_folder, self.output_folder, subject, label)
-        ]
+        return tasks_to_do(self.bids_folder, self.output_folder, subject, self._tasks())
 
     def _refresh_roster(self) -> None:
         selected = set(self._selected_subjects())
         task = self._tasks()
         ticked_any = bool(self._ticked_tasks())
-        self.subjects = (
-            bids_subjects(self.bids_folder, task) if self.bids_folder and ticked_any else []
-        )
-        if self.bids_folder is not None and self.output_folder is not None:
-            for subject in self.subjects:  # output from before sessions were recorded
-                adopt_sessions(self.bids_folder, self.output_folder, subject)
+        self.subjects = roster(self.bids_folder, self.output_folder, task, ticked_any)
         self.statuses = {subject: self._subject_status(subject) for subject in self.subjects}
         self.subject_table.blockSignals(True)
         self.subject_table.setRowCount(len(self.subjects))
@@ -1079,26 +847,13 @@ class PreprocessWindow(QMainWindow):
         self.banner.set_messages(self._notices(bool(self._ticked_tasks())))
 
     def _notices(self, ticked_any: bool) -> list[str]:
-        """What is missing to preprocess: folders, BOLD runs, ticked tasks, the C-PAC image."""
-        messages = []
-        if self.cpac_missing:
-            messages.append(
-                f"The C-PAC image ({CPAC_IMAGE}, ~15 GB) isn't downloaded yet: click "
-                "'Download the C-PAC image' below (once per computer), or tick C-PAC in the "
-                "installer."
-            )
-        if self.bids_folder is None:
-            messages.append("No BIDS folder chosen: Browse for it below.")
-        elif not self._all_task_labels():
-            messages.append(
-                f"No BOLD runs in {self.bids_folder} yet: convert the DICOMs on the Setup & "
-                "Convert to BIDS tab first."
-            )
-        elif not ticked_any:
-            messages.append("No task ticked: tick the BOLD tasks to preprocess below.")
-        if self.output_folder is None:
-            messages.append("No C-PAC output folder chosen: Browse for one below.")
-        return messages
+        return notices(
+            self.bids_folder,
+            self.output_folder,
+            self._all_task_labels(),
+            ticked_any,
+            self.cpac_missing,
+        )
 
     def _status_item(self, status: str) -> QTableWidgetItem:
         icon, color = STATUS_ICON[status]
@@ -1115,23 +870,14 @@ class PreprocessWindow(QMainWindow):
         self._refresh_summary()
 
     def _refresh_summary(self) -> None:
-        if self.bids_folder is None:
-            self.summary_label.setText("Choose a BIDS folder and an output folder.")
-            return
-        if not self._ticked_tasks():
-            self.summary_label.setText("No tasks ticked: tick at least one task.")
-            return
-        what = f"{task_names(self._tasks())} BOLD" if self._tasks() else "BOLD runs"
-        counts = {status: list(self.statuses.values()).count(status) for status in STATUS_ICON}
-        lines = [f"{len(self.subjects)} subject(s) with {what}"]
-        lines += [
-            f"{STATUS_ICON[status][0]} {count} {status}"
-            for status, count in counts.items()
-            if count
-        ]
-        if self.output_folder is None:
-            lines.append("Choose an output folder.")
-        self.summary_label.setText("\n".join(lines))
+        text = summary_text(
+            self.bids_folder,
+            self.output_folder,
+            self._tasks(),
+            bool(self._ticked_tasks()),
+            self.statuses,
+        )
+        self.summary_label.setText(text)
 
     def _selected_subjects(self) -> list[str]:
         model = self.subject_table.selectionModel()
@@ -1211,8 +957,10 @@ class PreprocessWindow(QMainWindow):
         )
 
     def _suggested_plan(self) -> ParallelPlan:
-        cpus = self.docker_cpus or os.cpu_count()
-        return suggest_plan(cpus, self.docker_gb, len(self._ticked_subjects()))
+        return suggested_plan(self._docker_probe(), len(self._ticked_subjects()))
+
+    def _docker_probe(self) -> DockerProbe:
+        return DockerProbe(self.docker_gb, self.docker_cpus, self.docker_error)
 
     def _on_suggest(self) -> None:
         """Fill in from the limits known now, then again once Docker is re-asked: they
@@ -1220,14 +968,6 @@ class PreprocessWindow(QMainWindow):
         self._fill_in_suggestion()
         self.suggest_pending = True
         self._probe_docker()
-
-    def _suggest_note(self) -> str:
-        """Why the suggestion runs fewer subjects at once than Docker would fit, if so."""
-        ticked = len(self._ticked_subjects())
-        cpus = self.docker_cpus or os.cpu_count()
-        if ticked and suggest_plan(cpus, self.docker_gb).parallel > ticked:
-            return f" (only {ticked} subject(s) ticked)"
-        return ""
 
     def _fill_in_suggestion(self) -> None:
         plan = self._suggested_plan()
@@ -1238,34 +978,11 @@ class PreprocessWindow(QMainWindow):
     def _update_memory_label(self) -> None:
         if not self.memory_probed:
             return
-        plan = self._plan()
-        problem = memory_problem(plan.mem_gb, self.docker_gb, self.host_gb)
-        warning = parallel_warning(plan, self.docker_gb, self.docker_cpus)
-        host = f"{self.host_gb:.1f} GB" if self.host_gb is not None else "unknown"
-        cpus = f", {self.docker_cpus} CPUs" if self.docker_cpus else ""
-        if problem is not None:
-            text, color = f"⚠ {problem}", ERROR_COLOR
-        elif self.docker_gb is None:
-            text, color = f"This computer: {host} RAM. Docker's limit couldn't be read.", None
-        elif warning is not None:
-            text, color = f"⚠ {warning}", WARNING_COLOR
-        else:
-            text = f"✓ Docker may use {self.docker_gb:.1f} GB of this computer's {host} RAM{cpus}."
-            color = OK_COLOR
-        if plan.parallel > 1:
-            text += (
-                f"\nIn use at once: {plan.parallel * plan.n_cpus} CPUs, "
-                f"{plan.parallel * plan.mem_gb:g} GB."
-            )
-        suggested = self._suggested_plan()
-        if suggested != plan and self.docker_gb is not None:
-            text += (
-                f"\nSuggested here: {suggested.parallel} at once{self._suggest_note()} x "
-                f"{suggested.n_cpus} CPUs, {suggested.mem_gb:g} GB each (click 'Suggest')."
-            )
+        text, color = memory_text(
+            self._plan(), self._docker_probe(), self.host_gb, len(self._ticked_subjects())
+        )
         self.memory_label.setText(text)
-        style = f"color: {color};" if color else f"color: {UNKNOWN_COLOR};"
-        self.memory_label.setStyleSheet(style)
+        self.memory_label.setStyleSheet(f"color: {color};")
 
     def _ticked_subjects(self) -> list[str]:
         return [subject for subject in self.subjects if subject not in self.unticked]
@@ -1345,18 +1062,21 @@ class PreprocessWindow(QMainWindow):
         title = QLabel(f"<h2>sub-{subject}</h2>")
         self.outputs_layout.addWidget(title)
         if self.statuses.get(subject) in ("failed", "stopped"):
-            self.outputs_layout.addWidget(self._failure_group(subject, self.output_folder))
+            stopped = self.statuses[subject] == "stopped"
+            self.outputs_layout.addWidget(
+                self._problem_group(failure_problem(self.output_folder, subject, stopped))
+            )
         if self.statuses.get(subject) == "partial":
-            self.outputs_layout.addWidget(self._partial_group(self._tasks_to_do(subject)))
+            self.outputs_layout.addWidget(
+                self._problem_group(partial_problem(self._tasks_to_do(subject)))
+            )
         if self.statuses.get(subject) == "renumbered" and self.bids_folder is not None:
             changes = session_changes(self.bids_folder, self.output_folder, subject)
             self.outputs_layout.addWidget(self._renumbered_group(subject, changes))
         if self.bids_folder is not None and self.statuses.get(subject) != "running":
-            task = self._tasks()
-            sessions = bold_sessions(self.bids_folder, subject, task)
-            gaps = missing_outputs(self.output_folder, subject, sessions, task)
-            if any(gaps.values()):
-                self.outputs_layout.addWidget(self._missing_group(gaps))
+            missing = missing_problem(self.bids_folder, self.output_folder, subject, self._tasks())
+            if missing is not None:
+                self.outputs_layout.addWidget(self._problem_group(missing))
         bolds = preprocessed_bolds(self.output_folder, subject)
         group = QGroupBox(f"Preprocessed BOLD ({len(bolds)})")
         grid = QGridLayout(group)
@@ -1374,19 +1094,9 @@ class PreprocessWindow(QMainWindow):
 
     def _renumbered_group(self, subject: str, changes: list[SessionChange]) -> QGroupBox:
         """The subject's BIDS sessions were renumbered after it was preprocessed."""
-        group = QGroupBox("BIDS sessions renumbered since preprocessing")
-        group.setStyleSheet(accent_group_box_stylesheet(WARNING_COLOR))
-        layout = QVBoxLayout(group)
-        moves = "<br>".join(f"&nbsp;&nbsp;{change}" for change in changes)
-        label = QLabel(
-            "An earlier session was added to BIDS, so this subject's sessions have new "
-            f"numbers:<br>{moves}<br>Its output still carries the old ones. Either run it "
-            "again (its old results are cleared first and every session is preprocessed "
-            "again), or rename its output to the new numbers."
-        )
-        label.setWordWrap(True)
-        label.setStyleSheet(f"color: {WARNING_COLOR};")
-        layout.addWidget(label)
+        group = self._problem_group(renumbered_problem(changes))
+        layout = group.layout()
+        assert layout is not None
         rename = QPushButton("Rename output to the new session numbers...")
         rename.setToolTip(
             wrap_tooltip(
@@ -1406,85 +1116,35 @@ class PreprocessWindow(QMainWindow):
     def _on_rename_outputs(self, subject: str, changes: list[SessionChange]) -> None:
         if self.bids_folder is None or self.output_folder is None:
             return
-        listing = "\n".join(f"  {change}" for change in changes)
-        answer = QMessageBox.question(
-            self,
-            "Rename output",
-            f"Rename sub-{subject}'s C-PAC output to the new session numbers?\n{listing}\n\n"
-            "Its C-PAC working data is cleared too (Docker must be running).",
-        )
+        answer = QMessageBox.question(self, "Rename output", rename_question(subject, changes))
         if answer != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            docker = find_docker()
-        except DockerUnavailableError as e:
-            QMessageBox.warning(self, "Docker needed", f"Start Docker first: {e}")
             return
         QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            renamed = rename_outputs(self.bids_folder, self.output_folder, subject, changes)
-            clear_working_volume(docker, CPAC_IMAGE, self.output_folder, subject)
+            renamed = rename_subject(self.bids_folder, self.output_folder, subject, changes)
+        except DockerUnavailableError as e:
+            QMessageBox.warning(self, "Docker needed", f"Start Docker first: {e}")
+            return
         except OSError as e:
             QMessageBox.warning(self, "Not renamed", str(e))
             return
         finally:
             QGuiApplication.restoreOverrideCursor()
         self._log_activity(
-            f"sub-{subject}: renamed {len(renamed)} output path(s) to the new session numbers"
+            f"sub-{subject}: renamed {renamed} output path(s) to the new session numbers"
         )
         self._refresh_roster()
 
-    def _partial_group(self, tasks_to_do: list[str]) -> QGroupBox:
-        """Which tasks an 'All tasks' run would still preprocess for this subject."""
-        group = QGroupBox("Not all tasks preprocessed")
-        group.setStyleSheet(accent_group_box_stylesheet(WARNING_COLOR))
+    def _problem_group(self, problem: Problem) -> QGroupBox:
+        group = QGroupBox(problem.title)
+        group.setStyleSheet(accent_group_box_stylesheet(problem.color))
         layout = QVBoxLayout(group)
-        names = ", ".join(f"task-{label}" for label in tasks_to_do)
-        label = QLabel(
-            f"Still to do: {names}. Run with these tasks ticked and Run mode 'Skip done, "
-            "resume the rest': finished steps are reused."
-        )
-        label.setWordWrap(True)
-        label.setStyleSheet(f"color: {WARNING_COLOR};")
-        layout.addWidget(label)
-        return group
-
-    def _failure_group(self, subject: str, output_folder: Path) -> QGroupBox:
-        """Why this subject's last C-PAC run failed (or that it was stopped), read back
-        from its saved log."""
-        stopped = self.statuses.get(subject) == "stopped"
-        color = WARNING_COLOR if stopped else ERROR_COLOR
-        group = QGroupBox("Stopped before it finished" if stopped else "Why it failed")
-        group.setStyleSheet(accent_group_box_stylesheet(color))
-        layout = QVBoxLayout(group)
-        cause = explain_failure(subject_console_log(output_folder, subject), output_folder)
-        label = QLabel(cause or "No known cause recognised; see the C-PAC Log tab.")
-        label.setWordWrap(True)
-        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        label.setStyleSheet(f"color: {color}; font-weight: bold;")
-        layout.addWidget(label)
-        return group
-
-    def _missing_group(self, gaps: dict[str, list[str]]) -> QGroupBox:
-        """The outputs C-PAC said it would write (expectedOutputs.yml) but didn't, per session."""
-        n_missing = sum(map(len, gaps.values()))
-        group = QGroupBox(f"Not complete: {n_missing} expected output(s) missing")
-        group.setStyleSheet(accent_group_box_stylesheet(WARNING_COLOR))
-        layout = QVBoxLayout(group)
-        hint = QLabel(
-            "Run it again with Run mode 'Skip done, resume the rest' (same CPUs): finished "
-            "steps are reused, so only what's missing is redone."
-        )
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-        lines = [f"ses-{session}  {name}" for session, names in gaps.items() for name in names]
-        if len(lines) > MAX_MISSING_SHOWN:
-            hidden = len(lines) - MAX_MISSING_SHOWN
-            lines = [*lines[:MAX_MISSING_SHOWN], f"... and {hidden} more"]
-        listing = QLabel("\n".join(lines))
-        listing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        listing.setStyleSheet(f"color: {WARNING_COLOR};")
-        layout.addWidget(listing)
+        for text in filter(None, (problem.text, "\n".join(problem.listing))):
+            label = QLabel(text)
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            label.setStyleSheet(f"color: {problem.color};")
+            layout.addWidget(label)
         return group
 
     def _show_previews(self, subject: str | None) -> None:
@@ -1520,17 +1180,7 @@ class PreprocessWindow(QMainWindow):
 
     def _fill_motion(self, tables: list[Path]) -> None:
         """One row per run (session/task), with the TSV's own columns."""
-        columns: list[str] = []
-        rows: list[tuple[str, dict[str, str]]] = []
-        for tsv in tables:
-            entities = bids_entities(tsv.name)
-            run = f"ses-{entities.get('ses', '?')} {entities.get('task', '')}".strip()
-            try:
-                header, values = read_tsv(tsv)
-            except (OSError, UnicodeDecodeError) as e:
-                header, values = ["Error"], [[f"Couldn't read {tsv.name}: {e}"]]
-            columns += [name for name in header if name not in columns]
-            rows += [(run, dict(zip(header, row, strict=False))) for row in values]
+        columns, rows = motion_rows(tables)
         self.motion_table.clear()
         self.motion_table.setColumnCount(len(columns) + 1)
         self.motion_table.setHorizontalHeaderLabels(["Run", *columns])
@@ -1547,14 +1197,7 @@ class PreprocessWindow(QMainWindow):
     def _show_log(self, subject: str) -> None:
         if self.output_folder is None:
             return
-        console_log = subject_console_log(self.output_folder, subject)
-        try:
-            text = read_log_tail(console_log)
-        except FileNotFoundError:
-            text = "No C-PAC run logged for this subject yet."
-        except OSError as e:
-            text = f"Couldn't read {console_log}: {e}"
-        self.log_text.setPlainText(text)
+        self.log_text.setPlainText(log_text(self.output_folder, subject))
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
@@ -1581,33 +1224,15 @@ class PreprocessWindow(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "Rerun from scratch?",
-                f"This deletes the C-PAC working and output folders of {len(subjects)} "
-                "subject(s) before running them again (logs are kept). Continue?",
+                scratch_question(subjects),
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
         plan = self._plan()
-        warning = parallel_warning(plan, self.docker_gb, self.docker_cpus)
-        if warning is not None and plan.parallel > 1:
-            suggested = self._suggested_plan()
-            answer = QMessageBox.question(
-                self,
-                "More than Docker allows?",
-                f"{warning}\n\nSuggested for this computer: {suggested.parallel} at once x "
-                f"{suggested.n_cpus} CPUs, {suggested.mem_gb:g} GB ('Suggest' fills it in). "
-                "Run anyway?",
-            )
+        if question := overload_question(plan, self._docker_probe(), len(subjects)):
+            answer = QMessageBox.question(self, "More than Docker allows?", question)
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        self.settings.setValue("parallel", plan.parallel)
-        self.settings.setValue("n_cpus", plan.n_cpus)
-        self.settings.setValue("mem_gb", plan.mem_gb)
-        self.settings.setValue("run_mode", mode)
-        hang = self._hang_policy()
-        self.settings.setValue("hang_minutes", int(hang.minutes))
-        self.settings.setValue("hang_action", hang.action)
-        self.settings.setValue("max_restarts", hang.max_restarts)
-        self.settings.setValue("keep_working", self.keep_working_check.isChecked())
         run = RunSettings(
             bids_root=self.bids_folder,
             output_root=self.output_folder,
@@ -1617,9 +1242,10 @@ class PreprocessWindow(QMainWindow):
             mem_gb=plan.mem_gb,
             mode=mode,
             parallel=min(plan.parallel, len(subjects)),
-            hang=hang,
+            hang=self._hang_policy(),
             keep_working=self.keep_working_check.isChecked(),
         )
+        save_choices(self.settings, run, plan)
         self.output_folder.mkdir(parents=True, exist_ok=True)
         self.worker = PreprocessThread(run)
         self.worker.message.connect(self._log_activity)
@@ -1627,12 +1253,7 @@ class PreprocessWindow(QMainWindow):
         self.worker.step.connect(self._on_step)
         self.worker.subject_finished.connect(self._on_subject_finished)
         self.worker.batch_done.connect(self._on_batch_done)
-        what = task_names(run.tasks)
-        at_once = f", {run.parallel} at once" if run.parallel > 1 else ""
-        self._log_activity(
-            f"Preprocessing {len(subjects)} subject(s), {what}{at_once}, "
-            f"{run.n_cpus} CPU(s), {run.mem_gb:g} GB each..."
-        )
+        self._log_activity(start_text(run))
         self.progress.start(len(subjects), self._saved_estimate(), "Checking Docker...")
         self.stop_button.setEnabled(True)
         self.stop_now_button.setEnabled(True)
@@ -1655,15 +1276,14 @@ class PreprocessWindow(QMainWindow):
         )
 
     def _estimate_key(self) -> str:
-        return f"steps_per_subject/{'+'.join(self._tasks()) or 'all'}"
+        return estimate_key(self._tasks())
 
     def _saved_estimate(self) -> int | None:
-        """Steps the last complete run of a subject took (with these tasks), if known."""
-        return int(str(self.settings.value(self._estimate_key(), 0))) or None
+        return saved_estimate(self.settings, self._tasks())
 
     def _on_stop(self) -> None:
         if self.worker is not None:
-            self.worker.stop_requested = True
+            self.worker.job.stop()
             self.stop_button.setEnabled(False)
             self._log_activity("Stopping once the running subject(s) finish...")
 
@@ -1674,9 +1294,7 @@ class PreprocessWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Stop now?",
-            f"Stop the {len(self.running) or 'running'} C-PAC container(s) now and start no "
-            "new subjects? This frees the CPUs and memory. Finished steps are kept: running "
-            "the batch again later resumes each subject where it stopped.",
+            stop_now_question(len(self.running)),
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -1684,7 +1302,7 @@ class PreprocessWindow(QMainWindow):
         self.stop_now_button.setEnabled(False)
         self.progress.set_stage("Stopping...")
         self._log_activity("Stopping the running C-PAC container(s) now...")
-        threading.Thread(target=worker.stop_now, daemon=True).start()  # docker takes ~10 s
+        threading.Thread(target=worker.job.stop_now, daemon=True).start()  # docker takes ~10 s
 
     def _on_subject_started(self, _index: int, _total: int, subject: str) -> None:
         if not self.running:  # re-read: the last subject may have just saved a new count
@@ -1718,14 +1336,8 @@ class PreprocessWindow(QMainWindow):
             QMessageBox.warning(self, "Preprocessing not started", result)
             self._log_activity(result, is_error=True)
         else:
-            stopped = " (stopped early)" if result.stopped else ""
-            self._log_activity(
-                f"Done{stopped}: {len(result.done)} preprocessed, {len(result.skipped)} "
-                f"skipped (already done), {len(result.failed)} failed."
-            )
-            if result.failed:  # each cause was logged as it happened, above
-                failed = ", ".join(f"sub-{subject}" for subject, _why in result.failed)
-                self._log_activity(f"Failed: {failed}", is_error=True)
+            for line, is_error in done_lines(result):
+                self._log_activity(line, is_error)
         self._refresh_roster()
 
     def _log_activity(self, message: str, is_error: bool = False) -> None:
@@ -1757,16 +1369,7 @@ class PreprocessWindow(QMainWindow):
             )
 
     def _update_live_line(self) -> None:
-        lines = []
-        for subject, state in self.running.items():
-            elapsed = int(time.monotonic() - state.started_at)
-            count = f"step {state.steps}"
-            if estimate := self.progress.estimate:
-                percent = min(99, 100 * state.steps // estimate)
-                count += f" of ~{estimate} ({percent}%)"
-            took = f"{elapsed // 60}m{elapsed % 60:02d}s"
-            text = f"{self.progress.spinner} BUSY sub-{subject}: {count}, {took}"
-            lines.append(f"{text} - {state.last_step or 'starting container'}")
+        lines = self.progress.batch.live_lines(self.progress.spinner)
         self._set_live_line("\n".join(lines) or None)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 -- Qt override
@@ -1797,10 +1400,9 @@ class PreprocessWindow(QMainWindow):
             self.setEnabled(False)
             self._log_activity("Stopping C-PAC before closing (up to ~10 s)...")
             QApplication.processEvents()
-            stopped = self.worker.stop_now()
+            stopped = self.worker.job.stop_now()
             if self.output_folder is not None:  # the worker threads won't get to it
-                for subject in stopped:
-                    mark_stopped(subject_console_log(self.output_folder, subject))
+                mark_all_stopped(self.output_folder, stopped)
         # A QThread destroyed while running aborts the process with a crash dialog, and the
         # worker may be blocked on docker for hours: leave at once.
         os._exit(0)

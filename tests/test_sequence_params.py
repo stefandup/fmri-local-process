@@ -154,6 +154,7 @@ def test_csv_export(bids: Path, tmp_path: Path) -> None:
 
 
 def test_page_shows_the_log(bids: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    pytest.importorskip("PySide6")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QApplication

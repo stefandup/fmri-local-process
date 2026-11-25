@@ -14,11 +14,9 @@
   button to fix each where it can be fixed here).
 """
 
-import threading
 from collections import OrderedDict
 from pathlib import Path
 
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPixmap
 from PySide6.QtWidgets import (
@@ -48,72 +46,65 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from fmri_local_process.gui.docker_controls import DOCKER_RECHECK_MS, DockerStatus
+from fmri_local_process.app.colors import (
+    ERROR_COLOR,
+)
+from fmri_local_process.app.docker import DOCKER_RECHECK_MS
+from fmri_local_process.app.mriqc import (
+    DOCKER_LINE,
+    FAILED,
+    FIRST_METRIC_COLUMN,
+    FLAGS_COLUMN,
+    HELP_TEXT,
+    MODALITY_TEXT,
+    OUTLIER_BACKGROUND,
+    QC_COLUMN,
+    RATING_COLORS,
+    RUNNING,
+    STALE_BACKGROUND,
+    STATUS_COLOR,
+    MriqcJob,
+    flags_text,
+    limits_text,
+    make_selection,
+    metric_cells,
+    metric_help,
+    notices,
+    probe_docker,
+    rating_changed,
+    rating_details,
+    rating_text,
+    run_status,
+    save_unticked,
+    saved_unticked,
+    scan_keys,
+    scan_text,
+    steps_estimate,
+    subject_scans,
+    subjects_and_states,
+    view_png,
+)
+from fmri_local_process.app.settings import saved_number
+from fmri_local_process.app.state import QUALITY_CHECKING, VIEW_ONLY
+from fmri_local_process.gui.docker_controls import DockerStatus
 from fmri_local_process.gui.folder_panel import FolderPanel
 from fmri_local_process.gui.image_download import ImageDownload
 from fmri_local_process.gui.image_view import HelpToggle, ZoomableImageView
 from fmri_local_process.gui.qt_common import (
-    ERROR_COLOR,
-    OK_COLOR,
     PROCESS_ACCENT_COLOR,
     PROCESS_ACCENT_HOVER_COLOR,
-    RUNNING_COLOR,
-    UNKNOWN_COLOR,
-    WARNING_COLOR,
     NoticeBanner,
     primary_action_stylesheet,
     style_secondary_label,
     wrap_tooltip,
 )
 from fmri_local_process.gui.run_progress import RunProgress
-from fmri_local_process.gui.toolbox_state import QUALITY_CHECKING, VIEW_ONLY, ToolboxState
+from fmri_local_process.gui.toolbox_state import ToolboxState
 from fmri_local_process.processing import mriqc as mq
-from fmri_local_process.processing import mriqc_views
-from fmri_local_process.processing.cpac_docker import docker_resources, finished_node
 from fmri_local_process.processing.review_mode import packaged_mriqc
 
-OUTLIER_BACKGROUND = "#f5b7b1"
-RATING_COLORS = {1: "#f1948a", 2: "#f9e79f", 3: "#abebc6"}  # black text reads on these
 VIEW_CACHE_SIZE = 24  # drawn scans kept: going back to one is instant
-QC_COLUMN, FLAGS_COLUMN, FIRST_METRIC_COLUMN = 1, 2, 3
-STALE_BACKGROUND = "#f9e79f"
-RUNNING, FAILED = "running", "failed"
-STATUS_COLOR = {
-    RUNNING: RUNNING_COLOR,
-    mq.DONE: OK_COLOR,
-    mq.STALE: WARNING_COLOR,
-    mq.PARTIAL: WARNING_COLOR,
-    mq.NOT_RUN: UNKNOWN_COLOR,
-}
-MODALITY_TEXT = {"bold": "BOLD (functional)", "T1w": "T1w (anatomical)"}
-T1W_SCAN = "T1w"  # the scan list's keys: this, and 'task-<label>' per BOLD task
 SCAN_LIST_HEIGHT = 110
-UNTICKED_SCANS_KEY = "mriqc_unticked_scans"
-# The Docker line for each probe result: (running, why not, warning); '' (unknown) is absent.
-DOCKER_LINE = {
-    mq.DOCKER_MISSING: (False, "it isn't installed (Docker Desktop).", ""),
-    mq.DOCKER_STOPPED: (False, "start it to run MRIQC.", ""),
-    mq.IMAGE_MISSING: (True, "", "Docker is running, but the MRIQC image isn't downloaded yet."),
-    mq.READY: (True, "", ""),
-}
-HELP_TEXT = (
-    "<b>MRIQC</b> measures the quality of each raw BOLD and T1w scan (no preprocessing "
-    "needed), so poor scans are found before hours of C-PAC.<br><br>"
-    "Choose an <b>MRIQC output</b> folder, tick subjects and <b>Run MRIQC</b>. Each subject "
-    "takes about 15-40 minutes. Done subjects are skipped; a subject whose BIDS files changed "
-    "since (trimmed, reconverted) is <b>stale</b> and is run again.<br><br>"
-    "The table groups the runs by subject and session. A <span style='background-color:"
-    f"{OUTLIER_BACKGROUND}; color:black'>&nbsp;highlighted&nbsp;</span> value is an outlier "
-    "among the same kind of scan (same task) in this dataset: more than 1.5 x the "
-    "interquartile range beyond the quartiles, on the worse side (needs 5 or more runs). Hover "
-    "a column header for what the metric means, or <b>Metric formulas...</b> (above the "
-    "table) for how each is calculated, typical values and references.<br><br>"
-    "Select a run to see the scan below (drawn from the BIDS file), then rate it: <b>1 bad "
-    "(discard)</b>, <b>2 unsure</b> or <b>3 keep</b>, with a comment if useful. Ratings are "
-    "saved at once, in toolbox_qc_ratings.tsv in the MRIQC output folder."
-    "<br><br>Nothing leaves this computer: MRIQC's upload of anonymous metrics to its web "
-    "database and its usage tracking are both switched off."
-)
 
 
 class ProbeThread(QThread):
@@ -122,9 +113,7 @@ class ProbeThread(QThread):
     done = Signal(str, str, object, object)  # state, message, CPUs or None, GB or None
 
     def run(self) -> None:
-        state, message, docker = mq.docker_status()
-        mem_gb, cpus = docker_resources(docker) if docker is not None else (None, None)
-        self.done.emit(state, message, cpus, mem_gb)
+        self.done.emit(*probe_docker())
 
 
 class MriqcThread(QThread):
@@ -148,74 +137,31 @@ class MriqcThread(QThread):
         selection: mq.Selection = mq.EVERYTHING,
     ) -> None:
         super().__init__()
-        self.docker, self.bids_root, self.output_root = docker, bids_root, output_root
-        self.subjects, self.n_procs, self.mem_gb = subjects, n_procs, mem_gb
-        self.selection = selection
-        self.stop_requested = False
-        self.current: str | None = None
-        self.steps = 0
+        self.job = MriqcJob(
+            docker, bids_root, output_root, subjects, n_procs, mem_gb, selection, listener=self
+        )
 
     def run(self) -> None:
-        done, failed = [], []
-        for number, subject in enumerate(self.subjects, start=1):
-            if self.stop_requested:
-                break
-            self.current, self.steps = subject, 0
-            self.message.emit(f"sub-{subject} ({number} of {len(self.subjects)}): started", False)
-            self.subject_started.emit(subject)
-            try:
-                failure = mq.run_subject(
-                    self.docker,
-                    self.bids_root,
-                    self.output_root,
-                    subject,
-                    self.n_procs,
-                    self.mem_gb,
-                    self.on_line,
-                    selection=self.selection,
-                )
-            except OSError as e:
-                failure = str(e)
-            self.current = None
-            if failure is not None and self.stop_requested:
-                failure = "stopped by you; running it again starts it afresh"
-            if failure is None:
-                done.append(subject)
-                self.message.emit(f"sub-{subject}: done", False)
-            else:
-                failed.append(subject)
-                self.message.emit(f"sub-{subject}: FAILED: {failure}", True)
-            self.subject_done.emit(subject, failure or "")
-        if done and not self.stop_requested:
-            self.message.emit("Group step: summary tables and group reports...", False)
-            self.stage.emit("Group step: summary tables and group reports...")
-            log_path = self.output_root / mq.TOOLBOX_LOGS / "mriqc_group.txt"
-            command = mq.build_group_command(self.docker, self.bids_root, self.output_root)
-            try:
-                code = mq.run_logged(command, log_path)
-            except OSError as e:
-                code, log_path = -1, Path(str(e))
-            if code != 0:
-                self.message.emit(f"Group step FAILED: {mq.explain_failure(log_path, code)}", True)
-        stopped = " (stopped)" if self.stop_requested else ""
-        self.all_done.emit(f"MRIQC finished{stopped}: {len(done)} done, {len(failed)} failed.")
+        self.job.run()
 
-    def on_line(self, line: str) -> None:
-        """MRIQC is a nipype pipeline like C-PAC: count its finished steps the same way."""
-        node = finished_node(line)
-        if node is not None and self.current is not None:
-            self.steps += 1
-            self.step.emit(self.current, self.steps, node.rsplit(".", 1)[-1])
+    # The MriqcListener methods: each call becomes a signal, queued to the GUI thread.
+    def on_message(self, text: str, is_error: bool, /) -> None:
+        self.message.emit(text, is_error)
 
-    def stop(self) -> None:
-        """Start no more subjects and stop the running container (in the background: docker
-        takes up to ~10 s)."""
-        self.stop_requested = True
-        if self.current is not None:
-            name = mq.container_name(self.current)
-            threading.Thread(
-                target=mq.stop_container, args=(self.docker, name), daemon=True
-            ).start()
+    def on_subject_started(self, subject: str, /) -> None:
+        self.subject_started.emit(subject)
+
+    def on_step(self, subject: str, steps: int, node: str, /) -> None:
+        self.step.emit(subject, steps, node)
+
+    def on_subject_done(self, subject: str, failure: str, /) -> None:
+        self.subject_done.emit(subject, failure)
+
+    def on_stage(self, text: str, /) -> None:
+        self.stage.emit(text)
+
+    def on_all_done(self, summary: str, /) -> None:
+        self.all_done.emit(summary)
 
 
 class RenderThread(QThread):
@@ -228,18 +174,9 @@ class RenderThread(QThread):
         self.key, self.path, self.modality = key, path, modality
 
     def run(self) -> None:
-        try:
-            figure = mriqc_views.run_figure(self.path, self.modality)
-        except (mriqc_views.ViewError, MemoryError) as e:
-            self.done.emit(self.key, None, str(e))
-            return
-        # Agg draws off the GUI thread; a QImage (unlike a QPixmap) may be made here.
-        figure.set_dpi(100)
-        canvas = FigureCanvasAgg(figure)
-        canvas.draw()
-        width, height = canvas.get_width_height()
-        image = QImage(canvas.buffer_rgba(), width, height, QImage.Format.Format_RGBA8888)
-        self.done.emit(self.key, image.copy(), "")  # copy: the buffer dies with the canvas
+        data, error = view_png(self.path, self.modality)
+        # A QImage (unlike a QPixmap) may be made off the GUI thread.
+        self.done.emit(self.key, QImage.fromData(data) if data is not None else None, error)
 
 
 class MriqcPage(QWidget):
@@ -253,8 +190,7 @@ class MriqcPage(QWidget):
         self.statuses: dict[str, str] = {}
         self.unticked: set[str] = set()
         # Untick-list rather than tick-list (as on Preprocess): new tasks start ticked.
-        saved = str(state.settings.value(UNTICKED_SCANS_KEY, "") or "")
-        self.unticked_scans: set[str] = set(filter(None, saved.split(",")))
+        self.unticked_scans: set[str] = saved_unticked(state.settings)
         self.runs: list[mq.RunIqms] = []
         self.unreadable: list[str] = []
         self.docker_state = ""  # "" until the probe answers
@@ -429,10 +365,7 @@ class MriqcPage(QWidget):
         )
 
     def saved_number(self, key: str, default: float) -> float:
-        try:
-            return float(str(self.state.settings.value(key, default)))
-        except ValueError:
-            return default
+        return saved_number(self.state.settings, key, default)
 
     def _build_subjects(self) -> QWidget:
         panel = QWidget()
@@ -632,16 +565,11 @@ class MriqcPage(QWidget):
     # ---- which scans ---------------------------------------------------------------------------
 
     def fill_scan_list(self) -> None:
-        bids_root = self.state.folder("bids")
-        keys = []
-        if bids_root is not None and bids_root.is_dir():
-            keys = [T1W_SCAN] if mq.has_t1w(bids_root) else []
-            keys += [f"task-{task}" for task in mq.bids_tasks(bids_root)]
+        keys = scan_keys(self.state.folder("bids"))
         self.scan_list.blockSignals(True)
         self.scan_list.clear()
         for key in keys:
-            text = "T1w (anatomical)" if key == T1W_SCAN else f"{key} (BOLD)"
-            item = QListWidgetItem(text)
+            item = QListWidgetItem(scan_text(key))
             item.setData(Qt.ItemDataRole.UserRole, key)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             ticked = key not in self.unticked_scans
@@ -655,12 +583,7 @@ class MriqcPage(QWidget):
 
     def selection(self) -> mq.Selection:
         """The ticked scans; every BOLD task ticked counts as all tasks (new ones too)."""
-        tasks = [key for key in self.scan_keys() if key.startswith("task-")]
-        ticked = [key.removeprefix("task-") for key in tasks if key not in self.unticked_scans]
-        return mq.Selection(
-            t1w=T1W_SCAN not in self.unticked_scans,
-            tasks=None if len(ticked) == len(tasks) else tuple(ticked),
-        )
+        return make_selection(self.scan_keys(), self.unticked_scans)
 
     def on_scan_ticked(self, item: QListWidgetItem) -> None:
         key = str(item.data(Qt.ItemDataRole.UserRole))
@@ -678,21 +601,14 @@ class MriqcPage(QWidget):
         self.fill_subjects()
 
     def save_scan_ticks(self) -> None:
-        self.state.settings.setValue(UNTICKED_SCANS_KEY, ",".join(sorted(self.unticked_scans)))
+        save_unticked(self.state.settings, self.unticked_scans)
 
     # ---- subjects ------------------------------------------------------------------------------
 
     def fill_subjects(self) -> None:
         bids_root, output_root = self.state.folder("bids"), self.state.folder("mriqc")
         selection = self.selection()
-        self.subjects = (
-            mq.bids_subjects(bids_root, selection) if bids_root and bids_root.is_dir() else []
-        )
-        self.statuses = {
-            subject: mq.subject_state(bids_root, output_root, subject, selection)
-            for subject in self.subjects
-            if bids_root is not None
-        }
+        self.subjects, self.statuses = subjects_and_states(bids_root, output_root, selection)
         table = self.subject_table
         table.blockSignals(True)
         table.setRowCount(len(self.subjects))
@@ -746,8 +662,7 @@ class MriqcPage(QWidget):
         )
         header = self.tree.headerItem()
         for column, metric in enumerate(metrics, start=FIRST_METRIC_COLUMN):
-            better = f" ({metric.better} is better)" if metric.better else ""
-            header.setToolTip(column, wrap_tooltip(metric.help + better))
+            header.setToolTip(column, wrap_tooltip(metric_help(metric)))
         header.setToolTip(QC_COLUMN, "Your verdict on the run: 1 bad (discard), 2 unsure, 3 keep.")
         header.setToolTip(FLAGS_COLUMN, "How many of the run's metrics are outliers (or 'stale').")
         black = QColor("black")
@@ -766,10 +681,7 @@ class MriqcPage(QWidget):
                     if self.flagged_only.isChecked() and not flagged:
                         continue
                     session_flags += len(flagged)
-                    note = f"{len(flagged)} outlier(s)" if flagged else ""
-                    if run.state == mq.STALE:
-                        note = ", ".join(filter(None, [note, "stale"]))
-                    run_item = QTreeWidgetItem([run.label, "", note])
+                    run_item = QTreeWidgetItem([run.label, "", flags_text(run, flagged)])
                     run_item.setData(0, Qt.ItemDataRole.UserRole, run.name)
                     run_item.setToolTip(0, run.name)
                     self.show_rating_in(run_item, self.ratings.get(run.name))
@@ -781,10 +693,10 @@ class MriqcPage(QWidget):
                         run_item.setToolTip(
                             FLAGS_COLUMN, "The BIDS file changed since MRIQC ran: rerun."
                         )
-                    for column, metric in enumerate(metrics, start=FIRST_METRIC_COLUMN):
-                        value = run.values.get(metric.key)
-                        run_item.setText(column, "" if value is None else f"{value:.3g}")
-                        if metric.key in flagged:
+                    cells = metric_cells(run, modality)
+                    for column, (key, text) in enumerate(cells, start=FIRST_METRIC_COLUMN):
+                        run_item.setText(column, text)
+                        if key in flagged:
                             run_item.setBackground(column, QColor(OUTLIER_BACKGROUND))
                             run_item.setForeground(column, black)
                             run_item.setToolTip(
@@ -812,53 +724,27 @@ class MriqcPage(QWidget):
 
     @staticmethod
     def show_rating_in(item: QTreeWidgetItem, rating: mq.QcRating | None) -> None:
-        item.setText(QC_COLUMN, rating.text if rating else "")
-        tip = ""
-        if rating is not None:
-            who = ", ".join(filter(None, [rating.rater, rating.date.replace("T", " ")]))
-            tip = "\n".join(filter(None, [rating.comment, f"({who})" if who else ""]))
-        item.setToolTip(QC_COLUMN, tip)
+        item.setText(QC_COLUMN, rating_text(rating))
+        item.setToolTip(QC_COLUMN, rating_details(rating) if rating is not None else "")
         if rating is not None and rating.rating in RATING_COLORS:
             item.setBackground(QC_COLUMN, QColor(RATING_COLORS[rating.rating]))
             item.setForeground(QC_COLUMN, QColor("black"))
         else:
             item.setData(QC_COLUMN, Qt.ItemDataRole.BackgroundRole, None)
             item.setData(QC_COLUMN, Qt.ItemDataRole.ForegroundRole, None)
-        if rating is not None and rating.comment and not rating.rating:
-            item.setText(QC_COLUMN, "comment only")
 
     def notices(self) -> list[str]:
         """What is missing, most basic first."""
-        bids_root, output_root = self.state.folder("bids"), self.state.folder("mriqc")
-        messages = []
-        if bids_root is None:
-            messages.append("No BIDS folder chosen: choose it on the Setup & Convert to BIDS tab.")
-        elif not self.scan_keys():
-            messages.append(
-                f"No BOLD or T1w scans in {bids_root}: convert the DICOMs on the Setup & "
-                "Convert to BIDS tab first."
-            )
-        elif self.selection().empty or not self.subjects:
-            messages.append("No scans ticked: tick the scans MRIQC should check (left).")
-        if output_root is None:
-            messages.append(
-                "No MRIQC output folder chosen: Browse for one above; MRIQC writes its reports "
-                "there."
-            )
-        elif not self.runs and not mq.has_results(output_root):
-            todo = "" if self.results_only() else " yet: tick subjects and Run MRIQC"
-            messages.append(f"No MRIQC results in {output_root}{todo}.")
-        elif not self.runs:
-            modality = MODALITY_TEXT[str(self.modality_box.currentData())]
-            messages.append(f"No MRIQC results for {modality} scans in {output_root}.")
-        if self.unreadable:
-            messages.append(
-                f"{len(self.unreadable)} MRIQC result file(s) couldn't be read: "
-                + "; ".join(self.unreadable[:3])
-            )
-        if self.docker_message and not self.results_only():
-            messages.append(self.docker_message)
-        return messages
+        return notices(
+            self.state,
+            self.scan_keys(),
+            self.selection().empty or not self.subjects,
+            self.runs,
+            self.unreadable,
+            str(self.modality_box.currentData()),
+            self.results_only(),
+            self.docker_message,
+        )
 
     def update_notices(self) -> None:
         self.banner.set_messages(self.notices())
@@ -890,14 +776,8 @@ class MriqcPage(QWidget):
         self.scan_list.setEnabled(not running)
         self.download.set_locked("MRIQC is running" if running else "")
         if not running:
-            if reason:
-                self.run_status.setText(f"Locked: {reason}.")
-            elif self.docker_state == "":
-                self.run_status.setText("Checking Docker...")
-            elif self.ticked_subjects() and not self.to_run():
-                self.run_status.setText("Every ticked subject is done (tick 'Redo' to rerun).")
-            else:
-                self.run_status.setText(f"{len(self.to_run())} subject(s) to run.")
+            ticked, to_run = len(self.ticked_subjects()), len(self.to_run())
+            self.run_status.setText(run_status(reason, self.docker_state, ticked, to_run))
 
     # ---- Docker --------------------------------------------------------------------------------
 
@@ -943,18 +823,8 @@ class MriqcPage(QWidget):
         self.memory.setValue(mem_gb)
 
     def update_limits_label(self) -> None:
-        if self.docker_cpus is None and self.docker_gb is None:
-            self.limits_label.setText("Docker's CPU and memory limits not known yet.")
-            return
-        cpus = f"{self.docker_cpus} CPUs" if self.docker_cpus else "? CPUs"
-        memory = f"{self.docker_gb:.1f} GB" if self.docker_gb else "? GB"
-        suggested = mq.suggest_resources(self.docker_cpus, self.docker_gb)
-        note = (
-            ""
-            if (self.cpus.value(), self.memory.value()) == suggested
-            else f" Suggested: {suggested[0]} CPUs, {suggested[1]:g} GB."
-        )
-        self.limits_label.setText(f"Docker allows {cpus}, {memory}.{note}")
+        chosen = (self.cpus.value(), self.memory.value())
+        self.limits_label.setText(limits_text(self.docker_cpus, self.docker_gb, chosen))
 
     def recheck_docker(self) -> None:
         """The timer's quiet re-check: not while Docker is being started or restarted."""
@@ -1027,16 +897,11 @@ class MriqcPage(QWidget):
         self.worker.start()
         self.update_controls()
 
-    # A subject's MRIQC run takes about the same number of steps per scan each time, so the
-    # bar's estimate is the last complete run's steps per scan x this subject's scans.
-
     def subject_scans(self, subject: str) -> int:
-        bids_root = self.state.folder("bids")
-        return len(mq.bids_scans(bids_root, subject, self.selection())) if bids_root else 0
+        return subject_scans(self.state.folder("bids"), subject, self.selection())
 
     def estimate_for(self, subject: str) -> int | None:
-        per_scan = self.saved_number("mriqc_steps_per_scan", 0)
-        return round(per_scan * self.subject_scans(subject)) or None
+        return steps_estimate(self.state.settings, self.subject_scans(subject))
 
     def on_subject_started(self, subject: str) -> None:
         self.progress.estimate = self.estimate_for(subject)
@@ -1082,7 +947,7 @@ class MriqcPage(QWidget):
         if self.worker is not None:
             self.log("Stopping MRIQC...")
             self.progress.set_stage("Stopping...")
-            self.worker.stop()
+            self.worker.job.stop()
 
     def log(self, text: str, error: bool = False) -> None:
         self.activity.appendPlainText(f"ERROR  {text}" if error else text)
@@ -1102,9 +967,7 @@ class MriqcPage(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return False
-        self.worker.stop_requested = True
-        if self.worker.current is not None:
-            mq.stop_container(self.worker.docker, mq.container_name(self.worker.current))
+        self.worker.job.stop_and_wait()
         return True
 
     # ---- results -------------------------------------------------------------------------------
@@ -1222,9 +1085,7 @@ class MriqcPage(QWidget):
         rating = value if value in mq.RATINGS else None
         comment = self.comment.text().strip()
         old = self.ratings.get(run)
-        if old is not None and (old.rating, old.comment) == (rating, comment):
-            return
-        if old is None and rating is None and not comment:
+        if not rating_changed(old, rating, comment):
             return
         try:
             saved = mq.save_rating(output_root, run, rating, comment)

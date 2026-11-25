@@ -128,6 +128,7 @@ def test_check_runs_finds_the_series_and_the_missing_image(folders: tuple[Path, 
 
 
 def test_box_shows_the_results(folders: tuple[Path, Path]) -> None:
+    pytest.importorskip("PySide6")
     from PySide6.QtWidgets import QApplication
 
     from fmri_local_process.gui.dicom_volumes_box import COLUMNS, DicomVolumesBox

@@ -13,13 +13,13 @@ from PySide6.QtTest import QTest  # noqa: E402 -- needs QT_QPA_PLATFORM set firs
 from PySide6.QtWidgets import QApplication  # noqa: E402
 from test_behav_match import emo_log  # noqa: E402 -- synthetic Presentation logs
 
-from fmri_local_process.gui.behav_logs_dialog import (  # noqa: E402
+from fmri_local_process.app.behav import (  # noqa: E402
     S_LOGS,
     S_NOTES,
     S_RESOLVED,
     S_SESSION,
-    BehavLogsPanel,
 )
+from fmri_local_process.gui.behav_logs_dialog import BehavLogsPanel  # noqa: E402
 from fmri_local_process.processing import behav_match as bm  # noqa: E402
 
 SESSION_DIRS = ("20240403_X_P001", "20240505_X_P002")
@@ -136,7 +136,7 @@ def test_select_several_logs_and_mark_them_crosschecked(tmp_path: Path) -> None:
 
 
 def test_select_several_scan_sessions_and_mark_them_crosschecked(tmp_path: Path) -> None:
-    from fmri_local_process.gui.behav_logs_dialog import S_CHECKED
+    from fmri_local_process.app.behav import S_CHECKED
     from fmri_local_process.processing import philani_bids as pb
 
     dialog, bids, _ = open_dialog(tmp_path)
@@ -158,18 +158,18 @@ def test_select_several_scan_sessions_and_mark_them_crosschecked(tmp_path: Path)
     dialog.save()
     assert pb.read_crosschecked_folders(bids) == {SESSION_DIRS[1]}
     reopened = BehavLogsPanel(bids, tmp_path / "behav", tmp_path / "dicom", None)
-    assert reopened.checked_folders == {SESSION_DIRS[1]}  # read back from the BIDS folder
+    assert reopened.work.fixes.checked == {SESSION_DIRS[1]}  # read back from the BIDS folder
 
 
 def test_export_destinations_and_into_bids_leaves_unplaced_out(tmp_path: Path) -> None:
-    from fmri_local_process.gui.behav_logs_dialog import INTO_BIDS, INTO_OTHER, INTO_OUTPUT
+    from fmri_local_process.app.behav import INTO_BIDS, INTO_OTHER, INTO_OUTPUT
     from fmri_local_process.processing.behav_export import BIDS_LAYOUT, export_events
 
     dialog, bids, _ = open_dialog(tmp_path)
     assert list(dialog.export_destinations().values()) == [INTO_BIDS, INTO_OTHER]
-    dialog.output_root = tmp_path / "cpac_out"
+    dialog.work.output_root = tmp_path / "cpac_out"
     assert list(dialog.export_destinations().values()) == [INTO_BIDS, INTO_OUTPUT, INTO_OTHER]
-    dialog.bids_locked = True  # view-only package
+    dialog.work.bids_locked = True  # view-only package
     assert INTO_BIDS not in dialog.export_destinations().values()
 
     # GOOD and RESTART are rival logs for one session: neither placed yet.
@@ -310,7 +310,7 @@ def test_scan_sessions_tab_corrects_a_folder_date_and_sets_a_session(tmp_path: P
     date_edit.setText("2024-05-06")
     session_edit.setText("2")  # e.g. the first visit is missing
     dialog.recheck()
-    session = next(s for s in dialog.sessions if s.folder == p002)
+    session = next(s for s in dialog.work.sessions if s.folder == p002)
     assert (session.date.isoformat(), session.label) == ("2024-05-06", "2")
     assert table.item(row, S_SESSION).text() == session.name  # pyright: ignore[reportOptionalMemberAccess]
 

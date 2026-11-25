@@ -6,7 +6,6 @@ and corrections saved on the other tabs (IDs, logs, deleted sessions) are applie
 """
 
 import logging
-from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
@@ -29,17 +28,32 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fmri_local_process.app.colors import WARNING_COLOR
+from fmri_local_process.app.convert import (
+    DEFACER_WARNINGS,
+    DOCKER_STOPPED,
+    HELP_TEXT,
+    MAX_SESSIONS,
+    PACKAGE_LOGGER,
+    ConvertJob,
+    LineHandler,
+    check_defacer,
+    replay,
+    report_lines,
+    report_rows,
+    restore_question,
+    setup_notices,
+)
+from fmri_local_process.app.state import CONVERTING
 from fmri_local_process.gui.backup_box import BackupBox
 from fmri_local_process.gui.docker_controls import DockerControlThread
 from fmri_local_process.gui.folder_panel import FolderPanel
 from fmri_local_process.gui.image_view import HelpToggle
 from fmri_local_process.gui.qt_common import (
-    ERROR_COLOR,
     HOME_BASE_ACCENT_COLOR,
     PROCESS_ACCENT_COLOR,
     PROCESS_ACCENT_HOVER_COLOR,
     RAW_ACCENT_COLOR,
-    WARNING_COLOR,
     NoticeBanner,
     accent_group_box_stylesheet,
     primary_action_stylesheet,
@@ -47,43 +61,17 @@ from fmri_local_process.gui.qt_common import (
     wrap_tooltip,
 )
 from fmri_local_process.gui.scan_rules_dialog import ScanRulesDialog
-from fmri_local_process.gui.toolbox_state import CONVERTING, ToolboxState
+from fmri_local_process.gui.toolbox_state import ToolboxState
 from fmri_local_process.processing.crosscheck import (
     read_expected_sessions,
-    replay_decisions,
     write_expected_sessions,
 )
 from fmri_local_process.processing.crosscheck_backup import restore_backup
-from fmri_local_process.processing.dcm2niix import (
-    Dcm2niixNotFoundError,
-    find_dcm2niix,
-    run_dcm2niix,
-)
-from fmri_local_process.processing.deface import (
-    DefaceUnavailableError,
-    DockerNeededError,
-    make_deface,
-)
-from fmri_local_process.processing.philani_bids import ConversionReport, convert_dicom_root
-
-PACKAGE_LOGGER = "fmri_local_process"
-MAX_SESSIONS = 20
+from fmri_local_process.processing.philani_bids import ConversionReport
 
 
 class LogEmitter(QObject):
     line = Signal(str)
-
-
-class QtLogHandler(logging.Handler):
-    """Relays the converter's log records to the activity pane (thread-safe via a signal)."""
-
-    def __init__(self, emitter: LogEmitter) -> None:
-        super().__init__(logging.INFO)
-        self.emitter = emitter
-        self.setFormatter(logging.Formatter("%(levelname)s  %(message)s"))
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.emitter.line.emit(self.format(record))
 
 
 class DefacerProbe(QThread):
@@ -92,23 +80,7 @@ class DefacerProbe(QThread):
     done = Signal(str, str)  # why not ("" when one was found), DOCKER_* when Docker is why
 
     def run(self) -> None:
-        try:
-            make_deface()
-        except DockerNeededError as e:
-            self.done.emit(str(e), DOCKER_STOPPED if e.installed else DOCKER_MISSING)
-            return
-        except (DefaceUnavailableError, OSError) as e:
-            self.done.emit(str(e), "")
-            return
-        self.done.emit("", "")
-
-
-DOCKER_STOPPED, DOCKER_MISSING = "stopped", "missing"
-DEFACER_WARNINGS = {
-    DOCKER_STOPPED: "⚠ Docker isn't running: can't check for the defacer",
-    DOCKER_MISSING: "⚠ Docker not installed: T1w won't be defaced",
-    "": "⚠ No defacer: T1w won't be defaced",
-}
+        self.done.emit(*check_defacer())
 
 
 class ConvertThread(QThread):
@@ -117,101 +89,13 @@ class ConvertThread(QThread):
 
     def __init__(self, dicom_root: Path, bids_root: Path, behav_root: Path | None, deface: bool):
         super().__init__()
-        self.dicom_root, self.bids_root, self.behav_root = dicom_root, bids_root, behav_root
-        self.deface = deface
+        # progress: queued to the GUI thread
+        self.job = ConvertJob(dicom_root, bids_root, behav_root, deface, self.progress.emit)
 
     def run(self) -> None:
-        try:
-            exe = find_dcm2niix()
-            deface = make_deface() if self.deface else None
-            report = convert_dicom_root(
-                self.dicom_root,
-                self.bids_root,
-                partial(run_dcm2niix, exe),
-                deface,
-                self.behav_root,
-                progress=self.progress.emit,  # queued to the GUI thread
-            )
-        except (Dcm2niixNotFoundError, DefaceUnavailableError, OSError, ValueError) as e:
-            self.done.emit(str(e))
-            return
-        self.done.emit(report)
+        self.done.emit(self.job.run())
 
 
-def report_rows(report: ConversionReport) -> list[tuple[str, int, str]]:
-    """(what, how many, colour) for the summary table, as the CLI prints it."""
-    return [
-        ("converted / updated", len(report.converted), ""),
-        ("repeated runs to pick at Crosscheck", len(report.to_pick), WARNING_COLOR),
-        ("logs not placed in a session", len(report.unplaced), WARNING_COLOR),
-        ("sessions renumbered", len(report.renumbered), WARNING_COLOR),
-        ("converted from incomplete data", len(report.flagged), WARNING_COLOR),
-        ("missing behavioural logs", len(report.missing), WARNING_COLOR),
-        ("skipped sessions (>1 GB, done)", len(report.skipped), ""),
-        ("sessions left out (deleted at Crosscheck)", len(report.excluded), ""),
-        ("sessions with no recognised scans", len(report.no_scans), WARNING_COLOR),
-        ("failed", len(report.failures), ERROR_COLOR),
-    ]
-
-
-def report_lines(report: ConversionReport) -> list[str]:
-    lines = [f"INCOMPLETE  {what}: {why}" for what, why in report.flagged]
-    lines += [f"RENUMBERED  {change}" for change in report.renumbered]
-    lines += [f"LEFT OUT  {folder} (deleted at Crosscheck)" for folder in report.excluded]
-    lines += [
-        f"NO SCANS  {folder}: no series folder matches a scan rule (found: {found})"
-        for folder, found in report.no_scans
-    ]
-    lines += [f"NOT PLACED  {key}: {why} -- see Behaviour logs" for key, why in report.unplaced]
-    lines += [f"MISSING  {what} log" for what in report.missing]
-    lines += [f"FAILED  {what}: {why}" for what, why in report.failures]
-    return lines
-
-
-def has_subfolders(folder: Path) -> bool:
-    try:
-        return any(child.is_dir() for child in folder.iterdir())
-    except OSError:  # gone, or (OneDrive) not synced
-        return False
-
-
-def setup_notices(state: ToolboxState) -> list[str]:
-    """What the Setup tab is missing: folders not chosen, or a DICOM folder with no sessions."""
-    dicom, behav, bids = (state.folder(key) for key in ("dicom", "behav", "bids"))
-    messages = []
-    if dicom is None:
-        messages.append("No DICOM sessions folder chosen: Browse for it above.")
-    elif not has_subfolders(dicom):
-        messages.append(f"No session folders in {dicom}: nothing to convert.")
-    if behav is None:
-        messages.append(
-            "No behavioural logs folder chosen: the BOLD runs get no events files "
-            "(Browse for it above if this study has logs)."
-        )
-    if bids is None:
-        messages.append("No BIDS folder chosen: Browse for the folder to convert into.")
-    return messages
-
-
-HELP_TEXT = (
-    "<b>Setup & Convert to BIDS</b><br>"
-    "Choose the raw folders on the left and the BIDS folder they are converted into on the "
-    "right; every tab works on these folders, and they are remembered.<br><br>"
-    "<b>DICOM sessions (raw)</b>: one folder per scan session, named "
-    "&lt;YYYYMMDD&gt;_&lt;time&gt;_&lt;subject ID&gt;. <b>Behavioural logs (raw)</b> "
-    "(optional): the top folder of the logs; every .log below it is found, its task from "
-    "'cogreappraisal' / 'emolabeling' in its path. Raw folders are only read, never changed."
-    "<br><br>"
-    "<b>Convert to BIDS</b> puts every session into its ses-&lt;n&gt; in date order, with the "
-    "logs' events. Re-running is safe: existing files are kept, deleted ones are recreated "
-    "from the raw data, and the corrections saved on the other tabs (IDs, logs, deleted "
-    "sessions) are applied. Each scan is converted in a temporary folder and only moved into "
-    "BIDS once it (and its defacing) worked.<br><br>"
-    "<b>Scan rules...</b>: which DICOM series folders become which BIDS scan (the Philani "
-    "protocol names, plus your own, e.g. a clinical scan's t1_mprage as the T1w).<br><br>"
-    "<b>Sessions per subject</b>: how many visits this study has; a subject with more is "
-    "flagged ⊕ on the BIDS Crosscheck tab, so a dud visit stands out."
-)
 ARROW_POINT_SIZE = 40
 
 
@@ -225,7 +109,7 @@ class ConvertPage(QWidget):
         self.convert_thread: ConvertThread | None = None
         self.emitter = LogEmitter()
         self.emitter.line.connect(self.log_line)
-        self.log_handler = QtLogHandler(self.emitter)
+        self.log_handler = LineHandler(self.emitter.line.emit)  # queued: thread-safe
 
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
@@ -519,20 +403,8 @@ class ConvertPage(QWidget):
         if reason := self.state.lock_reason():
             QMessageBox.information(self, "Not now", f"Can't restore now: {reason}.")
             return
-        has_sessions = any(bids_root.glob("sub-*/ses-*"))
-        warning = (
-            "\n\nThis BIDS folder already has converted sessions. Restore is meant for an "
-            "empty or freshly made BIDS folder: its own corrections, notes and settings are "
-            "replaced by the saved ones."
-            if has_sessions
-            else ""
-        )
         answer = QMessageBox.question(
-            self,
-            "Restore crosscheck",
-            f"Restore the crosscheck saved in {backup}?\n\nIts corrections, deleted sessions, "
-            "notes and settings go back into the BIDS folder, everything is converted again "
-            "from raw, and then the kept runs and trims are replayed." + warning,
+            self, "Restore crosscheck", restore_question(backup, bids_root)
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -550,17 +422,11 @@ class ConvertPage(QWidget):
         bids_root = self.state.folder("bids")
         if bids_root is None:
             return
-        applied, unresolved = replay_decisions(bids_root)
-        for line in applied:
-            self.log_line(f"REPLAYED  {line}")
-        for line in unresolved:
-            self.log_line(f"NOT REPLAYED  {line}")
-        text = f"Restore finished: {len(applied)} kept run(s) / trim(s) replayed."
-        if unresolved:
-            text += f"\n{len(unresolved)} could not be (see the Activity Log)."
-            QMessageBox.warning(self, "Restore finished", text)
-        else:
-            QMessageBox.information(self, "Restore finished", text)
+        lines, text, complete = replay(bids_root)
+        for line in lines:
+            self.log_line(line)
+        box = QMessageBox.information if complete else QMessageBox.warning
+        box(self, "Restore finished", text)
 
     def on_expected_sessions(self, sessions: int) -> None:
         bids_root = self.state.folder("bids")
