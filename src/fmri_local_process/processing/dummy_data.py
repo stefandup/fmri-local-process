@@ -14,6 +14,7 @@ found, the output is deleted and nothing is left behind.
 
 import datetime as dt
 import logging
+import os
 import random
 import re
 import shutil
@@ -216,8 +217,8 @@ class StudyCopy:
         target.mkdir(parents=True)
         report.sessions += 1
         listings: dict[tuple[str, ...], int] = {}  # copies of a series keep equal file names
-        for real in [folder, *sorted(d for d in folder.rglob("*") if d.is_dir())]:
-            names = tuple(sorted(f.name for f in real.iterdir() if f.is_file()))
+        # One listing per folder: asking about each image is very slow on a network or Windows disk.
+        for real, names in sorted((Path(d), tuple(sorted(f))) for d, _, f in os.walk(folder)):
             if not names:
                 continue
             relative = [
