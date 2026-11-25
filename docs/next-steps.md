@@ -197,6 +197,40 @@ The Windows checkout stays as it is for the toolbox window and the Windows build
 | Everything in one go | One merge | The branch drifts from `master` while the window keeps changing |
 | Only phase A | Lowest risk | Nothing new to use yet |
 
+## Next: when the connection drops
+
+**Now:** jobs belong to the program that started them (`fmri_tui`, or `fmri_convert_to_bids`,
+`fmri_preprocess` and `fmri_mriqc`), and it doesn't reconnect to them. In `tmux` it keeps running when
+the connection drops (`tmux attach` returns to it). Without `tmux` it ends with the terminal, and:
+
+| Job | When the terminal goes | When started again |
+|---|---|---|
+| Convert to BIDS | Stops: it runs inside the program | Finished scans are kept; the one it was on is redone |
+| Defacing | Stops with the conversion; its container may finish on its own | Done again by Convert |
+| C-PAC | Running containers should carry on, unwatched; the rest of the batch doesn't start | Once they are done, run the batch again: unfinished subjects reuse their finished steps |
+| MRIQC | The running container should carry on; no further subjects start | Finished subjects are skipped |
+
+- A C-PAC subject rerun while its container is still running is reported as failed (the container's
+  name is taken). `docker ps` shows what is running.
+- The program writes the jobs' console logs, so these stop at the disconnect.
+- A shutdown or reboot ends everything, `tmux` included.
+
+Tested on 25 November 2026 in WSL, with stand-in containers and by closing the terminal: in `tmux`, the
+app and the containers kept running; without a terminal, the app ended and the containers stayed.
+**Not tested:** real C-PAC, MRIQC or defacer containers, the command-line tools, and the real server.
+The "when started again" column is from the code.
+
+| Option | Pros | Cons |
+|---|---|---|
+| **Run it in `tmux` (as now; recommended)** | Nothing to build; covers every job | Has to be remembered; may need `sudo apt install tmux` |
+| **Warn when `fmri_tui` starts over SSH without `tmux`** (small; worth adding) | Catches the forgotten `tmux` | Only a warning; `screen` has to count too |
+| Reconnect to containers still running | C-PAC and MRIQC are watched again after a disconnect | More code; the batch's queue has to be saved and continued; doesn't help Convert; `tmux` already covers it |
+
+To do:
+
+1. Try a disconnect on the real server with C-PAC and MRIQC, with and without `tmux`.
+2. Decide on the warning. Build the reconnecting only if `tmux` turns out not to be enough.
+
 ## Not in this branch: HPC runner
 
 From the [Roadmap](roadmap.md): a container runner (Docker or Apptainer: mounts, stopping,
