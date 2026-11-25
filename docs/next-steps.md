@@ -2,7 +2,7 @@
 
 The plan for the branch `headless-tui`, and the choices behind it. It expands the
 [Roadmap](roadmap.md) items *Terminal version of the toolbox* and *C-PAC on the HPC*.
-Nothing here is built yet.
+Nothing here is built yet, apart from the toy.
 
 ## Why
 
@@ -26,6 +26,36 @@ feature, so that should be easy to do and hard to forget.
 - `gui/` is about 9,800 lines over 25 files; `preprocess_gui.py` (1,800) and
   `behav_logs_dialog.py` (1,300) are the biggest.
 
+## Running it (agreed 25 November 2026)
+
+`master` is merged into this branch. The work continues in WSL Ubuntu, with as much as possible
+done in one overnight run and tweaks the next day.
+
+1. **Set up WSL** (Decision 4): clone onto WSL's own disk, `uv` for Python (Ubuntu 26.04 has
+   only Python 3.14 and no `ensurepip`; the Windows `.venv` is on 3.13), and copy
+   `safe_data_source/` over, as it isn't in git. Two environments: one with PySide6, to
+   run the window's tests without a screen (`QT_QPA_PLATFORM=offscreen`), and one without
+   Qt, for everything else. Run the tests before changing anything, as the baseline.
+2. **Phase A**, then **B**, then **C** (Decision 5), in that order. Phase A step 5 starts from
+   `processing/tab_guide.py`, which already holds the tab list without Qt.
+3. **One commit per phase**, at least, once its checks pass, so each phase can be rolled
+   back. Say "Phase A/B/C" in the commit message.
+4. **If something blocks a phase**, write down what and why, and go on only with work that
+   doesn't depend on it. Never commit a phase as done with failing checks.
+5. **The next day, on Windows:** the window on `safe_data_source/` and `build.ps1 -Full`. Neither
+   can be checked in WSL, so nothing is merged into `master` before this.
+
+**Keep the toy.** `tests/toy_app_layer/`, its "Debug toy step" entries in
+`.vscode/launch.json` (not in git, so only in the Windows checkout) and [its page](app-layer-toy.md) stay as they are: don't remove, move or
+rewrite them, also not once the real `app/` layer exists. The user still has to review the toy in
+depth. The plan as a whole looks good to the user.
+
+**Still open:** whether the toolbox itself is installed on the host (Decision 3) or goes in a
+container. The plan assumes the host; only phase C depends on it.
+
+**Known before we start:** on Windows the whole test suite passes, but `pytest` then crashes as
+it exits (code -1073741819, an access violation). It did so before the merge too, and the
+cause isn't known. Read the pass/fail line, not only the exit code.
 ## Decision 1: how the code is organised
 
 **Chosen: a new Qt-free `app/` layer, and the window and the TUI both sit on it.**
