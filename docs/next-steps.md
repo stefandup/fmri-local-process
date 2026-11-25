@@ -49,10 +49,13 @@ done in one overnight run and tweaks the next day.
 **Keep the toy.** `tests/toy_app_layer/`, its "Debug toy step" entries in
 `.vscode/launch.json` (not in git, so only in the Windows checkout) and
 [its page](app-layer-toy.md) stay as they are: don't remove, move or rewrite them, also not once
-the real `app/` layer exists. The user still has to review the toy in depth. The plan as a whole looks good to the user.
+the real `app/` layer exists. The user still has to review the toy in depth. The plan as a whole
+looks good to the user.
 
-**Still open:** whether the toolbox itself is installed on the host (Decision 3) or goes in a
-container. The plan assumes the host; only phase C depends on it.
+**Use bash in WSL.** The PowerShell rules (pwsh commands in `AGENTS.md`, the assistant's own
+"use PowerShell" note) are for the Windows checkout only.
+
+**Decided:** the toolbox itself is installed directly on the host (Decision 3), not in a container.
 
 **Known before we start:** on Windows the whole test suite passes, but `pytest` then crashes as
 it exits (code -1073741819, an access violation). It did so before the merge too, and the
