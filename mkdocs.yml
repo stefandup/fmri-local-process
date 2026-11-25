@@ -16,6 +16,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - The toolbox window: toolbox.md
+  - The toolbox in a terminal: tui.md
   - BIDS conversion: bids-conversion.md
   - Preprocessing: preprocessing.md
   - First-level stats: first-level-stats.md

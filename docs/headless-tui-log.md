@@ -49,8 +49,42 @@ volume check and a crosscheck note, with no errors.
 Seen in the data, not changed:
 
 - Three BOLD runs aren't converted: dcm2niix stops on them ("Missing images?"), because their
-  series folders lack images. The DICOM volume check agrees.
+  series folders lack images. The DICOM volume check agrees. The user's note: the second scan
+  came from a new scanner software version, still being sorted out on the scanner's side.
 - The loose series folder beside the sessions is skipped and listed on Raw DICOMs.
 - Names instead of codes as IDs: one folder's `^` is removed and flagged as a possible typo, so the
   two folders become two different subjects. Twins (`12345-1` -> `12345T1`) are covered by the
   existing tests.
+
+## Phase B: the terminal app
+
+Done: `fmri_tui`, all ten tabs ([The toolbox in a terminal](tui.md)). The "not yet in the TUI" list
+is empty, and the parity test keeps it honest. Nothing in it imports Qt.
+
+Choices:
+
+- **Jobs run on daemon threads** (not Textual workers as in the toy): Textual waits for its
+  workers when it closes, which would hang for hours on C-PAC. A job that crashes shows its error
+  and unlocks the tabs.
+- **Pictures:** inline with sixel or kitty graphics, else only the file path, as planned. The
+  rough coloured-block fallback of `textual-image` is off: a brain isn't readable in it.
+- **Several rows at once:** a terminal table has no Ctrl/Shift selection, so rows are ticked with
+  space.
+- **Typed values are kept on Enter** (or Save / Use), not while typing as in the window.
+- **Docker:** no Start / Restart buttons: `docker desktop start` doesn't exist on a server.
+- **Not in the terminal app:** clicking in the brain views (type the MNI position), zoom,
+  Reveal (the paths are shown), the review-package picker.
+- **Settings** are in `~/.config/fmri_local_process/*.json`, not shared with the window's.
+- Quitting during a conversion leaves the defacer's container to finish by itself in Docker, as
+  closing the window does. The scan's temporary folder is cleared by the next conversion.
+
+Bugs found and fixed on the way: the terminal app's MRIQC tab stored its starting values before
+Docker's suggestion for a first run could be filled in.
+
+Checked: 30 tests through Textual's test driver, also at 80 x 24 and without Qt installed; by hand
+in `tmux` with no display on `safe_data_source/` (tabs, sequence overview, quitting, quitting in the
+middle of a real conversion).
+
+Not checked: inline pictures in a real Windows Terminal / WezTerm, C-PAC and MRIQC for real from the
+terminal app (only with stand-ins; hours of computing), the First-level tab on real C-PAC output and
+the Behaviour logs tab on real logs (neither is in `safe_data_source/`; both run on synthetic data).

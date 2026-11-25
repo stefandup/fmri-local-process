@@ -140,6 +140,7 @@ src/fmri_local_process/
   processing/   # the actual logic (philani_bids, behav_logs, dcm2niix, deface, ...)
   app/          # what both front ends share, without Qt: state, jobs, tab list, texts
   gui/          # the PySide6 window (display only)
+  tui/          # the Textual terminal app, fmri_tui (display only)
 tests/
 ```
 

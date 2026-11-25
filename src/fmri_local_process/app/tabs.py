@@ -25,7 +25,7 @@ from fmri_local_process.processing.tab_guide import (  # noqa: F401 -- re-export
 
 TITLE = "Philani fMRI toolbox"
 # Tabs the terminal app doesn't have yet: the parity test allows only these to be missing.
-NOT_YET_IN_TUI: tuple[str, ...] = TAB_ORDER
+NOT_YET_IN_TUI: tuple[str, ...] = ()
 
 
 def tab_text(number: int, name: str, badge: str = "") -> str:
