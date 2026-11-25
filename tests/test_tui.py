@@ -172,7 +172,7 @@ def line(page: object, selector: str) -> str:
 def two_sessions(bids: Path) -> None:
     """sub-A with ses-1 and ses-2, a Rest run each (ses-2's is longer)."""
     for session, volumes in (("1", 10), ("2", 14)):
-        name = f"sub-A_ses-{session}_task-Rest_bold.nii.gz"
+        name = "task-Rest_bold.nii.gz"
         write_bold(func(bids, "A", session, name), volumes)
     (bids / "sub-A" / "sub-A_sessions.tsv").write_text(
         "session_id\tacq_time\tsource_folder\n"
@@ -470,6 +470,92 @@ def test_a_wrong_log_id_is_corrected_marked_and_saved(tmp_path: Path) -> None:
     assert saved.crosschecked
 
 
+def test_what_is_typed_for_a_log_is_never_lost(tmp_path: Path) -> None:
+    folders, _folder, log = behav_study(tmp_path)
+    other = log.replace("151000", "161000")
+    (folders["behav"] / other).write_text(emo_log(), encoding="utf-8")
+
+    async def scenario(app: ToolboxApp, pilot: Pilot) -> None:
+        page = page_of(app, BehavPage)
+        table = page.query_one("#logs", TickTable)
+        box = page.query_one("#log-id", Input)
+        assert table.current_key() == log
+        box.value = "12345-1"
+        await settle(app, pilot)
+        assert "not saved yet" in line(page, "#status")
+        table.move_cursor(row=1)  # another log, without pressing Use
+        await settle(app, pilot)
+        assert box.value == ""
+        page.query_one("#log-date", Input).value = "2024-13-01"
+        await settle(app, pilot)
+        table.move_cursor(row=0)
+        await settle(app, pilot)
+        assert box.value == "12345-1"  # still there
+        await pilot.press("ctrl+q")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen) and "aren't saved" in app.screen.text
+        await answer(app, pilot, "No")
+        await press(app, pilot, "#save")
+        assert other in await close_text(app, pilot)  # names the log with the wrong date
+        assert not (folders["bids"] / "code").exists()
+        table.move_cursor(row=1)
+        await settle(app, pilot)
+        page.query_one("#log-date", Input).value = ""
+        page.query_one("#note", Input).value = "restarted"
+        await settle(app, pilot)
+        table.move_cursor(row=0)
+        await settle(app, pilot)
+        await press(app, pilot, "#ok")  # uses what is typed for this log, too
+        assert page.work is not None and page.work.matches[0].status == "matched"
+        table.move_cursor(row=1)
+        await settle(app, pilot)
+        assert page.query_one("#note", Input).value == "restarted"  # waits for its verdict
+        await press(app, pilot, "#error")
+        await press(app, pilot, "#save")
+        await close_text(app, pilot)
+        assert not app.behav_shared.anything_unsaved()
+
+    run_app(tmp_path, scenario, BEHAV, **folders)
+    from fmri_local_process.processing.behav_match import read_corrections
+
+    saved = read_corrections(folders["bids"])
+    assert (saved[log].subject, saved[log].review) == ("12345-1", "ok")
+    assert (saved[other].review, saved[other].note) == ("error", "restarted")
+
+
+def test_corrections_typed_on_both_tabs_are_saved_together(tmp_path: Path) -> None:
+    folders, folder, _log = behav_study(tmp_path)
+
+    async def scenario(app: ToolboxApp, pilot: Pilot) -> None:
+        page_of(app, SessionsPage).query_one("#folder-id", Input).value = "12345-2"
+        await settle(app, pilot)
+        app.tabs.active = pane_id(BEHAV)
+        await settle(app, pilot)
+        await press(app, pilot, "#save")
+        await close_text(app, pilot)
+        logs = page_of(app, BehavPage).work
+        assert logs is not None and logs.matches[0].status == "matched"
+
+    run_app(tmp_path, scenario, SESSIONS, **folders)
+    assert pb.read_dicom_corrections(folders["bids"]) == {folder: "12345-2"}
+
+
+def test_a_note_is_saved_when_its_box_is_left(tmp_path: Path) -> None:
+    bids = tmp_path / "bids"
+    two_sessions(bids)
+
+    async def scenario(app: ToolboxApp, pilot: Pilot) -> None:
+        page = page_of(app, CrosscheckPage)
+        note = page.query_one("#note", Input)
+        note.focus()
+        await pilot.press("o", "k")
+        page.table.focus()
+        await settle(app, pilot)
+        assert [r.note for r in page.reviews] == ["ok", ""]
+
+    run_app(tmp_path, scenario, CROSSCHECK, bids=bids)
+
+
 def test_a_scan_folder_is_corrected_on_raw_dicoms(tmp_path: Path) -> None:
     folders, folder, _log = behav_study(tmp_path)
     bids = folders["bids"]
@@ -585,7 +671,7 @@ def test_crosscheck_keeps_one_of_several_runs_and_deletes_a_file(tmp_path: Path)
     bids = tmp_path / "bids"
     two_sessions(bids)
     for run in (1, 2):
-        name = f"sub-A_ses-1_task-Matching_run-{run}_bold.nii.gz"
+        name = f"task-Matching_run-{run}_bold.nii.gz"
         write_bold(func(bids, "A", "1", name), 10)
 
     async def scenario(app: ToolboxApp, pilot: Pilot) -> None:
@@ -738,7 +824,7 @@ def test_mriqc_runs_the_ticked_subjects(tmp_path: Path, monkeypatch: pytest.Monk
 
 def preprocess_bids(root: Path) -> Path:
     for subject in ("P01", "P02"):
-        name = f"sub-{subject}_ses-1_task-Rest_bold.nii.gz"
+        name = "task-Rest_bold.nii.gz"
         write_bold(func(root, subject, "1", name), 10)
     (root / "dataset_description.json").write_text("{}")
     return root

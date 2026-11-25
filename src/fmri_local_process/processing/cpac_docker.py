@@ -182,11 +182,16 @@ def memory_problem(mem_gb: float, docker_gb: float | None, host_gb: float | None
     return None
 
 
+NO_DOCKER = "docker not found on PATH. Install Docker" + (
+    " Desktop." if sys.platform in ("win32", "darwin") else "."
+)
+
+
 def find_docker() -> Path:
     """The docker executable, once its daemon answers (Docker Desktop must be running)."""
     exe = shutil.which("docker")
     if exe is None:
-        raise DockerUnavailableError("docker not found on PATH. Install Docker Desktop.")
+        raise DockerUnavailableError(NO_DOCKER)
     result = subprocess.run(
         [exe, "version", "--format", "{{.Server.Version}}"], capture_output=True, text=True
     )
@@ -207,7 +212,7 @@ def docker_desktop(action: str, timeout_s: float = 300) -> str | None:
         raise ValueError(f"unknown Docker Desktop action {action!r}")
     exe = shutil.which("docker")
     if exe is None:
-        return "docker not found on PATH. Install Docker Desktop."
+        return NO_DOCKER
     try:
         result = subprocess.run(
             [exe, "desktop", action], capture_output=True, text=True, timeout=timeout_s

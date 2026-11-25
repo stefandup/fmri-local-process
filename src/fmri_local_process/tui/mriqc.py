@@ -95,6 +95,7 @@ class MriqcPage(Page):
         self.drawing = False
         self.wanted: tuple[tuple, Path, str, str] | None = None
         self.shown_key: tuple | None = None
+        self.rated: mq.RunIqms | None = None  # whose rating and comment are shown
         self.views: OrderedDict[tuple, bytes | str] = OrderedDict()
 
     def compose(self) -> ComposeResult:
@@ -543,6 +544,7 @@ class MriqcPage(Page):
             panel.show_png(view, name)
 
     def show_rating(self, run: mq.RunIqms | None) -> None:
+        self.rated = run
         rating = self.ratings.get(run.name) if run else None
         enabled = run is not None and self.state.folder("mriqc") is not None
         for value in (*mq.RATINGS, 0):
@@ -568,13 +570,14 @@ class MriqcPage(Page):
             self.query_one("#subjects", TickTable).tick_all(button_id == "all")
 
     @on(Input.Submitted, "#comment")
-    def on_comment(self, event: Input.Submitted) -> None:
-        run = self.current()
+    @on(Input.Blurred, "#comment")
+    def on_comment(self, event: Input.Submitted | Input.Blurred) -> None:
+        run = self.rated
         rating = self.ratings.get(run.name) if run else None
         self.save_rating(rating.rating if rating else None, event.value)
 
     def save_rating(self, rating: int | None, comment: str) -> None:
-        run, output = self.current(), self.state.folder("mriqc")
+        run, output = self.rated, self.state.folder("mriqc")
         comment = comment.strip()
         if run is None or output is None:
             return

@@ -59,6 +59,7 @@ class CrosscheckPage(Page):
         super().__init__(state)
         self.seen: tuple = ()
         self.reviews: list[SessionReview] = []
+        self.noted: SessionReview | None = None  # whose note the box shows
 
     def compose(self) -> ComposeResult:
         yield Notices()
@@ -160,8 +161,10 @@ class CrosscheckPage(Page):
         self.update_ticked()
         review = self.current()
         note = self.query_one("#note", Input)
-        note.disabled = review is None
-        note.value = review.note if review else ""
+        if review is None or review is not self.noted or not note.has_focus:
+            self.noted = review
+            note.disabled = review is None
+            note.value = review.note if review else ""
         issues, pending, files = (
             self.query_one(f"#{i}", Table) for i in ("issues", "pending", "files")
         )
@@ -255,8 +258,12 @@ class CrosscheckPage(Page):
             self.act(note_text(reviews, text), partial(set_note, bids, reviews, text))
 
     @on(Input.Submitted, "#note")
-    def on_note(self, event: Input.Submitted) -> None:
-        self.save_note(self.current_list(), event.value)
+    @on(Input.Blurred, "#note")
+    def on_note(self, event: Input.Submitted | Input.Blurred) -> None:
+        """Saved with Enter, and when the box is left."""
+        review = self.noted
+        if review is not None and event.value.strip() != review.note:
+            self.save_note([review], event.value)
 
     def delete_reviews(self, reviews: list[SessionReview]) -> None:
         bids = self.state.folder("bids")

@@ -53,7 +53,16 @@ for image in "${IMAGES[@]}"; do
             done
             fmri_tui --version
             ~/.local/share/fmri_local_process/_internal/dcm2niix/dcm2niix -v | head -n 1
-            fmri_tui </dev/null 2>&1 | grep -q "needs a terminal"' \
+            fmri_tui </dev/null 2>&1 | grep -q "needs a terminal"
+            # Crosschecking by commands alone: a typo in a made-up log is found, fixed, and matches.
+            fmri_generate_sample_data ~/dummy --n-clean 1 --with-errors --seed 1 >/dev/null
+            fmri_folders --behav ~/dummy/behav --dicom ~/dummy/dicom --bids ~/bids --yes >/dev/null 2>&1
+            before="$(fmri_behav_check 2>/dev/null | tail -n 1)"
+            fmri_behav_fix log DUMMY0033-emo --id DUMMY003 --crosschecked >/dev/null 2>&1
+            after="$(fmri_behav_check 2>/dev/null | tail -n 1)"
+            echo "  $before  ->  $after"
+            test "$before" != "$after"
+            fmri_behav_check --log DUMMY0033-emo 2>/dev/null | grep -q "matched -> sub-DUMMY003_ses-1"' \
         && check_tui && echo "  ok  terminal app" \
         && check_tui -e LC_ALL=C && echo "  ok  terminal app, C locale" \
         && in_container "$SESSION" bash -ec '

@@ -41,6 +41,7 @@ class OverviewPage(Page):
         self.seen: tuple = ()
         self.reviews: list[SessionReview] = []
         self.logged: list[dict[str, str]] = []
+        self.noted: SessionReview | None = None  # whose note the box shows
 
     def compose(self) -> ComposeResult:
         yield Notices()
@@ -115,15 +116,16 @@ class OverviewPage(Page):
 
     @on(Table.RowHighlighted, "#sessions")
     def show_note(self) -> None:
-        review = self.current()
+        review = self.noted = self.current()
         note = self.query_one("#note", Input)
         note.disabled = review is None
         note.value = review.note if review else ""
         note.border_title = review.name if review else ""
 
     @on(Input.Submitted, "#note")
-    def save_note(self, event: Input.Submitted) -> None:
-        review, bids = self.current(), self.state.folder("bids")
+    @on(Input.Blurred, "#note")
+    def save_note(self, event: Input.Submitted | Input.Blurred) -> None:
+        review, bids = self.noted, self.state.folder("bids")
         if review is None or bids is None or event.value.strip() == review.note:
             return
         try:

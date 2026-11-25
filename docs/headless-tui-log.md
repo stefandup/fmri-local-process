@@ -8,7 +8,7 @@ made along the way, and what is blocked or not checked. The plan is in [Next ste
 | | |
 |---|---|
 | Place | WSL Ubuntu 26.04, the existing clone in `~/fmri_local_process` (remote: GitHub) instead of a new one in `~/src` |
-| With Qt | `.venv` in the repo (Python 3.13 from `uv`): `uv pip install -e ".[gui,tui]" -r requirements-dev.txt` |
+| With Qt | `.venv` in the repo: `pip install -e ".[gui,tui]" -r requirements-dev.txt` (first made with `uv`, remade as a plain venv with pip on request; Python 3.13 itself came from `uv`, as Ubuntu 26.04 has only 3.14) |
 | Without Qt | `~/.venvs/fmri-noqt`, the same without PySide6 |
 | Data | `safe_data_source/`: same 84,902 files and sizes as the Windows folder; only read. Results in `results/wsl/` (not in git) |
 
@@ -103,7 +103,6 @@ Choices:
 - **Library paths:** a PyInstaller app passes its own library folder on to the programs it starts. A
   start-up hook undoes that, so docker and mri_deface use the server's libraries.
 - **UTF-8 always**, so the app also works with a plain C locale.
-- **Not in the bundle:** the defacer image (Windows' installer script sets it up), see the page.
 
 Checked:
 
@@ -114,6 +113,22 @@ Checked:
 
 Not checked: the real server (no access yet), `qsub` / Apptainer (the next branch), C-PAC and MRIQC
 runs started from the bundle.
+
+## After the run (asked for the next day)
+
+- **What is typed is kept** (terminal app): corrections stay with their row until used or saved, notes are
+  saved when their box is left, and quitting with unsaved corrections asks. Before, text typed for one
+  log was lost when another was highlighted before pressing Use.
+- **`fmri_behav_check --bids`** now applies the corrected DICOM folder IDs, dates and session numbers too, so
+  it agrees with the tab; on a narrow terminal it lists a block per log instead of a folded table.
+- **Commands for the checking on its own:** `fmri_behav_fix`, `fmri_bids_check`, `fmri_bids_fix`, `fmri_mriqc`.
+- **`fmri_folders`:** the folders are set once, shared with `fmri_tui`; after that no command needs one. Given
+  folders win and are never mixed with remembered ones. Converting and C-PAC ask before using them.
+- **`fmri_generate_sample_data`** (vr_lab_toolbox's command line): dummy logs and DICOMs. Presentation's documentation doesn't fix the log's
+  delimiter (a setting) or layout, so the yardstick is this repo's own reader: each dummy log has to be
+  read as its original is, and the command says how many aren't.
+- **`docker/setup_docker_image.sh`** in the bundle: the Docker part of the Windows installer. Tested
+  with `--defacer pydeface`; not with `freesurfer` (5 GB download) or `local`.
 
 ## Still to do
 

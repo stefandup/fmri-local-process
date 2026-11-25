@@ -227,6 +227,11 @@ class ToolboxApp(App[None]):
                 ),
                 lambda answer: self.quit_preprocess(preprocess, answer),
             )
+        elif self.behav_shared.anything_unsaved():
+            text = (
+                "Corrections on Raw DICOMs or Behaviour logs aren't saved yet. Quit without them?"
+            )
+            self.push_screen(ConfirmScreen("Not saved", text), self.quit_if_yes)
         else:
             self.exit()
 

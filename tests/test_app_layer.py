@@ -99,6 +99,15 @@ def test_json_settings_survive_a_restart_and_a_damaged_file(tmp_path: Path) -> N
     assert JsonSettings(path).value("autosave", "x") == "x"
 
 
+def test_two_programs_may_write_the_settings(tmp_path: Path) -> None:
+    """E.g. fmri_folders while the terminal app is open."""
+    first, second = (JsonSettings(tmp_path / "s.json") for _ in range(2))
+    first.setValue("bids", "a")
+    second.setValue("dicom", "b")
+    first.remove("bids")
+    assert JsonSettings(tmp_path / "s.json").data == {"dicom": "b"}
+
+
 def test_json_settings_live_in_the_config_folder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

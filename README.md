@@ -38,6 +38,102 @@ Full details and a step-by-step "test it yourself" plan:
    should ship. It is only on PATH via `pip install -e .` for now.
 5. **Linux build.** Run `./build.sh` and `packaging/install.sh` on Ubuntu.
 
+## Linux: one PC or server (e.g. OpenMediaVault)
+
+The whole toolbox without a display: the terminal app `fmri_tui` and command-line tools that do the
+checking on their own. Needs a 64-bit Intel/AMD PC and, for C-PAC, MRIQC and defacing, Docker.
+Details: [the Linux bundle](docs/linux-bundle.md), [the terminal app](docs/tui.md).
+
+### Build (here) and install (there)
+
+```bash
+./build.sh --tui                                   # in WSL or Linux, with Docker: like build.ps1 -Full
+packaging/linux/check_bundle.sh                    # optional: tries it in clean containers
+
+scp build_output/installer/fmri_tui-*-linux-x86_64.tar.gz user@server:
+ssh user@server
+tar -xzf fmri_tui-*-linux-x86_64.tar.gz && cd fmri_tui-*/
+./install.sh                                       # no sudo; then open a new terminal
+docker/setup_docker_image.sh --defacer pydeface --mriqc   # C-PAC, MRIQC, defacer (~20 GB)
+```
+
+On OpenMediaVault, check first: your user has a home folder (Users > Settings) and SSH access,
+`docker info` works without sudo, and the home folder isn't on a disk mounted `noexec`. Keep the
+data on the data disk; the app needs about 400 MB.
+
+### In WSL or Linux, from this repo (no bundle)
+
+As in vr_lab_toolbox: a virtual environment and `pip install -e`. The commands are in `pyproject.toml`
+(`[project.scripts]`), and an active environment puts them on the PATH.
+
+```bash
+python3.13 -m venv .venv                     # once
+source .venv/bin/activate                    # in each new terminal (VS Code does it for you)
+pip install -e ".[gui,tui]"                  # once, and again when pyproject.toml changes
+```
+
+`[tui]` adds the terminal app and `[gui]` the window; `pip install -e .` alone is enough for the
+commands. The bundle's `install.sh` needs no environment: its commands are on the PATH everywhere.
+
+### Set the folders once
+
+```bash
+fmri_folders --dicom DICOMS --behav LOGS --bids BIDS --output CPAC_OUT --mriqc MRIQC_OUT
+```
+
+Shared with `fmri_tui`. After this no command needs a folder. (Given folders win, and are never mixed
+with the remembered ones. The Windows window keeps its own.)
+
+### Crosscheck the behaviour logs
+
+Back up first (`fmri_bids_fix backup`, or Save now on the Setup tab). If the logs are on OneDrive,
+make sure it is running and synced.
+
+| Step | Terminal app (or window) | Command |
+|---|---|---|
+| See what doesn't match | **Behaviour logs**, tick *Needs review only* | `fmri_behav_check --problems-only` |
+| Wrong ID, date or session number of a scan: do these first, one folder can leave several logs unmatched | **Raw DICOMs**, type, **Use** | `fmri_behav_fix folder FOLDER --id P001 --session 2` |
+| Wrong ID or date of a log | **Behaviour logs**, type, **Use** | `fmri_behav_fix log LOG --id P001 --date 2024-04-03` |
+| Look at a log's events, and whether they fit the BOLD run | highlight it | `fmri_behav_check --log LOG` |
+| Several logs on one day | **Use this one** | `fmri_behav_fix use LOG` |
+| Verdict on a short or odd log | **Mark OK** / **Mark error** | `fmri_behav_fix log LOG --verdict error --note "why"` |
+| Been through it | tick, **Mark ticked crosschecked** | `fmri_behav_fix log LOG --crosschecked` |
+| Keep it | **Save** | (saved at once) |
+| Apply it | **Convert to BIDS** | `fmri_convert_to_bids` |
+
+`LOG` is any part of the log's path that only it has, e.g. `P001-emo`. Nothing changes the raw files:
+decisions are saved in `BIDS/code/`, the same files for the window, the terminal app and the commands.
+
+What to look for: *unknown ID* (a typo, or a twin: `12345-1` becomes `12345T1`), *date mismatch*, *duplicate*,
+*no task scan*, *no task* (the path needs `cogreappraisal` or `emolabeling`), and *aborted* logs, which
+match but need a verdict. A match only says that ID and date agree: look at the events too.
+
+### The rest by commands
+
+```bash
+fmri_bids_check                    # each session's problems; --files --lengths --volumes --csv out.csv
+fmri_bids_fix --help               # mark, note, keep, trim, expect, delete-..., backup
+fmri_mriqc                         # run MRIQC, list the metrics; --results, --rate
+fmri_preprocess                    # C-PAC
+```
+
+### Dummy data to try it on
+
+```bash
+fmri_generate_sample_data dummy --with-errors --seed 42      # 5 clean participants, one per problem
+fmri_generate_sample_data dummy --reference                  # like the real study (fmri_folders)
+fmri_generate_sample_data dummy --with-errors --bids-folder dummy_bids         # and convert it
+```
+
+The same command line as vr_lab_toolbox's `..._generate_sample_data`; `dummy_data_log.txt` in the folder
+says what each participant is for. `--reference` finds the `.log` files in every folder below the logs
+folder and gives each log and session folder a dummy twin: IDs and dates match, or don't, exactly
+where the real ones do. IDs, dates, times, answers, names and images are made up; the real data is only
+read, the link between real and dummy IDs is never written down, and the result is deleted if anything
+real is found in it. What stays is the shape: how many logs and sessions, the order of the dates, the
+logs' layout, the number and kind of their events, and which of them were answered. Look through it
+before sharing it. The dummy folder must be new, and outside the real data.
+
 ## 1a. Preprocessing via C-PAC in Docker (built, not yet run on real data)
 
 ```powershell

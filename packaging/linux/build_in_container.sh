@@ -53,8 +53,16 @@ PACKAGE="fmri_tui-$VERSION-linux-x86_64"
 STAGE="/tmp/stage/$PACKAGE"
 mkdir -p "$STAGE"
 cp -R /tmp/dist/fmri_tui "$STAGE/app"
-(cd "$STAGE/app" && find . -maxdepth 1 -type f -perm -u+x -printf '%P\n' | sort) > "$STAGE/app/commands.txt"
+# One program; the other commands are links to it (see entry.py).
+/opt/venv/bin/python -c "import runpy; print(*runpy.run_path('packaging/linux/entry.py')['COMMANDS'], sep='\n')" \
+    | sort > "$STAGE/app/commands.txt"
+grep -v '^fmri_tui$' "$STAGE/app/commands.txt" | while read -r command; do
+    ln -s fmri_tui "$STAGE/app/$command"
+done
 cp packaging/install.sh "$STAGE/install.sh"
+mkdir "$STAGE/docker"  # the C-PAC / MRIQC / defacer images, as in the Windows installer
+cp packaging/docker/Dockerfile packaging/docker/setup_docker_image.sh "$STAGE/docker/"
+chmod +x "$STAGE/docker/setup_docker_image.sh"
 chmod +x "$STAGE/install.sh"
 rm -f /out/fmri_tui-*-linux-x86_64.tar.gz
 tar -czf "/out/$PACKAGE.tar.gz" -C /tmp/stage "$PACKAGE"

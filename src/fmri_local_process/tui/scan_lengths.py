@@ -49,6 +49,7 @@ class ScanLengthsPage(Page):
         self.data_files: list[DataFile] = []
         self.checks: list[dv.VolumeCheck] = []
         self.check_job: adv.CheckJob | None = None
+        self.edited: str | None = None  # the scan whose length the boxes show
 
     def help_text(self) -> str:
         saved = f"\n\n{self.lengths.saved_text()}" if self.lengths else ""
@@ -139,6 +140,7 @@ class ScanLengthsPage(Page):
     def show_scan(self) -> None:
         label, lengths = self.label(), self.lengths
         known = lengths is not None and label in lengths.scans
+        self.edited = label if known else None
         for widget_id in ("#expected", "#margin", "#save", "#automatic"):
             self.query_one(widget_id).disabled = not known
         if lengths is None or label is None or not known:
@@ -154,11 +156,26 @@ class ScanLengthsPage(Page):
             details.append(f"Too long:\n{long_text}")
         self.query_one("#picked", Line).set("\n".join(details))
 
+    @on(Input.Blurred, "#expected")
+    @on(Input.Blurred, "#margin")
+    def save_if_changed(self) -> None:
+        """Saved when the box is left, as the window saves once typing pauses."""
+        label, lengths = self.edited, self.lengths
+        if lengths is None or label is None or label not in lengths.scans:
+            return
+        shown = (
+            str(lengths.set[label] or ""),
+            f"{lengths.margins[label]:g}" if label in lengths.margins else "",
+        )
+        typed = (self.query_one("#expected", Input).value, self.query_one("#margin", Input).value)
+        if typed != shown:
+            self.save()
+
     @on(Input.Submitted, "#expected")
     @on(Input.Submitted, "#margin")
     @on(Button.Pressed, "#save")
     def save(self) -> None:
-        label, lengths = self.label(), self.lengths
+        label, lengths = self.edited, self.lengths
         if lengths is None or label is None:
             return
         typed = self.query_one("#expected", Input).value.strip()

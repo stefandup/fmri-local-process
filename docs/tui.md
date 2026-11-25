@@ -27,6 +27,9 @@ The mouse works too, in most terminals.
 
 ## What differs from the window
 
+- **Corrections** typed on Raw DICOMs and Behaviour logs stay with their row until you press **Use**,
+  a verdict button or **Save**, also when you look at other rows in between. Only **Save** writes them;
+  quitting before that asks. Notes, comments and expected lengths are saved when you leave the box.
 - **Folders:** type the path and press Enter, or **Browse**. A BIDS, C-PAC or MRIQC output folder
   that doesn't exist yet is made, after asking.
 - **Pictures** are PNG files. A terminal that can show pictures (Windows Terminal 1.22+, WezTerm,

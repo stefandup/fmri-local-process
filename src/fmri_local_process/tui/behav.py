@@ -1,6 +1,7 @@
 """Raw DICOMs and Behaviour logs: two tabs on one read of the logs and DICOM folders."""
 
 import datetime as dt
+from collections.abc import Callable
 
 from textual import on
 from textual.app import ComposeResult
@@ -79,6 +80,14 @@ def date_text(day: dt.date | None) -> str:
     return day.strftime(ISO_DATE) if day else ""
 
 
+def put[T](values: dict[str, T], key: str, value: T | None) -> None:
+    """Set it, or take it out when there is none."""
+    if value:
+        values[key] = value
+    else:
+        values.pop(key, None)
+
+
 class BehavShared:
     """What both tabs show: the logs read once, with the corrections given so far."""
 
@@ -91,6 +100,17 @@ class BehavShared:
         self.reload_wanted = False  # a folder changed while reading
         self.error = ""
         self.unsaved = False
+        # The tabs' boxes: what is typed for each row and not used yet, put into the work by
+        # these (each gives the first problem found, '' if none).
+        self.typed: list[dict] = []
+        self.use_typed: list[Callable[[], str]] = []
+
+    def anything_unsaved(self) -> bool:
+        return self.unsaved or any(self.typed)
+
+    def take_typed(self) -> str:
+        """Everything typed into the work; why not, '' when done."""
+        return next(filter(None, (use() for use in self.use_typed)), "")
 
     def infos(self) -> list[LogInfo]:
         return self.work.infos if self.work else []
@@ -104,6 +124,8 @@ class BehavShared:
             self.reload_wanted = True
             return
         self.work, self.loading, self.error, self.unsaved = None, True, "", False
+        for typed in self.typed:
+            typed.clear()
         self.changed.emit()
 
         def progress(done: int, total: int, what: str) -> None:
@@ -157,7 +179,8 @@ class SharedPage(Page):
 
     def __init__(self, state: ToolboxState) -> None:
         super().__init__(state)
-        self.filled = False
+        self.drafts: dict[str, tuple[str, ...]] = {}  # row -> its boxes, as typed
+        self.shown: str | None = None  # the row whose values the boxes show
 
     @property
     def shared(self) -> BehavShared:
@@ -179,6 +202,8 @@ class SharedPage(Page):
 
     def on_mount(self) -> None:
         self.query_one("#loading").display = False
+        self.shared.typed.append(self.drafts)
+        self.shared.use_typed.append(self.use_drafts)
         self.shared.changed.connect(self.on_shared_changed)
         self.shared.progress.connect(self.on_progress)
         self.state.folder_changed.connect(self.on_folder_changed)
@@ -212,15 +237,61 @@ class SharedPage(Page):
         elif self.work is None:
             status.set("")
         else:
-            unsaved = "   (changes not saved yet)" if self.shared.unsaved else ""
-            status.set(self.work.summary() + unsaved, WARNING_COLOR if unsaved else "")
+            self.show_status()
         self.fill()
+
+    def show_status(self) -> None:
+        if self.work is not None:
+            unsaved = "   (changes not saved yet)" if self.shared.anything_unsaved() else ""
+            text = self.work.summary() + unsaved
+            self.query_one("#status", Line).set(text, WARNING_COLOR if unsaved else "")
 
     def fill(self) -> None: ...
 
+    # ---- what is typed ------------------------------------------------------------------------
+
+    BOXES: tuple[str, ...] = ()  # the Inputs holding one row's values
+
+    def use_drafts(self) -> str:
+        """What was typed for every row into the work; the first problem, '' if none."""
+        raise NotImplementedError
+
+    def saved_values(self, key: str) -> tuple[str, ...]:
+        """One row's values so far, as its boxes show them."""
+        raise NotImplementedError
+
+    def show_boxes(self, key: str | None) -> None:
+        """The row's values in the boxes: as typed, if something was typed for it."""
+        self.shown = key
+        values = self.drafts.get(key) or self.saved_values(key) if key else ("",) * len(self.BOXES)
+        with self.prevent(Input.Changed):
+            for box, value in zip(self.BOXES, values, strict=True):
+                self.query_one(box, Input).value = value
+
+    @on(Input.Changed)
+    def keep_draft(self, event: Input.Changed) -> None:
+        """Typed values stay with their row until they are used, also when another is looked
+        at in between."""
+        if self.shown is None or f"#{event.input.id}" not in self.BOXES:
+            return
+        typed = tuple(self.query_one(box, Input).value for box in self.BOXES)
+        if typed == self.saved_values(self.shown):
+            self.drafts.pop(self.shown, None)
+        else:
+            self.drafts[self.shown] = typed
+        self.show_status()
+
+    def recheck(self) -> bool:
+        """Use what is typed and match again; False (and why is shown) when some is wrong."""
+        if problem := self.use_drafts():
+            self.query_one("#problem", Line).set(problem, ERROR_COLOR)
+            return False
+        self.shared.recheck()
+        return True
+
     @on(Button.Pressed, "#reload")
     def reload(self) -> None:
-        if self.shared.unsaved:
+        if self.shared.anything_unsaved():
             question = "Corrections not saved yet are dropped. Read everything again?"
             self.ask("Reload", question, lambda: self.shared.load(self))
         else:
@@ -228,6 +299,11 @@ class SharedPage(Page):
 
     @on(Button.Pressed, "#save")
     def save(self) -> None:
+        if problem := self.shared.take_typed():
+            self.show_text("Not saved", problem)
+            return
+        if self.work is not None:
+            self.work.match()
         try:
             self.shared.save()
         except OSError as e:
@@ -240,6 +316,7 @@ class SessionsPage(SharedPage):
     """Raw DICOMs: every DICOM session folder, with its corrections."""
 
     GUIDE = SESSIONS_HELP_TEXT
+    BOXES = ("#folder-id", "#folder-date", "#folder-session")
 
     def compose(self) -> ComposeResult:
         yield from self.compose_controls()
@@ -299,37 +376,41 @@ class SessionsPage(SharedPage):
         for widget_id in ("#folder-id", "#folder-date", "#folder-session", "#use"):
             self.query_one(widget_id).disabled = name is None
         self.query_one("#problem", Line).set("")
+        self.show_boxes(name if work is not None else None)
         if name is None or work is None:
             self.query_one("#picked", Line).set("")
             return
         row = [f.name for f, _tasks in work.scanned].index(name)
         self.query_one("#picked", Line).set(f"{name}   {work.folder_cells(row)[S_NOTES]}")
+
+    def saved_values(self, key: str) -> tuple[str, ...]:
+        if self.work is None:
+            return "", "", ""
+        fixes = self.work.fixes
+        return fixes.ids.get(key, ""), date_text(fixes.dates.get(key)), fixes.sessions.get(key, "")
+
+    def use_drafts(self) -> str:
+        work = self.work
+        if work is None:
+            return ""
         fixes = work.fixes
-        self.query_one("#folder-id", Input).value = fixes.ids.get(name, "")
-        self.query_one("#folder-date", Input).value = date_text(fixes.dates.get(name))
-        self.query_one("#folder-session", Input).value = fixes.sessions.get(name, "")
+        for name, (subject, day_text, session_text) in list(self.drafts.items()):
+            try:
+                day, session = parse_date(day_text), parse_session(session_text)
+            except ValueError as e:
+                return f"{name}: {e}"
+            put(fixes.ids, name, subject.strip())
+            put(fixes.dates, name, day)
+            put(fixes.sessions, name, session)
+            del self.drafts[name]
+            self.shared.unsaved = True
+        return ""
 
     @on(Input.Submitted)
     @on(Button.Pressed, "#use")
     def use_typed(self) -> None:
-        """The highlighted folder's corrections, as typed: matched again, not saved yet."""
-        name, work = self.folder(), self.work
-        if name is None or work is None:
-            return
-        try:
-            day = parse_date(self.query_one("#folder-date", Input).value)
-            session = parse_session(self.query_one("#folder-session", Input).value)
-        except ValueError as e:
-            self.query_one("#problem", Line).set(str(e), ERROR_COLOR)
-            return
-        subject = self.query_one("#folder-id", Input).value.strip()
-        fixes = work.fixes
-        for values, value in ((fixes.ids, subject), (fixes.dates, day), (fixes.sessions, session)):
-            if value:
-                values[name] = value  # pyright: ignore[reportArgumentType] -- each its own type
-            else:
-                values.pop(name, None)
-        self.shared.recheck()
+        """The corrections as typed: matched again, not saved yet."""
+        self.recheck()
 
     @on(TickTable.Ticked)
     def update_ticked(self) -> None:
@@ -360,13 +441,14 @@ class SessionsPage(SharedPage):
             self.work.fixes.checked |= ticked
         else:
             self.work.fixes.checked -= ticked
-        self.shared.recheck()
+        self.recheck()
 
 
 class BehavPage(SharedPage):
     """Behaviour logs: match each log to a session, look at its events, give a verdict."""
 
     GUIDE = HELP_TEXT
+    BOXES = ("#log-id", "#log-date", "#note")
 
     def compose(self) -> ComposeResult:
         yield from self.compose_controls()
@@ -462,13 +544,11 @@ class BehavPage(SharedPage):
             self.query_one(f"#{widget_id}", Line).set("")
         events_table = self.query_one("#events", Table)
         events_table.fill([])
+        self.show_boxes(m.info.key if m is not None else None)
         if m is None or work is None:
             return
         info = m.info
-        self.query_one("#log-id", Input).value = info.correction.subject or ""
         self.query_one("#log-id", Input).placeholder = info.file_subject or "ID"
-        self.query_one("#log-date", Input).value = date_text(info.correction.date)
-        self.query_one("#note", Input).value = info.correction.note
         self.query_one("#use-this", Button).disabled = not same_day_rivals(work.matches, m)
         self.query_one("#title", Line).set(f"{info.key} -- {log_title(m)}")
         events = work.events_of(info)
@@ -485,29 +565,44 @@ class BehavPage(SharedPage):
 
     # ---- corrections and verdicts -------------------------------------------------------------
 
-    def typed(self) -> dict[str, tuple[str, dt.date | None]]:
-        """Every log's correction so far."""
-        infos = self.work.infos if self.work else []
-        return {i.key: (i.correction.subject or "", i.correction.date) for i in infos}
+    def saved_values(self, key: str) -> tuple[str, ...]:
+        info = next((i for i in self.shared.infos() if i.key == key), None)
+        if info is None or self.work is None:
+            return "", "", ""
+        note = self.work.verdicts.get(key, ("", ""))[1]
+        return info.correction.subject or "", date_text(info.correction.date), note
 
-    def recheck(self, typed: dict[str, tuple[str, dt.date | None]] | None = None) -> None:
-        if self.work is not None:
-            self.work.set_corrections(typed if typed is not None else self.typed())
-            self.shared.recheck()
+    def use_drafts(self) -> str:
+        """A note goes with a verdict: typed for a log without one, it stays as typed."""
+        work = self.work
+        if work is None:
+            return ""
+        typed = {
+            i.key: (i.correction.subject or "", i.correction.date) for i in self.shared.infos()
+        }
+        for key, (subject, day_text, note) in list(self.drafts.items()):
+            try:
+                typed[key] = (subject, parse_date(day_text))
+            except ValueError as e:
+                return f"{key}: {e}"
+            review, old_note = work.verdicts.get(key, (None, ""))
+            if review and note.strip() != old_note:
+                work.set_verdict(key, review, note.strip())
+        work.set_corrections(typed)
+        for key, (_subject, _day, note) in list(self.drafts.items()):
+            if self.saved_values(key)[2] == note.strip():
+                del self.drafts[key]
+            else:  # only its note is left to use
+                self.drafts[key] = (*self.saved_values(key)[:2], note)
+            self.shared.unsaved = True
+        return ""
 
     @on(Input.Submitted, "#log-id")
     @on(Input.Submitted, "#log-date")
+    @on(Input.Submitted, "#note")
     @on(Button.Pressed, "#use")
     def use_typed(self) -> None:
-        m = self.current()
-        if m is None:
-            return
-        try:
-            day = parse_date(self.query_one("#log-date", Input).value)
-        except ValueError as e:
-            self.query_one("#problem", Line).set(str(e), ERROR_COLOR)
-            return
-        self.recheck(self.typed() | {m.info.key: (self.query_one("#log-id", Input).value, day)})
+        self.recheck()
 
     def note(self) -> str:
         return self.query_one("#note", Input).value.strip()
@@ -523,6 +618,7 @@ class BehavPage(SharedPage):
                 work.set_verdict(m.info.key, review, self.note())
             case "clear" if m is not None:
                 work.set_verdict(m.info.key, None)
+                self.clear_note(m.info.key)
             case "use-this" if m is not None:
                 work.use_this_one(m, self.note())
             case "mark":
@@ -532,6 +628,11 @@ class BehavPage(SharedPage):
             case _:
                 return
         self.recheck()
+
+    def clear_note(self, key: str) -> None:
+        """Clearing a verdict clears its note too."""
+        if key in self.drafts:
+            self.drafts[key] = (*self.drafts[key][:2], "")
 
     @on(TickTable.Ticked)
     def update_ticked(self) -> None:
@@ -551,7 +652,7 @@ class BehavPage(SharedPage):
     @on(Button.Pressed, "#export")
     def export(self) -> None:
         work = self.work
-        if work is None:
+        if work is None or not self.recheck():  # as the table shows it, with what is typed
             return
         destinations = work.export_destinations()
         texts = list(destinations)

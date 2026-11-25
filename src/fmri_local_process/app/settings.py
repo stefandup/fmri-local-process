@@ -44,10 +44,11 @@ class JsonSettings:
         return self.data.get(key, default)
 
     def setValue(self, key: str, value: Any, /) -> None:  # noqa: N802 -- Qt's spelling
-        self.data[key] = value
+        self.data = self._read() | {key: value}  # another program may have written meanwhile
         self.sync()
 
     def remove(self, key: str, /) -> None:
+        self.data = self._read()
         if self.data.pop(key, None) is not None:
             self.sync()
 
