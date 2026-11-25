@@ -2,8 +2,42 @@
 # Linux/macOS build: PyInstaller onedir bundle (with dcm2niix inside) + a .tar.gz containing
 # packaging/install.sh, which installs per-user and puts the commands on PATH.
 # Windows uses build.ps1 + Inno Setup instead. Everything lands under build_output/.
+#
+#   ./build.sh          the converter (fmri_convert_to_bids), built on this computer
+#   ./build.sh --tui    the Linux bundle for servers and the HPC: fmri_tui and the command-line
+#                       tools, without Qt, built in a rockylinux:8 container (needs Docker), so it
+#                       runs on older servers too
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
+
+BUILD_IMAGE="rockylinux:8"
+
+build_tui() {
+    local installer="$PWD/build_output/installer" cache="$PWD/build_output/cache"
+    mkdir -p "$installer" "$cache"
+    # Only the tracked files (as they are now) and the version's git history go in: never data.
+    local files
+    files="$(mktemp)"
+    trap "rm -f '$files'" EXIT
+    git ls-files -z | tar --null -T - -cf "$files"
+    docker run --rm \
+        -v "$files:/files.tar:ro" \
+        -v "$PWD/.git:/git:ro" \
+        -v "$installer:/out" \
+        -v "$cache:/cache" \
+        -e HOST_OWNER="$(id -u):$(id -g)" \
+        "$BUILD_IMAGE" bash -c '
+            set -e
+            mkdir /work && tar -xf /files.tar -C /work && cp -R /git /work/.git
+            bash /work/packaging/linux/build_in_container.sh'
+    echo "Built $(ls "$installer"/fmri_tui-*-linux-x86_64.tar.gz) -- unpack it and run ./install.sh"
+}
+
+case "${1:-}" in
+    --tui) build_tui; exit ;;
+    "") ;;
+    *) echo "Usage: $0 [--tui]" >&2; exit 1 ;;
+esac
 
 APP_NAME="fmri_convert_to_bids"
 PACKAGE_NAME="fmri-local-process"
@@ -48,6 +82,7 @@ STAGE="$WORK/package/$PACKAGE"
 rm -rf "$WORK/package"
 mkdir -p "$STAGE" "$INSTALLER"
 cp -R "$DIST/$APP_NAME" "$STAGE/app"
+echo "$APP_NAME" > "$STAGE/app/commands.txt"
 cp packaging/install.sh "$STAGE/install.sh"
 chmod +x "$STAGE/install.sh"
 

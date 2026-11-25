@@ -45,6 +45,11 @@ quote-style = "double"
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
+# The first three are the defaults; the rest are generated or data (not in git).
+exclude = [
+    "**/node_modules", "**/__pycache__", "**/.*",
+    "build_output", "results", "safe_data_source", "third_party",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]  # never walk into the (real-data) C-PAC output folders

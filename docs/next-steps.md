@@ -2,7 +2,8 @@
 
 The plan for the branch `headless-tui`, and the choices behind it. It expands the
 [Roadmap](roadmap.md) items *Terminal version of the toolbox* and *C-PAC on the HPC*.
-Nothing here is built yet, apart from the toy.
+Phases A to C are built; what was done and what
+is still to check (Windows, the real server) is in the [run log](headless-tui-log.md).
 
 ## Why
 

@@ -8,9 +8,9 @@
 set -euo pipefail
 
 APP_NAME="fmri_local_process"
-COMMANDS=(fmri_convert_to_bids)
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_NAME"
+COMMANDS_FILE="commands.txt"  # in the app folder: one command per line
 BIN_DIR="$HOME/.local/bin"
 MARKER="# added by the $APP_NAME installer"
 
@@ -19,6 +19,21 @@ shell_rc() {
         zsh) echo "$HOME/.zshrc" ;;
         *) [[ "$(uname -s)" == Darwin ]] && echo "$HOME/.bash_profile" || echo "$HOME/.bashrc" ;;
     esac
+}
+
+read_commands() {
+    # $1: an app folder. One from before commands.txt held the converter only.
+    if [[ -f "$1/$COMMANDS_FILE" ]]; then
+        mapfile -t COMMANDS < "$1/$COMMANDS_FILE"
+    else
+        COMMANDS=(fmri_convert_to_bids)
+    fi
+}
+
+remove_commands() {
+    for cmd in "${COMMANDS[@]}"; do
+        rm -f "$BIN_DIR/$cmd"
+    done
 }
 
 remove_path_line() {
@@ -31,18 +46,22 @@ remove_path_line() {
 }
 
 uninstall() {
-    for cmd in "${COMMANDS[@]}"; do
-        rm -f "$BIN_DIR/$cmd"
-    done
+    read_commands "$PREFIX"
+    remove_commands
     rm -rf "$PREFIX"
     remove_path_line
     echo "$APP_NAME uninstalled."
 }
 
 install() {
+    if [[ -d "$PREFIX" ]]; then  # an older version's commands may not all be in this one
+        read_commands "$PREFIX"
+        remove_commands
+    fi
     rm -rf "$PREFIX"
     mkdir -p "$PREFIX" "$BIN_DIR"
     cp -R "$HERE/app/." "$PREFIX/"
+    read_commands "$PREFIX"
     if [[ "$(uname -s)" == Darwin ]]; then
         # Unsigned binaries from a download are quarantined by Gatekeeper; clear it.
         xattr -dr com.apple.quarantine "$PREFIX" 2>/dev/null || true

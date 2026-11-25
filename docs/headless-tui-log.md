@@ -88,3 +88,44 @@ middle of a real conversion).
 Not checked: inline pictures in a real Windows Terminal / WezTerm, C-PAC and MRIQC for real from the
 terminal app (only with stand-ins; hours of computing), the First-level tab on real C-PAC output and
 the Behaviour logs tab on real logs (neither is in `safe_data_source/`; both run on synthetic data).
+
+## Phase C: the Linux bundle
+
+Done: `./build.sh --tui` ([The Linux bundle](linux-bundle.md)): `fmri_tui` and four command-line tools
+in one folder, without Qt, built in `rockylinux:8`; `packaging/install.sh` now installs whatever
+commands its bundle holds.
+
+Choices:
+
+- **dcm2niix is built from source** at the pinned version. The release binary needs glibc 2.29 and
+  doesn't start on Rocky 8 at all.
+- **Python 3.13 from `uv`** (pinned, checksum checked), as in development, not Rocky's own.
+- **Library paths:** a PyInstaller app passes its own library folder on to the programs it starts. A
+  start-up hook undoes that, so docker and mri_deface use the server's libraries.
+- **UTF-8 always**, so the app also works with a plain C locale.
+- **Not in the bundle:** the defacer image (Windows' installer script sets it up), see the page.
+
+Checked:
+
+- `check_bundle.sh` in clean `ubuntu:22.04`, `rockylinux:8` and `debian:12` containers without network.
+- SSH into a Debian 12 container (the base of OpenMediaVault) with a throwaway key: no display, inside
+  `tmux`, the connection dropped and taken up again, then a whole conversion of `safe_data_source/`.
+- On WSL: the bundle finds Docker and both images, and converts with defacing in Docker (3 of 3 T1w).
+
+Not checked: the real server (no access yet), `qsub` / Apptainer (the next branch), C-PAC and MRIQC
+runs started from the bundle.
+
+## Still to do
+
+1. **On Windows, before anything is merged:** update the environment (`python -m pip install -e
+   ".[gui,tui]" -r requirements-dev.txt`), run the tests, use the window on `safe_data_source/`,
+   check that it remembers its folders (registry), and `build.ps1 -Full` and `-Review`.
+2. **On the server:** processor, Docker access, `noexec` mounts, then install the bundle.
+3. **Pictures** in Windows Terminal over SSH.
+4. The crash when `pytest` exits with Qt loaded (there before; on Linux too).
+5. `tests/test_philani_bids.py` (from before) uses a first name as an example ID that also occurs in
+   the cleared data's folder names. Harmless if meant, worth a look as the repo is on GitHub.
+
+One slip to know about: Phase A was committed and pushed in the same command as its last checks, before
+their result had been read. Looked into straight after: the 365 tests had passed, and pyright's five
+errors were in a scratch script outside git. From then on, a script had to pass before each commit.

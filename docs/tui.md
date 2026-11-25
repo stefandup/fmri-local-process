@@ -47,5 +47,5 @@ The mouse works too, in most terminals.
 
 ## Installing
 
-From the repo: `pip install -e ".[tui]"` (no Qt).
-
+From the repo: `pip install -e ".[tui]"` (no Qt). For a server without
+Python, use [the Linux bundle](linux-bundle.md).

@@ -151,5 +151,6 @@ tests/
   (the base install has no Qt; `[gui]` adds the window, `[tui]` the terminal app)
 - Style: [Golden Rules](docs/golden-rules.md) and [AI Style Guide](docs/ai-style-guide.md).
   Agent rules are in [AGENTS.md](AGENTS.md).
-- Build: `.\build.ps1 -Exe | -Full | -Inno` (all output goes to `build_output/`).
+- Build: `.\build.ps1 -Exe | -Full | -Inno` (all output goes to `build_output/`); the bundle for
+  Linux servers: `./build.sh --tui` ([docs](docs/linux-bundle.md)).
 - Docs: `mkdocs serve`
