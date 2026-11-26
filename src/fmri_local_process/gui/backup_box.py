@@ -3,7 +3,6 @@ Restore Crosscheck Data): the study's ID, Save now, auto-save every few minutes,
 Restore. The saving itself is processing/crosscheck_backup.py; restoring needs a
 conversion, so the box only asks for it (`restore_requested`) and the tab does it."""
 
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +20,16 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from fmri_local_process.app.backup import (
+    BACKUP_FOLDER,
+    DEFAULT_AUTOSAVE_MINUTES,
+    DEFAULT_STUDY_ID,
+    MAX_AUTOSAVE_MINUTES,
+    NOTHING_TO_SAVE,
+    no_backup_text,
+    safe_name,
+    saved_message,
+)
 from fmri_local_process.gui.qt_common import (
     HOME_BASE_ACCENT_COLOR,
     accent_group_box_stylesheet,
@@ -31,22 +40,12 @@ from fmri_local_process.gui.qt_common import (
 from fmri_local_process.gui.toolbox_state import ToolboxState
 from fmri_local_process.processing.crosscheck_backup import list_backups, save_backup
 
-DEFAULT_STUDY_ID = "philani"
-DEFAULT_AUTOSAVE_MINUTES = 2
-MAX_AUTOSAVE_MINUTES = 60
-BACKUP_FOLDER = ("FmriLocalProcess", "crosscheck_backups")
-
 
 def backup_base() -> Path:
     """Where every study's backups live: the user's local app-data folder, outside any BIDS
     folder (a function, so tests can point it at a temp folder)."""
     base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation)
     return Path(base).joinpath(*BACKUP_FOLDER)
-
-
-def safe_name(text: str) -> str:
-    """A study ID as a folder name: letters, digits, '-', '_' and '.' only."""
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", text.strip()) or DEFAULT_STUDY_ID
 
 
 class BackupBox(QGroupBox):
@@ -148,9 +147,9 @@ class BackupBox(QGroupBox):
             return []
         if saved:
             self.status.setText(f"Saved {len(saved)} file(s) at {self.time_now()}")
-            self.message.emit(f"Crosscheck backup: {len(saved)} file(s) to {self.folder()}")
+            self.message.emit(saved_message(len(saved), self.folder()))
         elif manual:
-            self.message.emit("Nothing to back up yet: no crosscheck decisions in this folder.")
+            self.message.emit(NOTHING_TO_SAVE)
         return saved
 
     @staticmethod
@@ -168,7 +167,7 @@ class BackupBox(QGroupBox):
             QMessageBox.information(
                 self,
                 "No backup yet",
-                f"No crosscheck backup saved for study '{self.study_id()}' in {self.folder()}.",
+                no_backup_text(self.study_id(), self.folder()),
             )
             return
         names = [b.name for b in backups]

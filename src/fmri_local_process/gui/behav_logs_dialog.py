@@ -15,9 +15,6 @@ rule). Convert / update BIDS applies it.
 """
 
 import datetime as dt
-import re
-from collections.abc import Callable
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
@@ -43,27 +40,58 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from fmri_local_process.gui.crosscheck_gui import (
-    CROSSCHECKED_COLOR,
-    CROSSCHECKED_ICON,
-    mark_button,
+from fmri_local_process.app.behav import (
+    BAD_COLOR,
+    COLUMNS,
+    CORRECTED_DATE,
+    CORRECTED_ID,
+    EXPORT_INTO_BIDS_QUESTION,
+    EXPORT_LAYOUTS,
+    EXPORT_SUBFOLDER,
+    FIX_RED,
+    HELP_TEXT,
+    INTO_BIDS,
+    INTO_OUTPUT,
+    ISO_PATTERN,
+    MATCH,
+    MAX_SESSION,
+    S_CHECKED,
+    S_CORRECTED,
+    S_DATE,
+    S_FIXED,
+    S_NOTES,
+    S_TASKS,
+    SESSION_COLUMNS,
+    SESSIONS_HELP_TEXT,
+    STATE,
+    VERDICT,
+    VERDICT_COLORS,
+    WARN_COLOR,
+    BehavData,
+    BehavWork,
+    behav_folders,
+    event_rows,
+    export_text,
+    folder_name_parts,
+    inventory_text,
+    load_behav_data,
+    log_cells,
+    log_title,
+    missing_folders_notice,
+    parse_date,
 )
+from fmri_local_process.app.colors import OK_COLOR
+from fmri_local_process.app.crosscheck import CROSSCHECKED_COLOR, CROSSCHECKED_ICON
+from fmri_local_process.app.state import VIEW_ONLY
+from fmri_local_process.gui.crosscheck_gui import mark_button
 from fmri_local_process.gui.image_view import HelpToggle
-from fmri_local_process.gui.qt_common import NoticeBanner, paths_conflict
-from fmri_local_process.gui.toolbox_state import VIEW_ONLY, ToolboxState
-from fmri_local_process.processing.action_log import record_action
+from fmri_local_process.gui.qt_common import NoticeBanner
+from fmri_local_process.gui.toolbox_state import ToolboxState
 from fmri_local_process.processing.behav_export import (
     BIDS_LAYOUT,
-    ONE_FOLDER,
-    UNPLACED_DIR,
-    export_events,
 )
 from fmri_local_process.processing.behav_logs import (
-    BEHAV_TASKS,
-    EventTable,
     canonical_id,
-    id_problem,
-    read_log_lines,
 )
 from fmri_local_process.processing.behav_match import (
     COMPLETE,
@@ -71,62 +99,17 @@ from fmri_local_process.processing.behav_match import (
     ISO_DATE,
     MATCHED,
     REVIEW_ERROR,
-    REVIEW_NOT_USED,
     REVIEW_OK,
-    Correction,
     LogInfo,
     LogMatch,
-    SessionInfo,
     events_summary,
-    inspect_logs,
-    inventory,
-    match_logs,
     needs_review,
-    read_corrections,
     same_day_rivals,
-    write_corrections,
 )
-from fmri_local_process.processing.crosscheck import bold_run_length
 from fmri_local_process.processing.philani_bids import (
-    DATE_FORMAT,
     DICOM_CORRECTIONS_FILE,
     ScannedFolder,
-    read_crosschecked_folders,
-    read_dicom_corrections,
-    read_dicom_date_corrections,
-    read_dicom_session_corrections,
-    read_excluded_sessions,
-    read_scan_rules,
-    scan_dicom_root,
-    session_infos,
-    write_crosschecked_folders,
-    write_dicom_corrections,
-    write_dicom_date_corrections,
-    write_dicom_session_corrections,
 )
-
-OK_COLOR = "#2ecc71"
-WARN_COLOR = "#f39c12"
-BAD_COLOR = "#e74c3c"
-COLUMNS = (
-    "Log", "Task", "ID in name", "Logged", "Corrected ID", "Corrected date",
-    "Verdict", "Match", "Session", "Log state", "Notes",
-)  # fmt: skip
-CORRECTED_ID, CORRECTED_DATE, VERDICT, MATCH, SESSION, STATE, NOTES = range(4, 11)
-VERDICT_COLORS = {REVIEW_OK: OK_COLOR, REVIEW_ERROR: BAD_COLOR, REVIEW_NOT_USED: WARN_COLOR}
-SESSION_COLUMNS = (
-    "DICOM folder", "Scanned", "ID in folder", "Corrected ID", "Corrected date",
-    "Set session", "Resolves to", "BIDS session", "Scans", "Logs", "Checked", "Notes",
-)  # fmt: skip
-S_CORRECTED, S_DATE, S_FIXED, S_RESOLVED, S_SESSION, S_TASKS, S_LOGS, S_CHECKED, S_NOTES = range(
-    3, 12
-)
-
-Verdict = tuple[str, str]  # (review, note)
-
-
-ISO_PATTERN = re.compile(r"\d{0,4}(-\d{0,2}(-\d{0,2})?)?")  # YYYY-MM-DD as it is typed
-MAX_SESSION = 99
 
 
 class DateValidator(QValidator):
@@ -151,112 +134,6 @@ def session_validator(parent: QWidget) -> QIntValidator:
     return QIntValidator(1, MAX_SESSION, parent)
 
 
-def parse_date(text: str) -> dt.date | None:
-    """'' -> None; 2024-04-03 or 20240403 -> date; anything else raises ValueError."""
-    text = text.strip()
-    if not text:
-        return None
-    for fmt in (ISO_DATE, "%Y%m%d"):
-        try:
-            return dt.datetime.strptime(text, fmt).date()
-        except ValueError:
-            continue
-    raise ValueError(f"{text!r} is not a date (YYYY-MM-DD)")
-
-
-def folder_name_parts(name: str) -> tuple[str, str]:
-    """(scan date/time, ID as written) from <YYYYMMDD>_<HHMM>_<ID>[...]; "-" where missing."""
-    parts = name.split("_")
-    try:
-        day = dt.datetime.strptime(parts[0], DATE_FORMAT).strftime(ISO_DATE)
-    except ValueError:
-        day = "-"
-    time = parts[1] if len(parts) > 1 and len(parts[1]) == 4 and parts[1].isdigit() else ""
-    when = f"{day} {time[:2]}:{time[2:]}" if time and day != "-" else day
-    return when, parts[2] if len(parts) > 2 else "-"
-
-
-def id_text(raw: str, canonical: str) -> str:
-    return raw if raw == canonical else f"{raw} -> {canonical}"
-
-
-def inventory_text(infos: list[LogInfo]) -> str:
-    lines = []
-    for task, inv in inventory(infos).items():
-        states = ", ".join(f"{n} {state}" for state, n in inv.states.most_common())
-        lines.append(f"{task}: {inv.logs} log(s) -- {states}")
-        types = ", ".join(f"{t} ({n})" for t, n in inv.trial_types.most_common())
-        lines.append(f"  trial types (logs containing each): {types or '-'}")
-        for n, (layout, count) in enumerate(inv.layouts.most_common(), start=1):
-            lines.append(f"  column layout {n}: {count} log(s), {len(layout)} columns: ")
-            lines.append("    " + ", ".join(layout))
-        lines.append("")
-    return "\n".join(lines)
-
-
-def events_end(table: EventTable) -> float | None:
-    """When the last event ends, in seconds from the first pulse."""
-    if not table.onset or table.duration[-1] is None:
-        return None
-    return table.onset[-1] + table.duration[-1]
-
-
-def fit_text(table: EventTable, run: tuple[int, float | None] | None) -> tuple[str, str]:
-    """How the events line up with the converted BOLD run: (text, colour)."""
-    end = events_end(table)
-    end_text = f"events end at {end:.1f} s" if end is not None else "events have no end"
-    if run is None:
-        return f"{end_text}; the BOLD run isn't in the BIDS folder yet", WARN_COLOR
-    volumes, tr = run
-    if tr is None:
-        return f"{end_text}; BOLD run has {volumes} volumes (no TR in its sidecar)", WARN_COLOR
-    length = volumes * tr
-    text = f"{end_text}; BOLD run is {volumes} volumes x {tr:g} s = {length:.1f} s"
-    if end is not None and end > length + tr:
-        return f"{text}: events run past the end of the scan", BAD_COLOR
-    return text, OK_COLOR
-
-
-@dataclass
-class BehavData:
-    """What the tab reads from disk -- the slow part, done on a worker thread."""
-
-    infos: list[LogInfo]
-    scanned: list[ScannedFolder]
-    dicom_corrections: dict[str, str]
-    excluded: set[str]  # DICOM folders deleted at crosscheck
-    dicom_dates: dict[str, dt.date] = field(default_factory=dict)  # corrected scan dates
-    dicom_sessions: dict[str, str] = field(default_factory=dict)  # session numbers set
-    checked_folders: set[str] = field(default_factory=set)  # marked crosschecked
-
-
-LoadProgress = Callable[[int, int, str], None]  # (done, total, what)
-
-
-def load_behav_data(
-    bids_root: Path, behav_root: Path, dicom_root: Path, progress: LoadProgress | None = None
-) -> BehavData:
-    def step(what: str) -> Callable[[int, int], None] | None:
-        if progress is None:
-            return None
-        report = progress
-        return lambda done, total: report(done, total, what)
-
-    infos = inspect_logs(behav_root, read_corrections(bids_root), step("Reading logs"))
-    scanned = scan_dicom_root(
-        dicom_root, step("Scanning DICOM session folders"), read_scan_rules(bids_root)
-    )
-    return BehavData(
-        infos,
-        scanned,
-        read_dicom_corrections(bids_root),
-        set(read_excluded_sessions(bids_root)),
-        read_dicom_date_corrections(bids_root),
-        read_dicom_session_corrections(bids_root),
-        read_crosschecked_folders(bids_root),
-    )
-
-
 class BehavLoadThread(QThread):
     progress = Signal(int, int, str)
     done = Signal(object)  # BehavData, or an error message
@@ -274,36 +151,7 @@ class BehavLoadThread(QThread):
         self.done.emit(data)
 
 
-SESSIONS_HELP_TEXT = (
-    "Every DICOM session folder, with its scan date and time (to tell twins apart) and the "
-    "subject ID as written in its name. A twin's 12345-1 becomes 12345T1; other characters "
-    "(e.g. a space) are removed and flagged.<br><br>"
-    "Correct a wrong subject ID or scan date, or set a session number (e.g. 2 when the "
-    "first visit is missing), then press <b>Re-check</b>: <b>Resolves to</b> and <b>BIDS "
-    "session</b> show the result, <b>Logs</b> the behaviour logs matched to it. Once you have "
-    f"been through a folder, <b>Mark crosschecked</b> (it then shows {CROSSCHECKED_ICON}); "
-    "select several rows (Ctrl/Shift-click or drag) to mark them all at once.<br><br>"
-    "<b>Save</b> keeps this (and the Behaviour logs tab's corrections) in the BIDS folder's "
-    "code/ folder; Convert to BIDS applies it. Raw folders are never renamed."
-)
-HELP_TEXT = (
-    "Each log is matched to a scan session by subject ID and date. A twin's 12345-1 becomes "
-    "12345T1; other characters (e.g. a space) are removed and flagged.<br><br>"
-    "Correct a wrong ID or date here, or a wrong subject ID in a DICOM folder name on the "
-    "<b>Raw DICOMs</b> tab, and press <b>Re-check</b>. Select a log to see its events and "
-    "mark it OK or as an error; of several logs on one day, pick the one to use. Once you "
-    f"have been through a log, <b>Mark crosschecked</b> (it then shows {CROSSCHECKED_ICON}); "
-    "select several rows (Ctrl/Shift-click or drag) to mark them all at once.<br><br>"
-    "<b>Save</b> keeps all of this in the BIDS folder (code/behav_corrections.json and "
-    "code/dicom_id_corrections.json), and Convert to BIDS applies it. Raw files are never "
-    "renamed. Sessions already converted under an old ID stay in the BIDS folder until you "
-    "remove them."
-)
 ROWS_PER_PROGRESS_STEP = 25
-FIX_RED = "Fix the cells marked red (dates as YYYY-MM-DD, sessions as a number)."
-# Where "Export logs..." can put the events files.
-INTO_BIDS, INTO_OUTPUT, INTO_OTHER = "bids", "output", "other"
-EXPORT_SUBFOLDER = "events"  # in C-PAC's output folder
 
 
 class BehavLogsPanel(QWidget):
@@ -319,32 +167,15 @@ class BehavLogsPanel(QWidget):
         output_root: Path | None = None,
     ):
         super().__init__(parent)
-        self.bids_root, self.behav_root, self.dicom_root = bids_root, behav_root, dicom_root
-        self.output_root = output_root  # C-PAC's output folder (Preprocess tab), if chosen
-        self.bids_locked = False  # view-only package: never write into the BIDS folder
-        self.events_cache: dict[str, EventTable | str] = {}  # key -> table, or why it failed
-        self.behav_tasks = {t.task for t in BEHAV_TASKS}  # tasks that should have a log
-
+        self.bids_root = bids_root
         if data is None:  # read here and now (the tab reads it on a worker thread instead)
             QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
                 data = load_behav_data(bids_root, behav_root, dicom_root)
             finally:
                 QGuiApplication.restoreOverrideCursor()
-        self.infos, self.scanned = data.infos, data.scanned
-        self.excluded = data.excluded
-        dicom_corrections = data.dicom_corrections
-        self.saved_dates, self.saved_sessions = data.dicom_dates, data.dicom_sessions
-        self.sessions: list[SessionInfo] = session_infos(
-            self.scanned, dicom_corrections, self.excluded, data.dicom_dates, data.dicom_sessions
-        )
-        self.verdicts: dict[str, Verdict] = {
-            info.key: (info.correction.review, info.correction.note)
-            for info in self.infos
-            if info.correction.review
-        }
-        self.crosschecked = {info.key for info in self.infos if info.correction.crosschecked}
-        self.checked_folders = set(data.checked_folders)  # crosschecked on the Raw DICOMs tab
+        self.work = BehavWork(bids_root, behav_root, dicom_root, data)
+        self.work.output_root = output_root  # C-PAC's output folder (Preprocess tab), if chosen
 
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
@@ -391,7 +222,7 @@ class BehavLogsPanel(QWidget):
 
         # The Raw DICOMs tab shows this (the toolbox puts it on a tab of its own); it shares
         # this panel's data, Re-check and Save.
-        self.sessions_view = self._build_sessions_tab(dicom_corrections)
+        self.sessions_view = self._build_sessions_tab()
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(self._build_table())
         tabs = QTabWidget()
@@ -403,8 +234,20 @@ class BehavLogsPanel(QWidget):
         splitter.addWidget(tabs)
         splitter.setSizes([450, 400])
         layout.addWidget(splitter, 1)
-        self.show_matches(match_logs(self.infos, self.sessions))
+        self.show_matches()
         self.show_detail()
+
+    @property
+    def infos(self) -> list[LogInfo]:
+        return self.work.infos
+
+    @property
+    def scanned(self) -> list[ScannedFolder]:
+        return self.work.scanned
+
+    @property
+    def matches(self) -> list[LogMatch]:
+        return self.work.matches
 
     # ---- layout -------------------------------------------------------------------------
 
@@ -431,7 +274,7 @@ class BehavLogsPanel(QWidget):
             self.date_edits.append(date_edit)
         return self.table
 
-    def _build_sessions_tab(self, corrections: dict[str, str]) -> QWidget:
+    def _build_sessions_tab(self) -> QWidget:
         """The Raw DICOMs view: Re-check / Save, the session table, and its Mark / Un-mark
         crosschecked row underneath."""
         panel = QWidget()
@@ -460,7 +303,7 @@ class BehavLogsPanel(QWidget):
         controls.addWidget(self.sessions_help.button)
         layout.addLayout(controls)
         layout.addWidget(self.sessions_help.box)
-        layout.addWidget(self._build_session_table(corrections), 1)
+        layout.addWidget(self._build_session_table(), 1)
         row = QHBoxLayout()
         self.sessions_selected_label = QLabel()
         row.addWidget(self.sessions_selected_label, 1)
@@ -479,7 +322,7 @@ class BehavLogsPanel(QWidget):
         self.update_session_buttons()
         return panel
 
-    def _build_session_table(self, corrections: dict[str, str]) -> QTableWidget:
+    def _build_session_table(self) -> QTableWidget:
         """Every DICOM session folder: when it was scanned, its ID as written, a correction."""
         self.session_table = QTableWidget(len(self.scanned), len(SESSION_COLUMNS))
         self.session_table.setHorizontalHeaderLabels(list(SESSION_COLUMNS))
@@ -498,11 +341,11 @@ class BehavLogsPanel(QWidget):
                 item.setToolTip(text)
                 self.session_table.setItem(row, column, item)
             self.session_table.setItem(row, S_TASKS, QTableWidgetItem(", ".join(sorted(tasks))))
-            edit = QLineEdit(corrections.get(folder.name, ""))
+            edit = QLineEdit(self.work.fixes.ids.get(folder.name, ""))
             edit.setPlaceholderText(canonical_id(raw_id) or "ID")
             self.session_table.setCellWidget(row, S_CORRECTED, edit)
             self.session_edits[folder.name] = edit
-            saved_date = self.saved_dates.get(folder.name)
+            saved_date = self.work.fixes.dates.get(folder.name)
             date_edit = QLineEdit(saved_date.strftime(ISO_DATE) if saved_date else "")
             date_edit.setValidator(DateValidator(date_edit))
             date_edit.setPlaceholderText(when.split(" ")[0] if when != "-" else "YYYY-MM-DD")
@@ -512,7 +355,7 @@ class BehavLogsPanel(QWidget):
             )
             self.session_table.setCellWidget(row, S_DATE, date_edit)
             self.folder_date_edits[folder.name] = date_edit
-            session_edit = QLineEdit(self.saved_sessions.get(folder.name, ""))
+            session_edit = QLineEdit(self.work.fixes.sessions.get(folder.name, ""))
             session_edit.setPlaceholderText("by date")
             session_edit.setValidator(session_validator(session_edit))
             session_edit.setToolTip(
@@ -588,9 +431,9 @@ class BehavLogsPanel(QWidget):
 
     # ---- matching -------------------------------------------------------------------------
 
-    def corrections(self) -> dict[str, Correction] | None:
-        """Typed corrections + verdicts; None (bad cells marked red) if a date won't parse."""
-        result: dict[str, Correction] = {}
+    def typed_corrections(self) -> dict[str, tuple[str, dt.date | None]] | None:
+        """Typed IDs and dates by log; None (bad cells marked red) if a date won't parse."""
+        result: dict[str, tuple[str, dt.date | None]] = {}
         ok = True
         for info, id_edit, date_edit in zip(
             self.infos, self.id_edits, self.date_edits, strict=True
@@ -602,12 +445,7 @@ class BehavLogsPanel(QWidget):
                 date_edit.setStyleSheet(f"background-color: {BAD_COLOR};")
                 ok = False
                 continue
-            review, note = self.verdicts.get(info.key, (None, ""))
-            correction = Correction(
-                id_edit.text().strip() or None, day, review, note, info.key in self.crosschecked
-            )
-            if correction != Correction():
-                result[info.key] = correction
+            result[info.key] = (id_edit.text(), day)
         return result if ok else None
 
     def dicom_corrections(self) -> dict[str, str]:
@@ -648,10 +486,19 @@ class BehavLogsPanel(QWidget):
                 labels[name] = str(int(text))
         return labels if ok else None
 
-    def recheck(self) -> None:
-        corrections = self.corrections()
+    def take_typed(self) -> bool:
+        """Put what is typed into the work; False (bad cells marked red) if some is wrong."""
+        corrections = self.typed_corrections()
         dates, sessions = self.dicom_dates(), self.dicom_sessions()
         if corrections is None or dates is None or sessions is None:
+            return False
+        self.work.set_corrections(corrections)
+        fixes = self.work.fixes
+        fixes.ids, fixes.dates, fixes.sessions = self.dicom_corrections(), dates, sessions
+        return True
+
+    def recheck(self) -> None:
+        if not self.take_typed():
             self.set_status(FIX_RED)
             return
         self.recheck_button.setEnabled(False)
@@ -660,12 +507,8 @@ class BehavLogsPanel(QWidget):
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
         try:
-            for info in self.infos:
-                info.correction = corrections.get(info.key, Correction())
-            self.sessions = session_infos(
-                self.scanned, self.dicom_corrections(), self.excluded, dates, sessions
-            )
-            self.show_matches(match_logs(self.infos, self.sessions), progress=True)
+            self.work.match()
+            self.show_matches(progress=True)
             self.show_detail()
         finally:
             self.progress_bar.setVisible(False)
@@ -673,28 +516,15 @@ class BehavLogsPanel(QWidget):
             self.sessions_recheck_button.setEnabled(True)
         self.sessions_status.setText("Re-checked (not saved yet)")
 
-    def show_matches(self, matches: list[LogMatch], progress: bool = False) -> None:
-        self.matches = matches
-        for row, m in enumerate(matches):
+    def show_matches(self, progress: bool = False) -> None:
+        for row, m in enumerate(self.matches):
             if progress and row % ROWS_PER_PROGRESS_STEP == 0:
                 self.progress_bar.setValue(row)
                 QApplication.processEvents()  # let the bar move; Re-check is disabled meanwhile
             info = m.info
-            logged = f"{info.time_text} ({info.date_source})" if info.found_date else "-"
             review = info.correction.review or ""
-            marked = info.correction.crosschecked
-            verdict = " ".join(filter(None, [CROSSCHECKED_ICON if marked else "", review]))
-            cells = {
-                0: info.key,
-                1: info.task.task if info.task else "?",
-                2: id_text(info.raw_subject, info.file_subject),
-                3: logged,
-                VERDICT: verdict,
-                MATCH: m.status,
-                SESSION: f"{m.session.name} ({m.session.when})" if m.session else "",
-                STATE: info.state,
-                NOTES: "; ".join(filter(None, [m.hint, *info.notes, info.correction.note])),
-            }
+            cells = log_cells(m)
+            verdict = cells[VERDICT]
             for column, text in cells.items():
                 item = QTableWidgetItem(text)
                 item.setToolTip(text)
@@ -709,51 +539,13 @@ class BehavLogsPanel(QWidget):
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setStretchLastSection(True)
         self.show_sessions()
-        matched = sum(m.status == MATCHED for m in matches)
-        waiting = sum(needs_review(m) for m in matches)
-        marked = sum(m.info.correction.crosschecked for m in matches)
-        self.summary.setText(
-            f"{matched} of {len(matches)} log(s) matched to a session; {waiting} need review; "
-            f"{CROSSCHECKED_ICON} {marked} crosschecked"
-        )
+        self.summary.setText(self.work.summary())
         self.apply_filter()
 
     def show_sessions(self) -> None:
         """Refresh the Raw DICOMs tab: resolved ID, BIDS session and matched logs."""
-        by_folder = {s.folder: s for s in self.sessions}
-        logs: dict[str, list[str]] = {}
-        for m in self.matches:
-            if m.status == MATCHED and m.session is not None and m.info.task is not None:
-                logs.setdefault(m.session.folder, []).append(
-                    f"{m.info.task.task}: {m.info.time_text}"
-                )
-        for row, (folder, tasks) in enumerate(self.scanned):
-            session = by_folder.get(folder.name)
-            _, raw_id = folder_name_parts(folder.name)
-            matched = logs.get(folder.name, [])
-            missing = sorted(t for t in tasks if not any(x.startswith(f"{t}:") for x in matched))
-            notes = [id_problem(raw_id)] if not self.session_edits[folder.name].text() else []
-            if session is None:
-                notes.append(
-                    "not converted: no date or ID in the folder name; give it a Corrected ID "
-                    "and a Corrected date, then Re-check and Save"
-                )
-            fixed = self.folder_session_edits[folder.name].text().strip()
-            if session is not None and fixed and session.label != fixed:
-                notes.append(f"ses-{fixed} already set for another of its folders")
-            if not tasks:
-                notes.append(
-                    "no series matches a scan rule: nothing would be converted (the "
-                    "conversion summary lists its series folders)"
-                )
-            notes += [f"no {task} log" for task in missing if task in self.behav_tasks]
-            cells = {
-                S_RESOLVED: id_text(raw_id, session.subject) if session else "-",
-                S_SESSION: session.name if session else "",
-                S_LOGS: "; ".join(sorted(matched)),
-                S_CHECKED: CROSSCHECKED_ICON if folder.name in self.checked_folders else "",
-                S_NOTES: "; ".join(filter(None, notes)),
-            }
+        for row in range(len(self.scanned)):
+            cells = self.work.folder_cells(row)
             for column, text in cells.items():
                 item = QTableWidgetItem(text)
                 item.setToolTip(text)
@@ -774,12 +566,12 @@ class BehavLogsPanel(QWidget):
     def update_session_buttons(self) -> None:
         chosen = self.selected_folders()
         n = len(chosen)
-        self.mark_sessions_button.setEnabled(any(f not in self.checked_folders for f in chosen))
+        self.mark_sessions_button.setEnabled(any(f not in self.work.fixes.checked for f in chosen))
         self.mark_sessions_button.setText(
             f"Mark {n} crosschecked" if n > 1 else "Mark crosschecked"
         )
-        self.unmark_sessions_button.setEnabled(any(f in self.checked_folders for f in chosen))
-        checked = len(self.checked_folders & {f.name for f, _ in self.scanned})
+        self.unmark_sessions_button.setEnabled(any(f in self.work.fixes.checked for f in chosen))
+        checked = len(self.work.fixes.checked & {f.name for f, _ in self.scanned})
         self.sessions_selected_label.setText(
             f"{n} selected; {CROSSCHECKED_ICON} {checked} of {len(self.scanned)} crosschecked"
         )
@@ -788,9 +580,9 @@ class BehavLogsPanel(QWidget):
         """Mark (or un-mark) every selected DICOM folder as reviewed; kept on Save."""
         folders = set(self.selected_folders())
         if marked:
-            self.checked_folders |= folders
+            self.work.fixes.checked |= folders
         else:
-            self.checked_folders -= folders
+            self.work.fixes.checked -= folders
         self.show_sessions()
         self.update_session_buttons()
 
@@ -817,17 +609,6 @@ class BehavLogsPanel(QWidget):
         self.mark_button.setText(f"Mark {n} crosschecked" if n > 1 else "Mark crosschecked")
         self.unmark_button.setEnabled(any(m.info.correction.crosschecked for m in chosen))
 
-    def events_of(self, info: LogInfo) -> EventTable | str:
-        if info.key not in self.events_cache:
-            if info.task is None:
-                self.events_cache[info.key] = "No task: no events to show."
-            else:
-                try:
-                    self.events_cache[info.key] = info.task.extract(read_log_lines(info.path))
-                except (OSError, ValueError, KeyError, IndexError) as e:
-                    self.events_cache[info.key] = f"Can't extract events: {e!r}"
-        return self.events_cache[info.key]
-
     def show_detail(self) -> None:
         chosen = self.selected_matches()
         m = chosen[0] if len(chosen) == 1 else None
@@ -849,20 +630,13 @@ class BehavLogsPanel(QWidget):
         info = m.info
         self.use_button.setEnabled(bool(same_day_rivals(self.matches, m)))
         self.note_edit.setText(info.correction.note)
-        notes = "; ".join(filter(None, [m.hint, *info.notes])) or "no issues found"
-        self.detail_title.setText(
-            f"<b>{info.key}</b> -- {m.status}"
-            f"{' -> ' + m.session.name if m.session else ''}, {info.state}: {notes}"
-        )
-        events = self.events_of(info)
+        self.detail_title.setText(f"<b>{info.key}</b> -- {log_title(m)}")
+        events = self.work.events_of(info)
         if isinstance(events, str):
             self.fit_label.setText(events)
             self.fit_label.setStyleSheet(f"color: {BAD_COLOR};")
             return
-        run = None
-        if m.session is not None and info.task is not None:
-            run = bold_run_length(self.bids_root, info.subject, m.session.label, info.task.task)
-        text, color = fit_text(events, run)
+        text, color = self.work.fit_of(m, events)
         self.fit_label.setText(text)
         self.fit_label.setStyleSheet(f"color: {color};")
         self.events_summary.setPlainText("\n".join(events_summary(events)))
@@ -870,33 +644,19 @@ class BehavLogsPanel(QWidget):
         self.events_table.setHorizontalHeaderLabels(
             ["onset (s)", "duration (s)", "trial_type", events.modulator]
         )
-        rows = list(
-            zip(
-                events.onset,
-                events.duration,
-                events.trial_type,
-                events.modulator_values,
-                strict=True,
-            )
-        )
+        rows = event_rows(events)
         self.events_table.setRowCount(len(rows))
         for row, values in enumerate(rows):
-            for column, value in enumerate(values):
-                text = f"{value:.3f}" if isinstance(value, float) else str(value or "n/a")
+            for column, text in enumerate(values):
                 self.events_table.setItem(row, column, QTableWidgetItem(text))
         self.events_table.resizeColumnsToContents()
-
-    def _set(self, key: str, review: str | None, note: str = "") -> None:
-        if review:
-            self.verdicts[key] = (review, note)
-        else:
-            self.verdicts.pop(key, None)
 
     def set_verdict(self, review: str | None) -> None:
         m = self.selected()
         if m is None:
             return
-        self._set(m.info.key, review, self.note_edit.text().strip() if review else "")
+        note = self.note_edit.text().strip() if review else ""
+        self.work.set_verdict(m.info.key, review, note)
         self.recheck()
 
     def set_crosschecked(self, marked: bool) -> None:
@@ -905,33 +665,21 @@ class BehavLogsPanel(QWidget):
         if not keys:
             return
         if marked:
-            self.crosschecked |= keys
+            self.work.crosschecked |= keys
         else:
-            self.crosschecked -= keys
+            self.work.crosschecked -= keys
         self.recheck()
 
     def use_this_one(self) -> None:
         m = self.selected()
         if m is None:
             return
-        chosen = m.info
-        self._set(chosen.key, REVIEW_OK, self.note_edit.text().strip())
-        for rival in same_day_rivals(self.matches, m):
-            if rival.info.correction.review == REVIEW_ERROR:
-                continue  # already an error: keep that verdict and its note
-            self._set(rival.info.key, REVIEW_NOT_USED, f"{chosen.path.name} used instead")
+        self.work.use_this_one(m, self.note_edit.text().strip())
         self.recheck()
 
     def export_destinations(self) -> dict[str, str]:
         """What the export can go into: {text shown: INTO_BIDS / INTO_OUTPUT / INTO_OTHER}."""
-        choices = {}
-        if not self.bids_locked:
-            choices[f"The BIDS folder (tab 1): {self.bids_root}"] = INTO_BIDS
-        if self.output_root is not None:
-            out = self.output_root / EXPORT_SUBFOLDER
-            choices[f"C-PAC's output folder: {out}"] = INTO_OUTPUT
-        choices["Another folder..."] = INTO_OTHER
-        return choices
+        return self.work.export_destinations()
 
     def export_target(self) -> tuple[Path, str, bool] | None:
         """Ask where and how: (folder, layout, into the BIDS folder); None if cancelled."""
@@ -946,24 +694,18 @@ class BehavLogsPanel(QWidget):
             replace = QMessageBox.question(
                 self,
                 "Export into the BIDS folder",
-                "Write each matched log's events.tsv into its sub-/ses-/func folder, "
-                "replacing the events file already there (Convert to BIDS writes the same "
-                "files)? Logs not matched to a scan session are left out.",
+                EXPORT_INTO_BIDS_QUESTION,
             )
             if replace != QMessageBox.StandardButton.Yes:
                 return None
             return self.bids_root, BIDS_LAYOUT, True
-        layouts = {
-            "One folder (sub-..._events.tsv side by side)": ONE_FOLDER,
-            "BIDS folders (sub-.../ses-.../func/)": BIDS_LAYOUT,
-        }
         choice, ok = QInputDialog.getItem(
-            self, "Export logs", "Lay the events files out as:", list(layouts), 0, False
+            self, "Export logs", "Lay the events files out as:", list(EXPORT_LAYOUTS), 0, False
         )
         if not ok:
             return None
-        if destination == INTO_OUTPUT and self.output_root is not None:
-            out_root = self.output_root / EXPORT_SUBFOLDER
+        if destination == INTO_OUTPUT and self.work.output_root is not None:
+            out_root = self.work.output_root / EXPORT_SUBFOLDER
         else:
             chosen = QFileDialog.getExistingDirectory(
                 self, "Export the events files to", str(self.bids_root.parent)
@@ -971,20 +713,10 @@ class BehavLogsPanel(QWidget):
             if not chosen:
                 return None
             out_root = Path(chosen)
-            if paths_conflict(out_root, self.bids_root):
-                QMessageBox.warning(
-                    self,
-                    "Pick another folder",
-                    "Not in (or around) the BIDS folder: choose 'The BIDS folder' instead.",
-                )
-                return None
-        for raw, what in ((self.behav_root, "behavioural logs"), (self.dicom_root, "DICOMs")):
-            if paths_conflict(out_root, raw):
-                QMessageBox.warning(
-                    self, "Pick another folder", f"Not in (or around) the raw {what}."
-                )
-                return None
-        return out_root, layouts[choice], False
+        if problem := self.work.export_problem(out_root):
+            QMessageBox.warning(self, "Pick another folder", problem)
+            return None
+        return out_root, EXPORT_LAYOUTS[choice], False
 
     def on_export(self) -> None:
         """Save as: pick where and how, then write every log's events.tsv there."""
@@ -1003,64 +735,19 @@ class BehavLogsPanel(QWidget):
             QApplication.processEvents()
 
         try:
-            report = export_events(
-                self.matches, out_root, layout, progress, skip_unplaced=into_bids
-            )
-            if into_bids and report.written:
-                record_action(
-                    self.bids_root,
-                    "export behaviour events",
-                    str(self.bids_root),
-                    f"{len(report.written)} events file(s) written",
-                )
+            report = self.work.export(out_root, layout, into_bids, progress)
         finally:
             self.progress_bar.setVisible(False)
             self.progress_bar.setFormat("Re-checking %v / %m logs")
             self.export_button.setEnabled(True)
-        lines = [f"{len(report.written)} events file(s) written to {out_root}."]
-        if report.left_out:
-            why = "not matched to a session, " if into_bids else ""
-            lines.append(
-                f"{len(report.left_out)} left out ({why}marked error / not used, or no task)."
-            )
-        if report.failed:
-            lines.append(f"{len(report.failed)} failed:")
-            lines += [f"  {log}: {why}" for log, why in report.failed[:10]]
-        unplaced = sum(UNPLACED_DIR in p.parts for p in report.written)
-        if unplaced:
-            lines.append(f"{unplaced} not matched to a session: in {UNPLACED_DIR}/.")
         box = QMessageBox.warning if report.failed else QMessageBox.information
-        box(self, "Logs exported", "\n".join(lines))
+        box(self, "Logs exported", export_text(report, out_root, into_bids))
 
     def save(self) -> None:
-        corrections = self.corrections()
-        dates, sessions = self.dicom_dates(), self.dicom_sessions()
-        if corrections is None or dates is None or sessions is None:
+        if not self.take_typed():
             self.set_status(f"Not saved: {FIX_RED[0].lower()}{FIX_RED[1:]}")
             return
-        # Keep corrections for logs not under this behaviour folder right now.
-        keys = {info.key for info in self.infos}
-        kept = {k: v for k, v in read_corrections(self.bids_root).items() if k not in keys}
-        write_corrections(self.bids_root, kept | corrections)
-        folders = set(self.session_edits)
-        kept_ids = {
-            k: v for k, v in read_dicom_corrections(self.bids_root).items() if k not in folders
-        }
-        write_dicom_corrections(self.bids_root, kept_ids | self.dicom_corrections())
-        # The same for dates and session numbers: keep those of folders not listed now.
-        kept_dates = {
-            k: v for k, v in read_dicom_date_corrections(self.bids_root).items() if k not in folders
-        }
-        write_dicom_date_corrections(self.bids_root, kept_dates | dates)
-        kept_sessions = {
-            k: v
-            for k, v in read_dicom_session_corrections(self.bids_root).items()
-            if k not in folders
-        }
-        write_dicom_session_corrections(self.bids_root, kept_sessions | sessions)
-        kept_checked = read_crosschecked_folders(self.bids_root) - folders
-        write_crosschecked_folders(self.bids_root, kept_checked | self.checked_folders)
-        self.saved_dates, self.saved_sessions = dates, sessions
+        self.work.save()
         self.summary.setText(self.summary.text() + "  (saved)")
         self.sessions_status.setText("Saved")
         self.saved.emit()
@@ -1111,11 +798,7 @@ class BehavLogsPage(QWidget):
         self.update_status()
 
     def folders(self) -> tuple[Path, Path, Path] | None:
-        roots = [self.state.folder(key) for key in ("bids", "behav", "dicom")]
-        bids_root, behav_root, dicom_root = roots
-        if bids_root is None or behav_root is None or dicom_root is None:
-            return None
-        return bids_root, behav_root, dicom_root
+        return behav_folders(self.state)
 
     def update_status(self, text: str = "") -> None:
         ready = self.folders() is not None
@@ -1126,28 +809,9 @@ class BehavLogsPage(QWidget):
 
     def notices(self) -> list[str]:
         """Folders not chosen; once read, no logs or no DICOM sessions found in them."""
-        names = {
-            "dicom": "DICOM sessions",
-            "behav": "behavioural logs",
-            "bids": "BIDS",
-        }
-        missing = [name for key, name in names.items() if self.state.folder(key) is None]
-        if missing:
-            return [
-                f"No {' / '.join(missing)} folder chosen: choose it on the Setup & Convert "
-                "to BIDS tab. This tab matches the logs to the scan sessions, so it needs all "
-                "three."
-            ]
-        if self.panel is None:
-            return []
-        messages = []
-        if not self.panel.infos:
-            messages.append(
-                f"No behavioural logs (.log files) found in {self.state.folder('behav')}."
-            )
-        if not self.panel.scanned:
-            messages.append(f"No DICOM session folders found in {self.state.folder('dicom')}.")
-        return messages
+        if missing := missing_folders_notice(self.state):
+            return missing
+        return self.panel.work.notices() if self.panel is not None else []
 
     def show_page(self) -> None:
         if self.panel is None and self.loader is None and self.folders() is not None:
@@ -1155,7 +819,7 @@ class BehavLogsPage(QWidget):
 
     def on_folder_changed(self, key: str) -> None:
         if key == "output" and self.panel is not None:  # only the export uses it
-            self.panel.output_root = self.state.folder("output")
+            self.panel.work.output_root = self.state.folder("output")
         if key in ("bids", "behav", "dicom"):
             self.drop_panel()
             if self.folders() is not None:
@@ -1214,7 +878,7 @@ class BehavLogsPage(QWidget):
         )
         self.panel.saved.connect(self.on_saved)
         if VIEW_ONLY in self.state.busy:  # corrections feed Convert to BIDS
-            self.panel.bids_locked = True
+            self.panel.work.bids_locked = True
             for button in (self.panel.save_button, self.panel.sessions_save_button):
                 button.setEnabled(False)
                 button.setToolTip("Locked: view-only review package.")
@@ -1232,7 +896,7 @@ class BehavLogsPage(QWidget):
             QApplication.processEvents()  # delivers its `done`
 
     def badge(self) -> str:
-        waiting = sum(needs_review(m) for m in self.panel.matches) if self.panel else 0
+        waiting = self.panel.work.waiting() if self.panel else 0
         return f"{waiting} to review" if waiting else ""
 
     def on_saved(self) -> None:

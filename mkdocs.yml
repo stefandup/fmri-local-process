@@ -16,12 +16,18 @@ markdown_extensions:
 nav:
   - Home: index.md
   - The toolbox window: toolbox.md
+  - The toolbox in a terminal: tui.md
+  - The Linux bundle: linux-bundle.md
   - BIDS conversion: bids-conversion.md
   - Preprocessing: preprocessing.md
   - First-level stats: first-level-stats.md
+  - Checkerboard task protocol: checkerboard-protocol.md
   - Sequence overview: sequence-overview.md
   - Review packages: review-package.md
   - Roadmap: roadmap.md
+  - "Next steps: headless & HPC": next-steps.md
+  - "Headless TUI: run log": headless-tui-log.md
+  - "The app/ layer, shown on a toy": app-layer-toy.md
   - For Contributors:
       - Golden Rules: golden-rules.md
   - AI Style Guide: ai-style-guide.md

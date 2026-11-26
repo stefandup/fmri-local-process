@@ -1,0 +1,66 @@
+# GUI changes waiting for Windows
+
+TUI changes made on Ubuntu that the window (`gui/`) should get too. Apply them on a new branch
+from PowerShell, test the window there, then remove the entry.
+
+## Behaviour logs: a view dropdown instead of "Needs review only"
+
+- **TUI:** `tui/behav.py`, the `#log-view` dropdown (commit "TUI behaviour logs: view dropdown").
+- **Window:** in `gui/behav_logs_dialog.py`, replace the `problems_only` QCheckBox (about line 182)
+  with a QComboBox of `app.behav.LOG_VIEWS`, defaulting to the first ("All logs"). In the
+  row-hiding loop (about line 592) use `setRowHidden(row, not log_shown(m, view))`, with
+  `log_shown` from `app.behav`. Update the docstring near line 597 that mentions
+  "Needs review only".
+- **Views:** All logs · Matched and needs review · Needs review only · Matched · Unmatched.
+
+## Raw DICOMs and Behaviour logs: Refresh cache button
+
+- **Shared:** `load_behav_data` (`app/behav.py`) now uses a per-user scan cache, so the window
+  already gets the faster loads. Check on Windows that it lands in `%LOCALAPPDATA%\fmri_local_process\scan`.
+- **TUI:** a "Refresh cache" button next to Reload on both tabs (`tui/behav.py`, `#refresh`),
+  tooltip `REFRESH_CACHE_TIP` from `app/behav.py`; it calls `load_behav_data(..., fresh=True)`.
+- **Window:** in `gui/behav_logs_dialog.py`, add the same button next to each "Reload" button
+  (about lines 784 and 927), with `setToolTip(REFRESH_CACHE_TIP)`, passing `fresh=True` to the load.
+
+## Behaviour logs / Raw DICOMs: Match first, file name last, a details box
+
+- **TUI:** `tui/behav.py`. The logs table uses `TUI_LOG_COLUMNS`: Match, Task, ID in name, Log
+  state, Logged, Corrected ID, Corrected date, Verdict, Session, Notes, Log (just the file name).
+  Under the Mark / Un-mark buttons, a bordered `DetailBox` (`#details`) shows the highlighted row:
+  on tab 4 Match, Log state, Log file date, Corrected ID, Corrected date, Verdict, Notes, Events
+  (`log_details`); on tab 2 Scanned, ID in folder, Corrected ID, Corrected date, Set session,
+  Resolves to, Notes. The inputs and buttons below it are unchanged.
+- **Window:** reorder `COLUMNS` in `app/behav.py` the same way (and the index constants
+  `CORRECTED_ID` ... `NOTES`, plus `log_cells`), then drop `TUI_LOG_COLUMNS`. In
+  `gui/behav_logs_dialog.py` put the same details in a QGroupBox under the Mark buttons on both
+  panels.
+
+## Behaviour logs: Checked column, one crosscheck button, Tick all, session numbers
+
+- **TUI:** `tui/behav.py`. Logs columns: Match, Checked, Task, ID Corrected, Log state, Log Date,
+  Session, Corr ID, Corr Date, Log (Log Date is the time without seconds; Notes left out: they're in the details box). Checked is
+  `checked_text`: ☑ + verdict once crosschecked, ! (+ any verdict) until then. Session is just the
+  number (also tab 2's BIDS session column, via `session_number`). One `#mark` button whose label
+  flips between "Mark ticked crosschecked" and "Un-crosscheck ticked" (the Un-mark button is gone);
+  "Tick all" / "Untick all" next to Export logs. A click on a row's tick box ticks it.
+- **Window:** the same columns and button in `gui/behav_logs_dialog.py`; the window already ticks
+  by mouse (it selects rows).
+
+## Save: remind about Export logs
+
+- **TUI:** Save shows `SAVED_TEXT` (`app/behav.py`): convert to apply, or Export logs when only
+  behaviour logs changed.
+- **Window:** show the same `SAVED_TEXT` after Save in `gui/behav_logs_dialog.py`.
+
+## Raw DICOMs: Status first, view dropdown, one crosscheck toggle
+
+- **Shared (done):** `app/behav.py` has `folder_problems` / `folder_status` (most important
+  problem first: not converted, ID problem, no scan rule, session clash, missing log),
+  `folder_log_marks`, `folder_shown` + `FOLDER_VIEWS`, `folders_to_review`. The notes in the
+  window's Notes column now list the problems in that order.
+- **TUI:** `tui/behav.py` `SessionsPage`. Columns `TUI_SESSION_COLUMNS`: Status, Checked (☑ / !),
+  ID Corrected, Session (number), Scanned, Scans, Logs (`Matching ✔`), Corr ID, Corr Date,
+  Set Ses, DICOM folder. View dropdown + Tick all / Untick all; one `#mark` toggle; the details
+  box adds Status, Checked, Logs and Notes; the tab title shows "N to review".
+- **Window:** the same columns, dropdown, toggle and badge in `gui/behav_logs_dialog.py`'s
+  sessions panel.

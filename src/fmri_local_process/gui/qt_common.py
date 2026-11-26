@@ -11,6 +11,8 @@ from PySide6.QtCore import QStandardPaths, Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QLabel, QSizePolicy
 
+from fmri_local_process.app.colors import WARNING_COLOR
+
 SETTINGS_ORGANIZATION = "MooiToolbox"  # same as vr_lab_toolbox
 TOOLTIP_WRAP_WIDTH = 68
 SECONDARY_TEXT_COLOR = "#9aa0a6"
@@ -24,12 +26,6 @@ RAW_ACCENT_COLOR = "#27ae60"
 # "Run the pipeline" accent, the same teal as vr_lab_toolbox's "Process BIDS Folder".
 PROCESS_ACCENT_COLOR = "#16a085"
 PROCESS_ACCENT_HOVER_COLOR = "#128f76"
-
-OK_COLOR = "#2ecc71"
-RUNNING_COLOR = "#3498db"
-WARNING_COLOR = "#f39c12"
-ERROR_COLOR = "#e74c3c"
-UNKNOWN_COLOR = "#9aa0a6"
 
 
 NOTICE_BACKGROUND = "#fdebd0"  # light amber, under the WARNING_COLOR edge
@@ -54,18 +50,6 @@ class NoticeBanner(QLabel):
         self.shown = list(messages)
         self.setText("\n".join(f"⚠ {message}" for message in messages))
         self.setVisible(bool(messages))
-
-
-def bids_notices(bids_root: Path | None, has_sessions: bool) -> list[str]:
-    """The banner of a tab that reads the BIDS folder's sessions."""
-    if bids_root is None:
-        return ["No BIDS folder chosen: choose it on the Setup & Convert to BIDS tab."]
-    if not has_sessions:
-        return [
-            f"No converted sessions in {bids_root} yet: convert the DICOMs on the Setup & "
-            "Convert to BIDS tab first."
-        ]
-    return []
 
 
 def apply_app_style(app: QApplication) -> None:
@@ -138,9 +122,3 @@ def accent_group_box_stylesheet(color: str) -> str:
 
 def reveal(folder: Path) -> None:
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
-
-
-def paths_conflict(first: Path, second: Path) -> bool:
-    """True when the folders are the same or one contains the other."""
-    a, b = first.resolve(), second.resolve()
-    return a == b or a in b.parents or b in a.parents

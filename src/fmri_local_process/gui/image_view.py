@@ -5,10 +5,9 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QImage, QPixmap, QResizeEvent, QShowEvent
+from PySide6.QtGui import QPixmap, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -20,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fmri_local_process.app.figures import DPI, png_bytes
 from fmri_local_process.gui.qt_common import HOME_BASE_ACCENT_COLOR, reveal
 
 ZOOM_STEP = 1.25
@@ -114,14 +114,11 @@ class ZoomableImageView(QWidget):
             self.fit_to_window()
 
 
-def figure_to_pixmap(figure: Figure, dpi: int = 100) -> QPixmap:
-    """Rasterise a matplotlib Figure in memory (no file, no pyplot)."""
-    figure.set_dpi(dpi)
-    canvas = FigureCanvasAgg(figure)
-    canvas.draw()
-    width, height = canvas.get_width_height()
-    image = QImage(canvas.buffer_rgba(), width, height, QImage.Format.Format_RGBA8888)
-    return QPixmap.fromImage(image.copy())  # copy: the buffer dies with the canvas
+def figure_to_pixmap(figure: Figure, dpi: int = DPI) -> QPixmap:
+    """A matplotlib Figure as the PNG the terminal app shows too (no file)."""
+    pixmap = QPixmap()
+    pixmap.loadFromData(png_bytes(figure, dpi))
+    return pixmap
 
 
 class Previewable(Protocol):

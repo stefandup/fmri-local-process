@@ -20,12 +20,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from fmri_local_process.gui.qt_common import (
-    NoticeBanner,
-    bids_notices,
-    style_secondary_label,
-    wrap_tooltip,
-)
+from fmri_local_process.app.notices import bids_notices
+from fmri_local_process.app.sequence import ReadJob, overview_text, save_overview, status_text
+from fmri_local_process.gui.qt_common import NoticeBanner, style_secondary_label, wrap_tooltip
 from fmri_local_process.gui.toolbox_state import ToolboxState
 from fmri_local_process.processing import sequence_params as sp
 
@@ -37,17 +34,11 @@ class ReadThread(QThread):
 
     def __init__(self, runs: list[sp.ScanRun], bids_root: Path, dicom_root: Path | None) -> None:
         super().__init__()
-        self.runs, self.bids_root, self.dicom_root = runs, bids_root, dicom_root
+        self.job = ReadJob(runs, bids_root, dicom_root)
 
     def run(self) -> None:
-        try:
-            sp.read_values(self.runs)
-            if self.dicom_root is not None:
-                sp.add_dicom_values(self.runs, self.dicom_root, self.bids_root)
-        except (OSError, ImportError) as e:
-            self.done.emit(self.runs, str(e))
-            return
-        self.done.emit(self.runs, "")
+        error = self.job.run()
+        self.done.emit(self.job.runs, error)
 
 
 class SequencePage(QWidget):
@@ -192,28 +183,10 @@ class SequencePage(QWidget):
     def show_table(self) -> None:
         runs = self.shown_runs()
         subject = self.subject_combo.currentText()
-        if not runs:
-            self.log.setPlainText("No runs found for this subject." if subject else "")
-        else:
-            rows = sp.table_rows(runs)
-            title = f"Sequence overview: sub-{subject}, {self.scan_combo.currentText()}"
-            lines = [
-                title,
-                "=" * len(title),
-                *sp.summary_lines(runs, rows),
-                "",
-                *sp.render_table(runs, rows, self.only_differences.isChecked()),
-            ]
-            self.log.setPlainText("\n".join(lines))
-        self.status.setText(self.status_text())
+        scan, only = self.scan_combo.currentText(), self.only_differences.isChecked()
+        self.log.setPlainText(overview_text(runs, subject, scan, only))
+        self.status.setText(status_text(self.dicom_read, self.state.folder("dicom")))
         self.update_buttons()
-
-    def status_text(self) -> str:
-        if self.dicom_read:
-            return "DICOM headers read for these runs."
-        if self.state.folder("dicom") is None:
-            return "From the NIfTI headers and BIDS sidecars (no DICOM folder chosen)."
-        return "From the NIfTI headers and BIDS sidecars. Read DICOM headers to fill gaps."
 
     def update_buttons(self) -> None:
         idle = self.worker is None
@@ -234,9 +207,6 @@ class SequencePage(QWidget):
             return
         path = Path(chosen)
         try:
-            if path.suffix.lower() == ".csv":
-                sp.write_csv(runs, sp.table_rows(runs), path)
-            else:
-                path.write_text(self.log.toPlainText() + "\n", encoding="utf-8")
+            save_overview(runs, self.log.toPlainText(), path)
         except OSError as e:
             QMessageBox.warning(self, "Not saved", str(e))

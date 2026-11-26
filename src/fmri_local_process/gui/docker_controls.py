@@ -11,17 +11,9 @@ re-ask every DOCKER_RECHECK_MS, so the line follows Docker started or stopped el
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
-from fmri_local_process.gui.qt_common import (
-    ERROR_COLOR,
-    OK_COLOR,
-    RUNNING_COLOR,
-    WARNING_COLOR,
-    style_secondary_label,
-    wrap_tooltip,
-)
+from fmri_local_process.app.docker import docker_line
+from fmri_local_process.gui.qt_common import style_secondary_label, wrap_tooltip
 from fmri_local_process.processing.cpac_docker import docker_desktop
-
-DOCKER_RECHECK_MS = 30_000
 
 
 class DockerControlThread(QThread):
@@ -73,17 +65,8 @@ class DockerStatus(QWidget):
         """running None: not known yet; False: why not (error); True: fine, or a warning
         (e.g. an image the tab needs isn't downloaded)."""
         self.shown = (running, error, warning)
-        if self.control is not None:
-            text = f"Docker: '{self.control.action}' in progress (up to a few minutes)..."
-            color = RUNNING_COLOR
-        elif running is None:
-            text, color = "Checking Docker...", None
-        elif not running:
-            text, color = f"⚠ Docker isn't running: {error}", ERROR_COLOR
-        elif warning:
-            text, color = f"⚠ {warning}", WARNING_COLOR
-        else:
-            text, color = "✓ Docker is running.", OK_COLOR
+        action = self.control.action if self.control is not None else ""
+        text, color = docker_line(running, error, warning, action)
         self.label.setText(text)
         if color:
             self.label.setStyleSheet(f"color: {color};")

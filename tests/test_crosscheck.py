@@ -226,7 +226,7 @@ def test_run_length_rounds_the_task_up_to_whole_volumes() -> None:
 
 
 def test_scan_lengths_mark_trimmed_runs(tmp_path: Path) -> None:
-    from fmri_local_process.gui.scan_lengths import trimmed_note
+    from fmri_local_process.app.scan_lengths import trimmed_note
 
     name = "task-Rest_bold.nii.gz"
     write_nifti(func(tmp_path, "A", "1", name), 441)
@@ -334,6 +334,7 @@ def test_lengths_suggested_from_complete_raw_logs_before_any_events_tsv(tmp_path
 
 
 def test_scan_lengths_panel_shows_the_log_suggestion_per_task_margin(tmp_path: Path) -> None:
+    pytest.importorskip("PySide6")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
 
@@ -400,6 +401,7 @@ def test_two_runs_one_cut_short_never_offers_trimming_the_full_one(tmp_path: Pat
 
 
 def test_expected_lengths_dialog_defaults_to_median_and_saves_overrides(tmp_path: Path) -> None:
+    pytest.importorskip("PySide6")
     import os
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -575,6 +577,7 @@ def test_overview_csv_has_a_row_per_session_with_problems_and_note(tmp_path: Pat
 
 
 def test_scan_lengths_save_themselves_once_typing_pauses(tmp_path: Path) -> None:
+    pytest.importorskip("PySide6")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication

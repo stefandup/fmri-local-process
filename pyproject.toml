@@ -8,6 +8,9 @@ dynamic = ["version", "dependencies"]
 description = "Local fMRI preprocessing, QC and region timeseries viewer."
 authors = [{ name = "Stefan du Plessis" }]
 
+[project.optional-dependencies]
+gui = ["PySide6"]  # the fmri_toolbox window; servers go without Qt
+
 [tool.setuptools_scm]
 
 [tool.setuptools.dynamic]
@@ -17,7 +20,11 @@ dependencies = { file = ["requirements.txt"] }
 fmri_convert_to_bids = "fmri_local_process.cli.convert_to_bids:main"
 fmri_behav_events = "fmri_local_process.cli.behav_events:main"
 fmri_behav_check = "fmri_local_process.cli.behav_check:main"
+fmri_bids_check = "fmri_local_process.cli.bids_check:main"
+fmri_mriqc = "fmri_local_process.cli.mriqc:main"
+fmri_generate_sample_data = "fmri_local_process.cli.generate_sample_data:main"
 fmri_toolbox = "fmri_local_process.gui.launcher:main"
+fmri_tui = "fmri_local_process.tui.toolbox:main"
 fmri_crosscheck = "fmri_local_process.gui.launcher:crosscheck"
 fmri_preprocess = "fmri_local_process.cli.preprocess:main"
 fmri_preprocess_gui = "fmri_local_process.gui.launcher:preprocess"
@@ -40,8 +47,13 @@ quote-style = "double"
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
+# The first three are the defaults; the rest are generated or data (not in git).
+exclude = [
+    "**/node_modules", "**/__pycache__", "**/.*",
+    "build_output", "results", "safe_data_source", "third_party",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]  # never walk into the (real-data) C-PAC output folders
-log_cli = true
-log_cli_level = "INFO"
+# No live logging by default: it swaps sys.stdout back mid-test, so a command-line tool's
+# output is lost under click's CliRunner. For log lines as tests run: pytest -o log_cli=true

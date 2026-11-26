@@ -17,11 +17,12 @@ from PySide6.QtCore import QSettings, Qt  # noqa: E402 -- needs QT_QPA_PLATFORM 
 from PySide6.QtGui import QImage  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 
+from fmri_local_process.app import preprocess  # noqa: E402
 from fmri_local_process.gui import docker_controls, preprocess_gui  # noqa: E402
 
 
 def no_docker() -> Path:
-    raise preprocess_gui.DockerUnavailableError("Docker isn't running (test).")
+    raise preprocess.DockerUnavailableError("Docker isn't running (test).")
 
 
 @pytest.fixture
@@ -34,15 +35,15 @@ def window(
     monkeypatch.setattr(
         preprocess_gui, "QSettings", lambda *_: QSettings(str(ini), QSettings.Format.IniFormat)
     )
-    monkeypatch.setattr(preprocess_gui, "find_docker", no_docker)  # never call real Docker
+    monkeypatch.setattr(preprocess, "find_docker", no_docker)  # never call real Docker
     window = preprocess_gui.PreprocessWindow()
     yield window
     window.memory_probe.wait()
 
 
 def test_memory_minimum_and_label(window: preprocess_gui.PreprocessWindow) -> None:
-    assert window.mem_spin.minimum() == preprocess_gui.MIN_MEM_GB
-    assert window.mem_spin.value() >= preprocess_gui.MIN_MEM_GB
+    assert window.mem_spin.minimum() == preprocess.MIN_MEM_GB
+    assert window.mem_spin.value() >= preprocess.MIN_MEM_GB
     window._on_memory_probed(4.0, None, "")  # Docker limited to 4 GB
     assert window.memory_label.text().startswith("⚠ Docker may only use 4.0 GB")
     window.host_gb = 32.0
@@ -211,7 +212,7 @@ def write_nifti(path: Path, mask: bool = False) -> None:
 def test_read_log_tail_keeps_the_end(tmp_path: Path) -> None:
     log_file = tmp_path / "log.txt"
     log_file.write_text("\n".join(f"line {i}" for i in range(1000)))
-    tail = preprocess_gui.read_log_tail(log_file, 10)
+    tail = preprocess.read_log_tail(log_file, 10)
     assert tail.splitlines()[0].startswith("... 990 earlier lines")
     assert tail.splitlines()[-1] == "line 999"
 
@@ -283,11 +284,11 @@ def test_subjects_run_side_by_side(
         on_line('[Node] Finished "anat_preproc".')
         return None
 
-    monkeypatch.setattr(preprocess_gui, "find_docker", lambda: Path("docker"))
-    monkeypatch.setattr(preprocess_gui, "docker_memory_gb", lambda _docker: 64.0)
-    monkeypatch.setattr(preprocess_gui, "image_present", lambda *_: True)
-    monkeypatch.setattr(preprocess_gui, "preprocess_subject", fake_preprocess)
-    monkeypatch.setattr(preprocess_gui, "START_GAP_S", 0.0)
+    monkeypatch.setattr(preprocess, "find_docker", lambda: Path("docker"))
+    monkeypatch.setattr(preprocess, "docker_memory_gb", lambda _docker: 64.0)
+    monkeypatch.setattr(preprocess, "image_present", lambda *_: True)
+    monkeypatch.setattr(preprocess, "preprocess_subject", fake_preprocess)
+    monkeypatch.setattr(preprocess, "START_GAP_S", 0.0)
     window._set_bids_folder(make_bids(tmp_path / "bids"))
     window._set_output_folder(tmp_path / "out")
     window._refresh_roster()
@@ -336,8 +337,8 @@ def test_suggest_rereads_docker_limits(
     window.memory_probe.wait()
     QApplication.processEvents()  # the fixture's 'Docker isn't running' probe result
     window._on_memory_probed(15.5, 20, "")  # read before .wslconfig was raised
-    monkeypatch.setattr(preprocess_gui, "find_docker", lambda: Path("docker"))
-    monkeypatch.setattr(preprocess_gui, "docker_resources", lambda _docker: (23.5, 16))
+    monkeypatch.setattr(preprocess, "find_docker", lambda: Path("docker"))
+    monkeypatch.setattr(preprocess, "docker_resources", lambda _docker: (23.5, 16))
     window._on_suggest()
     window.memory_probe.wait()
     QApplication.processEvents()  # deliver the fresh limits
@@ -410,11 +411,11 @@ def test_stop_now_frees_resources_and_marks_the_subject(
         container_killed.set()
         return None
 
-    monkeypatch.setattr(preprocess_gui, "find_docker", lambda: Path("docker"))
-    monkeypatch.setattr(preprocess_gui, "docker_memory_gb", lambda _docker: 64.0)
-    monkeypatch.setattr(preprocess_gui, "image_present", lambda *_: True)
-    monkeypatch.setattr(preprocess_gui, "preprocess_subject", fake_preprocess)
-    monkeypatch.setattr(preprocess_gui, "stop_containers", fake_stop)
+    monkeypatch.setattr(preprocess, "find_docker", lambda: Path("docker"))
+    monkeypatch.setattr(preprocess, "docker_memory_gb", lambda _docker: 64.0)
+    monkeypatch.setattr(preprocess, "image_present", lambda *_: True)
+    monkeypatch.setattr(preprocess, "preprocess_subject", fake_preprocess)
+    monkeypatch.setattr(preprocess, "stop_containers", fake_stop)
     monkeypatch.setattr(
         preprocess_gui.QMessageBox,
         "question",
@@ -474,9 +475,9 @@ def test_renumbered_subject_is_flagged_and_can_be_renamed(
     assert buttons and "⚠" in buttons[0].toolTip()
 
     cleared: list[str] = []
-    monkeypatch.setattr(preprocess_gui, "find_docker", lambda: Path("docker"))
+    monkeypatch.setattr(preprocess, "find_docker", lambda: Path("docker"))
     monkeypatch.setattr(
-        preprocess_gui, "clear_working_volume", lambda *args: cleared.append(args[-1]) or []
+        preprocess, "clear_working_volume", lambda *args: cleared.append(args[-1]) or []
     )
     monkeypatch.setattr(
         preprocess_gui.QMessageBox,

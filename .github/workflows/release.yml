@@ -1,0 +1,46 @@
+name: Release
+
+# Pushing a tag such as v0.2.0 builds the Linux bundle and publishes it as a GitHub Release.
+# Students install and update it with fmri_update (packaging/linux/fmri_update), which downloads
+# the files below from releases/latest/download/, so their names don't change between releases.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # setuptools_scm takes the version from the tags
+
+      - name: Build the Linux bundle (in a rockylinux:8 container)
+        run: ./build.sh --tui
+
+      - name: Release files
+        working-directory: build_output/installer
+        run: |
+          tarball="$(ls fmri_tui-*-linux-x86_64.tar.gz)"
+          version="${tarball#fmri_tui-}"
+          version="${version%-linux-x86_64.tar.gz}"
+          cp "$tarball" fmri_tui-linux-x86_64.tar.gz
+          cp ../../packaging/linux/fmri_update .
+          echo "$version" > VERSION
+          sha256sum fmri_tui-*.tar.gz fmri_update VERSION > SHA256SUMS
+          cat VERSION SHA256SUMS
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build_output/installer/fmri_tui-*.tar.gz
+            build_output/installer/fmri_update
+            build_output/installer/VERSION
+            build_output/installer/SHA256SUMS
+          generate_release_notes: true

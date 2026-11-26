@@ -27,6 +27,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from fmri_local_process.processing.action_log import record_action
 from fmri_local_process.processing.behav_logs import (
@@ -41,6 +42,7 @@ from fmri_local_process.processing.behav_logs import (
     task_for_log,
 )
 from fmri_local_process.processing.records import write_json_atomic
+from fmri_local_process.processing.scan_cache import file_stamp
 
 log = logging.getLogger(__name__)
 
@@ -288,20 +290,76 @@ def inspect_log(log_file: Path, root: Path, correction: Correction | None = None
     return info
 
 
+def log_record(info: LogInfo, stamp: list[int]) -> dict[str, Any]:
+    """What inspect_log read from the file (not the corrections), for the scan cache."""
+    return {
+        "stamp": stamp,
+        "found_date": info.found_date.isoformat() if info.found_date else None,
+        "date_source": info.date_source,
+        "state": info.state,
+        "notes": info.notes,
+        "columns": list(info.columns),
+        "pulses": info.pulses,
+        "trial_types": dict(info.trial_types),
+        "events_end_s": info.events_end_s,
+    }
+
+
+def log_from_record(
+    log_file: Path, root: Path, record: dict[str, Any], correction: Correction | None
+) -> LogInfo:
+    found = record["found_date"]
+    return LogInfo(
+        path=log_file,
+        key=log_file.relative_to(root).as_posix(),
+        task=task_for_log(log_file, root),
+        file_subject=log_subject_id(log_file),
+        found_date=dt.date.fromisoformat(found) if found else None,
+        date_source=record["date_source"],
+        correction=correction or Correction(),
+        state=record["state"],
+        notes=list(record["notes"]),
+        columns=tuple(record["columns"]),
+        pulses=record["pulses"],
+        trial_types=Counter(record["trial_types"]),
+        events_end_s=record["events_end_s"],
+    )
+
+
 def inspect_logs(
     behav_root: Path,
     corrections: dict[str, Correction],
     progress: Callable[[int, int], None] | None = None,
+    cache: dict[str, Any] | None = None,
 ) -> list[LogInfo]:
     """Every .log below behav_root, with its corrections applied. progress, if given, is
-    called with (logs read, total) as it goes."""
+    called with (logs read, total) as it goes.
+
+    cache (ScanCache.logs), if given: a log whose size and modification time are unchanged is
+    taken from it instead of being read; it is updated to the logs found now. Unreadable logs
+    aren't kept, so a file that was offline (e.g. a paused OneDrive) is tried again."""
     infos = []
+    fresh: dict[str, Any] = {}
     logs = list(find_logs(behav_root))
     for n, log_file in enumerate(logs, start=1):
         key = log_file.relative_to(behav_root).as_posix()
-        infos.append(inspect_log(log_file, behav_root, corrections.get(key)))
+        try:
+            stamp = file_stamp(log_file) if cache is not None else None
+        except OSError:
+            stamp = None
+        record = cache.get(key) if cache is not None and stamp is not None else None
+        if record is not None and record.get("stamp") == stamp:
+            info = log_from_record(log_file, behav_root, record, corrections.get(key))
+        else:
+            info = inspect_log(log_file, behav_root, corrections.get(key))
+        if stamp is not None and info.state != UNREADABLE:
+            fresh[key] = log_record(info, stamp)
+        infos.append(info)
         if progress is not None:
             progress(n, len(logs))
+    if cache is not None:
+        cache.clear()
+        cache.update(fresh)
     return infos
 
 

@@ -13,9 +13,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QSettings, Qt  # noqa: E402 -- needs QT_QPA_PLATFORM set first
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from fmri_local_process.app import convert, preprocess  # noqa: E402
+from fmri_local_process.app import state as app_state  # noqa: E402
 from fmri_local_process.gui import (  # noqa: E402
     backup_box,
-    convert_page,
     preprocess_gui,
     toolbox,
     toolbox_state,
@@ -24,11 +25,11 @@ from fmri_local_process.processing.action_log import record_action  # noqa: E402
 
 
 def no_defacer() -> None:
-    raise convert_page.DefaceUnavailableError("No defacer found (test).")
+    raise convert.DefaceUnavailableError("No defacer found (test).")
 
 
 def no_docker() -> Path:
-    raise preprocess_gui.DockerUnavailableError("Docker isn't running (test).")
+    raise preprocess.DockerUnavailableError("Docker isn't running (test).")
 
 
 @pytest.fixture
@@ -45,8 +46,8 @@ def window(
     # Keep the user's remembered folders out of the test, and never call real Docker.
     monkeypatch.setattr(toolbox_state, "make_settings", settings)
     monkeypatch.setattr(preprocess_gui, "QSettings", lambda *_: settings("FmriPreprocess"))
-    monkeypatch.setattr(preprocess_gui, "find_docker", no_docker)
-    monkeypatch.setattr(convert_page, "make_deface", no_defacer)  # never ask Docker
+    monkeypatch.setattr(preprocess, "find_docker", no_docker)
+    monkeypatch.setattr(convert, "make_deface", no_defacer)  # never ask Docker
     window = toolbox.ToolboxWindow()
     yield window
     window.behav.wait()
@@ -71,6 +72,10 @@ def two_session_subject(bids: Path) -> None:
 def open_crosscheck(window: toolbox.ToolboxWindow, bids: Path) -> None:
     window.state.set_folder("bids", bids)
     window.tabs.setCurrentIndex(toolbox.TAB_ORDER.index(toolbox.CROSSCHECK))
+
+
+def test_every_tab_has_a_page(window: toolbox.ToolboxWindow) -> None:
+    assert set(window.pages) == set(toolbox.TAB_ORDER)  # the parity test's window half
 
 
 def test_tabs_follow_the_order_of_the_work(window: toolbox.ToolboxWindow) -> None:
@@ -124,17 +129,17 @@ def test_a_running_job_locks_the_other_tabs(window: toolbox.ToolboxWindow, tmp_p
     open_crosscheck(window, bids)
     assert window.convert.convert_button.isEnabled()
 
-    window.state.set_busy(toolbox_state.PREPROCESSING, True)  # C-PAC reads the BIDS folder
+    window.state.set_busy(app_state.PREPROCESSING, True)  # C-PAC reads the BIDS folder
     assert not window.convert.convert_button.isEnabled()
     window.crosscheck.table.item(0, 0).setCheckState(Qt.CheckState.Checked)  # pyright: ignore[reportOptionalMemberAccess]
     assert not window.crosscheck.delete_ticked_button.isEnabled()
     assert window.crosscheck.note_ticked_button.isEnabled()  # notes change no data files
     assert "C-PAC is preprocessing" in window.busy_label.text()
 
-    window.state.set_busy(toolbox_state.PREPROCESSING, False)
-    window.state.set_busy(toolbox_state.CONVERTING, True)
+    window.state.set_busy(app_state.PREPROCESSING, False)
+    window.state.set_busy(app_state.CONVERTING, True)
     assert window.preprocess.external_lock == "Converting DICOMs to BIDS"
-    window.state.set_busy(toolbox_state.CONVERTING, False)
+    window.state.set_busy(app_state.CONVERTING, False)
     assert window.preprocess.external_lock == ""
     assert window.crosscheck.delete_ticked_button.isEnabled()
 
@@ -181,7 +186,7 @@ def test_thread_ending_without_a_report_unlocks_the_tabs(
     page = window.convert
     page.progress_group.setVisible(True)
     page.convert_thread = DeadThread()  # pyright: ignore[reportAttributeAccessIssue]
-    window.state.set_busy(toolbox_state.CONVERTING, True)
+    window.state.set_busy(app_state.CONVERTING, True)
     shown: list[str] = []
     monkeypatch.setattr(
         toolbox.QMessageBox, "warning", lambda _parent, _title, text: shown.append(text)
@@ -345,11 +350,11 @@ def test_docker_not_running_says_so_and_offers_to_start_it(
         page.defacer_probe.wait()
     QApplication.processEvents()
 
-    page.on_defacer_checked("The Docker daemon isn't answering", convert_page.DOCKER_STOPPED)
+    page.on_defacer_checked("The Docker daemon isn't answering", convert.DOCKER_STOPPED)
 
     assert "Docker isn't running" in page.deface_warning.text()
     assert not page.start_docker_button.isHidden() and not page.recheck_button.isHidden()
-    page.on_defacer_checked("docker not found on PATH", convert_page.DOCKER_MISSING)
+    page.on_defacer_checked("docker not found on PATH", convert.DOCKER_MISSING)
     assert "not installed" in page.deface_warning.text()
     assert page.start_docker_button.isHidden()  # nothing to start
 

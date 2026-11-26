@@ -1,5 +1,17 @@
 # fmri_local_process
 
+## Install on a Linux server (e.g. nala)
+
+```bash
+curl -fsSLO https://github.com/stefandup/fmri-local-process/releases/latest/download/fmri_update
+bash fmri_update && rm fmri_update   # then log in again
+fmri_tui                             # start it (best inside tmux)
+fmri_update                          # later: get the newest version
+```
+
+No sudo; it installs for your user only. You need to be in the server's `docker` group.
+More: [docs/linux-bundle.md](docs/linux-bundle.md).
+
 > **Status:** step 0, the Philani DICOM → BIDS conversion, and step 1a, C-PAC preprocessing,
 > are built and tested on synthetic data. Everything from "The idea" onwards is still the
 > plan. User guides: [docs/bids-conversion.md](docs/bids-conversion.md) and
@@ -34,9 +46,99 @@ Full details and a step-by-step "test it yourself" plan:
    raw) rather than moved to `trash/`, and no `selected_runs.json` is written.
 3. **Check the dummy-scan assumption.** Events onsets assume the first logged pulse is the
    first volume saved in the BOLD file.
-4. **Packaging.** Add `fmri_behav_events` to the PyInstaller and installer builds if it
-   should ship. It is only on PATH via `pip install -e .` for now.
-5. **Linux build.** Run `./build.sh` and `packaging/install.sh` on Ubuntu.
+4. **Windows build.** Run `build.ps1 -Full` and check that a new terminal finds every tool.
+
+## Linux: one PC or server (e.g. OpenMediaVault)
+
+The whole toolbox without a display: the terminal app `fmri_tui`, which works like the window, and
+command-line tools that point out problems on their own. Needs a 64-bit Intel/AMD PC and, for C-PAC,
+MRIQC and defacing, Docker. Details: [the terminal app](docs/tui.md), [the Linux
+bundle](docs/linux-bundle.md).
+
+### From this repo
+
+```bash
+python -m venv .venv                 # Python 3.12 or later
+source .venv/bin/activate            # Windows: .venv\Scripts\Activate.ps1
+pip install -e .                     # the terminal app and every command; ".[gui]" adds the window
+```
+
+With the environment active, every command is on the PATH.
+
+### As a bundle, for a server without Python
+
+```bash
+./build.sh --tui                     # in WSL or Linux, with Docker: like build.ps1 -Full
+packaging/linux/check_bundle.sh      # optional: tries it in clean containers
+
+scp build_output/installer/fmri_tui-*-linux-x86_64.tar.gz user@server:
+ssh user@server
+tar -xzf fmri_tui-*-linux-x86_64.tar.gz && cd fmri_tui-*/
+./install.sh                         # no sudo; one toolbox folder, added to your PATH: open a new terminal
+~/.local/opt/fmri_local_process/docker/setup_docker_image.sh --defacer pydeface --mriqc    # C-PAC, MRIQC, defacer (~20 GB)
+```
+
+Or build and install for your user on the server in one go (the SSH connection is checked before
+the build):
+
+```bash
+./build.sh --tui --remote-install user@server    # or a Host from ~/.ssh/config
+```
+
+An upgrade, either way, replaces the earlier version: `install.sh` swaps the toolbox folder, and
+`--remote-install` also removes earlier unpacked `~/fmri_tui-*/` folders. The Docker images stay,
+as the toolbox finds them by name, so `setup_docker_image.sh` only needs running again to change
+the defacer.
+
+On OpenMediaVault, check first: your user has a home folder (Users > Settings) and SSH access,
+`docker info` works without sudo, and the home folder isn't on a disk mounted `noexec`.
+
+### Crosscheck the behaviour logs
+
+1. If the logs are on OneDrive, make sure it is running and synced. Back up: **Save now** on the Setup
+   tab.
+2. See what is wrong (nothing is changed):
+
+   ```bash
+   fmri_behav_check path/to/logs path/to/dicoms --bids path/to/bids --problems-only
+   fmri_behav_check path/to/logs path/to/dicoms --bids path/to/bids --log emolabeling/2024/P001-....log
+   ```
+
+3. Fix it in the window (`fmri_toolbox`) or the terminal app (`fmri_tui`): wrong IDs, dates and session
+   numbers of scans first (**Raw DICOMs**: one wrong folder can leave several logs unmatched), then
+   the logs (**Behaviour logs**: ID, date, **Use this one**, **Mark OK** / **Mark error**, **Mark
+   crosschecked**). **Save**, then **Convert to BIDS**.
+4. Run the check again.
+
+What to look for: *unknown ID* (a typo, or a twin: `12345-1` becomes `12345T1`), *date mismatch*, *duplicate*,
+*no task scan*, *no task* (the path needs `cogreappraisal` or `emolabeling`), and *aborted* logs, which
+match but need a verdict. A match only says that ID and date agree: look at the events too.
+
+### The other checks
+
+```bash
+fmri_bids_check path/to/bids                            # each session's problems
+fmri_bids_check path/to/bids --lengths                  # scans too short or too long
+fmri_bids_check path/to/bids --dicom path/to/dicoms     # missing volumes
+fmri_mriqc path/to/bids path/to/mriqc                   # run MRIQC; metrics with the outliers marked
+```
+
+### Dummy data to try it on
+
+```bash
+fmri_generate_sample_data path/to/dummy --with-errors --seed 42
+fmri_generate_sample_data path/to/dummy --reference-behav path/to/logs --reference-dicom path/to/dicoms
+fmri_generate_sample_data path/to/dummy --with-errors --bids-folder path/to/dummy_bids
+```
+
+The first makes 5 clean participants and one per known problem; `dummy_data_log.txt` says what each is
+for. The second finds the `.log` files in every folder below the logs folder and gives each log and
+session folder a dummy twin: IDs and dates match, or don't, exactly where the real ones do. IDs, dates,
+times, answers, names and images are made up; the real data is only read, the link between real and
+dummy IDs is never written down, and the result is deleted if anything real is found in it. What stays
+is the shape: how many logs and sessions, the order of the dates, the logs' layout, the number and kind
+of their events, and which of them were answered. Look through it before sharing it. The dummy folder
+must be new, and outside the real data.
 
 ## 1a. Preprocessing via C-PAC in Docker (built, not yet run on real data)
 
@@ -138,15 +240,19 @@ raw BOLD (BIDS) ──► fmri_process (CLI) ──► derivatives/ ──► QC
 src/fmri_local_process/
   cli/          # thin click entry points (convert_to_bids, behav_events)
   processing/   # the actual logic (philani_bids, behav_logs, dcm2niix, deface, ...)
-  gui/          # PySide6 timeseries viewer (planned)
+  app/          # what both front ends share, without Qt: state, jobs, tab list, texts
+  gui/          # the PySide6 window (display only)
+  tui/          # the Textual terminal app, fmri_tui (display only)
 tests/
 ```
 
 ## Development
 
 - Python 3.13, `.venv` in the repo root:
-  `.venv\Scripts\python -m pip install -r requirements.txt -r requirements-dev.txt`
+  `pip install -e ".[gui]" -r requirements-dev.txt`, with the environment active
+  (`pip install -e .` leaves out Qt, and with it the window)
 - Style: [Golden Rules](docs/golden-rules.md) and [AI Style Guide](docs/ai-style-guide.md).
   Agent rules are in [AGENTS.md](AGENTS.md).
-- Build: `.\build.ps1 -Exe | -Full | -Inno` (all output goes to `build_output/`).
+- Build: `.\build.ps1 -Exe | -Full | -Inno` (all output goes to `build_output/`); the bundle for
+  Linux servers: `./build.sh --tui` ([docs](docs/linux-bundle.md)).
 - Docs: `mkdocs serve`

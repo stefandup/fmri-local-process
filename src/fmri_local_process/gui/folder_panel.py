@@ -15,12 +15,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from fmri_local_process.app.state import folder_conflict, folder_locked
 from fmri_local_process.gui.qt_common import (
     HOME_BASE_ACCENT_COLOR,
     HOME_BASE_NAME_EXTRA_POINT_INCREASE,
     accent_group_box_stylesheet,
     default_browse_dir,
-    paths_conflict,
     reveal,
     shrinkable,
     style_name_label,
@@ -28,28 +28,6 @@ from fmri_local_process.gui.qt_common import (
     wrap_tooltip,
 )
 from fmri_local_process.gui.toolbox_state import ToolboxState
-
-# Pairs of folders that must not be the same or inside each other: (key, key, why)
-CONFLICTS = (
-    ("bids", "dicom", "the converter would read its own output as DICOM sessions"),
-    ("bids", "output", "C-PAC output can't go in (or around) the BIDS folder"),
-    ("dicom", "output", "C-PAC output can't go in (or around) the raw DICOMs"),
-    ("mriqc", "bids", "MRIQC output can't go in (or around) the BIDS folder"),
-    ("mriqc", "dicom", "MRIQC output can't go in (or around) the raw DICOMs"),
-    ("mriqc", "output", "MRIQC output needs its own folder, apart from C-PAC's"),
-)
-# Folders read only: they may change while a job runs; the others wait for it.
-READ_ONLY_KEYS = ("behav",)
-
-
-def folder_conflict(state: ToolboxState, key: str, folder: Path) -> str:
-    """Why folder can't be used for key ('' if it can)."""
-    for first, second, why in CONFLICTS:
-        if key in (first, second):
-            other = state.folder(second if key == first else first)
-            if other is not None and paths_conflict(folder, other):
-                return why
-    return ""
 
 
 class FolderPanel(QGroupBox):
@@ -116,8 +94,7 @@ class FolderPanel(QGroupBox):
         self.name_label.setToolTip(str(folder) if folder else "")
         self.reveal_button.setEnabled(folder is not None)
         if self.browse_button is not None:
-            locked = bool(self.state.lock_reason()) and self.key not in READ_ONLY_KEYS
-            self.browse_button.setEnabled(not locked)
+            self.browse_button.setEnabled(not folder_locked(self.state, self.key))
 
     def on_browse(self) -> None:
         chosen = QFileDialog.getExistingDirectory(
