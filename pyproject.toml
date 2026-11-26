@@ -55,5 +55,5 @@ exclude = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]  # never walk into the (real-data) C-PAC output folders
-log_cli = true
-log_cli_level = "INFO"
+# No live logging by default: it swaps sys.stdout back mid-test, so a command-line tool's
+# output is lost under click's CliRunner. For log lines as tests run: pytest -o log_cli=true
