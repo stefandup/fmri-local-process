@@ -10,7 +10,42 @@ fmri_update                          # later: get the newest version
 ```
 
 No sudo; it installs for your user only. You need to be in the server's `docker` group.
-More: [docs/linux-bundle.md](docs/linux-bundle.md).
+**On nala, this is all you need.** More: [docs/linux-bundle.md](docs/linux-bundle.md).
+
+### No internet, or the installer fails: install the bundle by hand
+
+Use this only when `fmri_update` can't download (no internet on the server, GitHub blocked) or the
+install goes wrong. You build the bundle yourself, or download `fmri_tui-linux-x86_64.tar.gz` from the
+[latest release](https://github.com/stefandup/fmri-local-process/releases/latest) on a PC that has
+internet, and copy it over. No Python is needed on the server.
+
+```bash
+./build.sh --tui                     # in WSL or Linux, with Docker: like build.ps1 -Full
+packaging/linux/check_bundle.sh      # optional: tries it in clean containers
+
+scp build_output/installer/fmri_tui-*-linux-x86_64.tar.gz user@server:
+ssh user@server
+tar -xzf fmri_tui-*-linux-x86_64.tar.gz && cd fmri_tui-*/
+./install.sh                         # no sudo; one toolbox folder, added to your PATH: open a new terminal
+~/.local/opt/fmri_local_process/docker/setup_docker_image.sh --defacer pydeface --mriqc    # C-PAC, MRIQC, defacer (~20 GB)
+```
+
+`setup_docker_image.sh` is needed once per server, as the images are shared by every user; skip it
+when they are already there (`docker images`). With a downloaded release, copy its `fmri_update` over
+too: `bash fmri_update --file fmri_tui-linux-x86_64.tar.gz` does the unpacking and installing in one go.
+
+Or build and install for your user on the server in one go (the SSH connection is checked before
+the build):
+
+```bash
+./build.sh --tui --remote-install user@server    # or a Host from ~/.ssh/config
+```
+
+An upgrade, either way, replaces the earlier version: `install.sh` swaps the toolbox folder, and
+`--remote-install` also removes earlier unpacked `~/fmri_tui-*/` folders. The Docker images stay,
+as the toolbox finds them by name, so `setup_docker_image.sh` only needs running again to change
+the defacer. If the home folder is on a disk mounted `noexec`, install elsewhere:
+`./install.sh /some/other/folder`.
 
 > **Status:** step 0, the Philani DICOM → BIDS conversion, and step 1a, C-PAC preprocessing,
 > are built and tested on synthetic data. Everything from "The idea" onwards is still the
@@ -50,12 +85,20 @@ Full details and a step-by-step "test it yourself" plan:
 
 ## Linux: one PC or server (e.g. OpenMediaVault)
 
+**Not for nala:** there, use [the install at the top](#install-on-a-linux-server-eg-nala). This
+section is for setting the toolbox up on another Linux machine of your own (a PC, or a small server
+such as OpenMediaVault), or for working on the code on Linux.
+
 The whole toolbox without a display: the terminal app `fmri_tui`, which works like the window, and
 command-line tools that point out problems on their own. Needs a 64-bit Intel/AMD PC and, for C-PAC,
 MRIQC and defacing, Docker. Details: [the terminal app](docs/tui.md), [the Linux
 bundle](docs/linux-bundle.md).
 
-### From this repo
+The easiest install is the same as on nala: `fmri_update`, [at the top](#install-on-a-linux-server-eg-nala)
+(or [by hand](#no-internet-or-the-installer-fails-install-the-bundle-by-hand) without internet).
+To run it from the code instead:
+
+### From this repo (for development)
 
 ```bash
 python -m venv .venv                 # Python 3.12 or later
@@ -64,31 +107,6 @@ pip install -e .                     # the terminal app and every command; ".[gu
 ```
 
 With the environment active, every command is on the PATH.
-
-### As a bundle, for a server without Python
-
-```bash
-./build.sh --tui                     # in WSL or Linux, with Docker: like build.ps1 -Full
-packaging/linux/check_bundle.sh      # optional: tries it in clean containers
-
-scp build_output/installer/fmri_tui-*-linux-x86_64.tar.gz user@server:
-ssh user@server
-tar -xzf fmri_tui-*-linux-x86_64.tar.gz && cd fmri_tui-*/
-./install.sh                         # no sudo; one toolbox folder, added to your PATH: open a new terminal
-~/.local/opt/fmri_local_process/docker/setup_docker_image.sh --defacer pydeface --mriqc    # C-PAC, MRIQC, defacer (~20 GB)
-```
-
-Or build and install for your user on the server in one go (the SSH connection is checked before
-the build):
-
-```bash
-./build.sh --tui --remote-install user@server    # or a Host from ~/.ssh/config
-```
-
-An upgrade, either way, replaces the earlier version: `install.sh` swaps the toolbox folder, and
-`--remote-install` also removes earlier unpacked `~/fmri_tui-*/` folders. The Docker images stay,
-as the toolbox finds them by name, so `setup_docker_image.sh` only needs running again to change
-the defacer.
 
 On OpenMediaVault, check first: your user has a home folder (Users > Settings) and SSH access,
 `docker info` works without sudo, and the home folder isn't on a disk mounted `noexec`.
