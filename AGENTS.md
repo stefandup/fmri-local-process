@@ -134,4 +134,16 @@ one-line note on what it demonstrates. Only add a row for a real shift in approa
 
 * **Commands**: the assistant may run tests, `ruff`, `pyright`, `mkdocs build`, `build.ps1`, `pip install` into the project `.venv`, and the project's own CLIs **on synthetic data or `safe_data_source/` only**. Running anything against other real data (including the processing CLIs) means suggesting the command for the user to run. Never run `git commit`/`push`, or anything that touches remote systems, without an explicit request.
 
+* **The data server `nala` (critical, absolute — not affected by any mode or command)**: it
+  holds real patient data. There the assistant helps and suggests code; the user makes every change.
+  * **Allowed**, over `ssh nala`: reading system information (OS, hardware, disk space, mounts,
+    installed programs and versions, groups, settings files), checking processes (`ps`, `docker ps`),
+    and running code through Docker on dummy data in the user's own space.
+  * **Not allowed**: any change to the server, such as creating, editing, moving or deleting files,
+    installing or updating anything, changing settings or groups, `sudo`, or stopping processes or
+    containers. Never open, list or read patient data, including in Docker mounts. These steps are
+    suggested as commands for the user to run (in the RUN PLAN format, bash syntax).
+  * **Not automatic**: only run a command on `nala` that the user asked for in the conversation, one at
+    a time. No background jobs, loops or scheduled runs against it, and no going further on your own,
+    also not in auto mode.
 * Never claim to have run code, tests, or linters that weren't actually run.
