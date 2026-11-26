@@ -145,9 +145,25 @@ runs started from the bundle.
 1. **On Windows, before anything is merged:** update the environment (`python -m pip install -e
    ".[gui]" -r requirements-dev.txt`), run the tests, use the window on `safe_data_source/`,
    check that it remembers its folders (registry), and `build.ps1 -Full` and `-Review`.
+   *26 November 2026:* environment updated and tests run: 442 passed, 7 skipped (commit
+   `adcf4ae`). The run found a real Windows bug, fixed there: the scan cache could miss a DICOM
+   file added to a series, as `os.scandir`'s `entry.stat()` gives the parent folder's copy of the
+   times, which NTFS updates late. The Linux `bash` test is skipped on Windows (`bash` is WSL's).
+   Still to do: the window on `safe_data_source/`, the registry check and the two builds.
 2. **On the server:** processor, Docker access, `noexec` mounts, then install the bundle.
 3. **Pictures** in Windows Terminal over SSH.
-4. The crash when `pytest` exits with Qt loaded (there before; on Linux too).
+4. The crash when `pytest` exits with Qt loaded (there before; on Linux too). Narrowed down on
+   26 November 2026, on Windows:
+   - Not a pytest plugin: it also crashes with `--disable-plugin-autoload` (the only plugin
+     installed is `platformdirs`'). Not SIP: the project uses PySide6 6.12 / `shiboken6`, not PyQt.
+   - Run file by file, only `test_behav_logs_dialog.py` and `test_tui_matches_window.py` crash
+     on exit (code -1073741819); the other 13 Qt test files and a bare `QApplication` don't. Both
+     use the behaviour logs dialog.
+   - Next: look in that dialog for a `QTimer` or `QThread` still running when the tests end
+     (stop timers; `quit()` and `wait()` threads; wait for thread pools; keep the `QApplication`
+     alive to the end). `qtbot.addWidget()` would need `pytest-qt`, a new dev dependency.
+     Each check takes about 30 s: `python -m pytest -q tests/test_behav_logs_dialog.py`, then
+     `$LASTEXITCODE`.
 5. `tests/test_philani_bids.py` (from before) uses a first name as an example ID that also occurs in
    the cleared data's folder names. Harmless if meant, worth a look as the repo is on GitHub.
 
