@@ -14,3 +14,16 @@ if find_spec("PySide6") is None:
         "toy_app_layer/test_toy_2_gui.py",
         "toy_app_layer/test_toy_4_guards.py",
     ]
+
+
+import pytest  # noqa: E402
+
+from fmri_local_process.processing.scan_cache import CACHE_DIR_ENV  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def scan_cache_in_tmp(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every test gets its own scan cache folder: never the user's ~/.cache."""
+    monkeypatch.setenv(CACHE_DIR_ENV, str(tmp_path_factory.mktemp("scan_cache")))

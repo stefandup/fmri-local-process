@@ -20,6 +20,7 @@ from fmri_local_process.app.behav import (
     LOG_VIEWS,
     MATCH,
     NOTES,
+    REFRESH_CACHE_TIP,
     S_CHECKED,
     S_LOGS,
     S_NOTES,
@@ -101,6 +102,7 @@ class BehavShared:
         self.work: BehavWork | None = None
         self.loading = False
         self.reload_wanted = False  # a folder changed while reading
+        self.fresh_wanted = False  # ... and that reload reads everything (Refresh cache)
         self.error = ""
         self.unsaved = False
         # The tabs' boxes: what is typed for each row and not used yet, put into the work by
@@ -118,13 +120,15 @@ class BehavShared:
     def infos(self) -> list[LogInfo]:
         return self.work.infos if self.work else []
 
-    def load(self, page: Page) -> None:
-        """Read the logs and DICOM folders in the background."""
+    def load(self, page: Page, fresh: bool = False) -> None:
+        """Read the logs and DICOM folders in the background: only what changed since the
+        last time, or (fresh) everything."""
         folders = behav_folders(self.state)
         if folders is None:
             return
         if self.loading:
             self.reload_wanted = True
+            self.fresh_wanted |= fresh
             return
         self.work, self.loading, self.error, self.unsaved = None, True, "", False
         for typed in self.typed:
@@ -136,15 +140,16 @@ class BehavShared:
 
         def read() -> BehavData | str:
             try:
-                return load_behav_data(*folders, progress=progress)
+                return load_behav_data(*folders, progress=progress, fresh=fresh)
             except (OSError, ValueError) as e:
                 return str(e)
 
         def loaded(data: BehavData | str) -> None:
             self.loading = False
             if self.reload_wanted:
-                self.reload_wanted = False
-                self.load(page)
+                again = self.fresh_wanted
+                self.reload_wanted = self.fresh_wanted = False
+                self.load(page, again)
                 return
             if isinstance(data, str):
                 self.error = f"Can't read the logs: {data}"
@@ -200,6 +205,7 @@ class SharedPage(Page):
             yield Line(id="loading-what", muted=True)
         with Horizontal(classes="row"):
             yield Button("Reload", id="reload")
+            yield Button("Refresh cache", id="refresh", tooltip=REFRESH_CACHE_TIP)
             yield Button("Save", id="save", variant="primary")
         yield Line(id="status")
 
@@ -232,6 +238,7 @@ class SharedPage(Page):
         self.query_one(Notices).set_messages(self.shared.notices())
         ready = behav_folders(self.state) is not None
         self.query_one("#reload", Button).disabled = loading or not ready
+        self.query_one("#refresh", Button).disabled = loading or not ready
         locked = self.work is None or self.work.bids_locked
         self.query_one("#save", Button).disabled = locked
         status = self.query_one("#status", Line)
@@ -295,11 +302,18 @@ class SharedPage(Page):
 
     @on(Button.Pressed, "#reload")
     def reload(self) -> None:
+        self.read_again(fresh=False)
+
+    @on(Button.Pressed, "#refresh")
+    def refresh_cache(self) -> None:
+        self.read_again(fresh=True)
+
+    def read_again(self, fresh: bool) -> None:
         if self.shared.anything_unsaved():
             question = "Corrections not saved yet are dropped. Read everything again?"
-            self.ask("Reload", question, lambda: self.shared.load(self))
+            self.ask("Reload", question, lambda: self.shared.load(self, fresh))
         else:
-            self.shared.load(self)
+            self.shared.load(self, fresh)
 
     @on(Button.Pressed, "#save")
     def save(self) -> None:

@@ -62,6 +62,9 @@ The mouse works too, in most terminals.
 - **MRIQC's HTML reports** are in the MRIQC output folder; the metrics and ratings are in the tab.
 - **Docker** has to be running: `sudo systemctl start docker` on a server.
 - **Settings** are in `~/.config/fmri_local_process/`, apart from the window's.
+- **Raw DICOMs and Behaviour logs** remember what they read (in `~/.cache/fmri_local_process/scan/`),
+  so the next start, and **Reload**, only read logs and DICOM folders that changed. **Refresh cache**
+  reads everything again.
 
 ## Quitting while something runs
 

@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
+from typing import Any
 
 from fmri_local_process.processing.action_log import record_action
 from fmri_local_process.processing.behav_logs import (
@@ -67,6 +68,7 @@ from fmri_local_process.processing.behav_match import (
 )
 from fmri_local_process.processing.deface import DefaceFn
 from fmri_local_process.processing.records import write_json_atomic
+from fmri_local_process.processing.scan_cache import folder_stamp
 from fmri_local_process.processing.session_sync import read_sessions_tsv, sessions_tsv
 
 log = logging.getLogger(__name__)
@@ -986,10 +988,20 @@ def scan_dicom_root(
     dicom_root: Path,
     progress: Callable[[int, int], None] | None = None,
     rules: tuple[ScanRule, ...] = SCAN_RULES,
+    cache: dict[str, Any] | None = None,
 ) -> list[ScannedFolder]:
     """Every dated session folder with the tasks it holds -- the slow part (walks the series
     folders), done once; corrections are applied afterwards by session_infos. progress, if
-    given, is called with (folders scanned, total) as it goes."""
+    given, is called with (folders scanned, total) as it goes.
+
+    cache (ScanCache.dicom), if given: a folder whose series are unchanged (folder_stamp) is
+    taken from it instead of being walked, as long as the scan rules are the same; it is
+    updated to the folders found now."""
+    rules_key = repr(rules)
+    known = (
+        cache.get("folders", {}) if cache is not None and cache.get("rules") == rules_key else {}
+    )
+    fresh: dict[str, Any] = {}
     scanned = []
     folders = sorted(dicom_root.iterdir())
     for n, folder in enumerate(folders, start=1):
@@ -997,8 +1009,18 @@ def scan_dicom_root(
             progress(n, len(folders))
         if folder.name in IGNORED_FOLDERS or not folder.is_dir() or not any(folder.iterdir()):
             continue
-        tasks = frozenset(rule.task_name or rule.suffix for rule in match_series(folder, rules))
+        stamp = folder_stamp(folder) if cache is not None else None
+        record = known.get(folder.name)
+        if record is not None and record.get("stamp") == stamp:
+            tasks = frozenset(record["tasks"])
+        else:
+            matched = match_series(folder, rules)
+            tasks = frozenset(rule.task_name or rule.suffix for rule in matched)
+        fresh[folder.name] = {"stamp": stamp, "tasks": sorted(tasks)}
         scanned.append((folder, tasks))
+    if cache is not None:
+        cache.clear()
+        cache.update({"rules": rules_key, "folders": fresh})
     return scanned
 
 

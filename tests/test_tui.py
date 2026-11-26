@@ -525,6 +525,33 @@ def test_the_log_view_dropdown_filters_the_logs(tmp_path: Path) -> None:
     run_app(tmp_path, scenario, BEHAV, **folders)
 
 
+def test_refresh_cache_reads_every_log_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folders, _folder, _log = behav_study(tmp_path)
+    from fmri_local_process.processing import behav_match as bm
+
+    read: list[Path] = []
+    real = bm.inspect_log
+
+    def counted(log_file: Path, *args: object, **kwargs: object) -> bm.LogInfo:
+        read.append(log_file)
+        return real(log_file, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(bm, "inspect_log", counted)
+
+    async def scenario(app: ToolboxApp, pilot: Pilot) -> None:
+        page = page_of(app, BehavPage)
+        assert len(read) == 1 and page.query_one("#refresh", Button).tooltip
+        await press(app, pilot, "#reload")
+        assert len(read) == 1  # unchanged: from the cache
+        await press(app, pilot, "#refresh")
+        assert len(read) == 2
+        assert page.query_one("#logs", TickTable).row_count == 1
+
+    run_app(tmp_path, scenario, BEHAV, **folders)
+
+
 def test_what_is_typed_for_a_log_is_never_lost(tmp_path: Path) -> None:
     folders, _folder, log = behav_study(tmp_path)
     other = log.replace("151000", "161000")

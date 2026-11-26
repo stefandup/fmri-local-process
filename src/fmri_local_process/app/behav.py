@@ -59,6 +59,7 @@ from fmri_local_process.processing.philani_bids import (
     write_dicom_date_corrections,
     write_dicom_session_corrections,
 )
+from fmri_local_process.processing.scan_cache import ScanCache
 
 WARN_COLOR = WARNING_COLOR
 BAD_COLOR = ERROR_COLOR
@@ -170,18 +171,29 @@ LoadProgress = Callable[[int, int, str], None]  # (done, total, what)
 
 
 def load_behav_data(
-    bids_root: Path, behav_root: Path, dicom_root: Path, progress: LoadProgress | None = None
+    bids_root: Path,
+    behav_root: Path,
+    dicom_root: Path,
+    progress: LoadProgress | None = None,
+    fresh: bool = False,
 ) -> BehavData:
+    """The logs and DICOM session folders, reading only what changed since the last time
+    (the scan cache); fresh reads everything again."""
+
     def step(what: str) -> Callable[[int, int], None] | None:
         if progress is None:
             return None
         report = progress
         return lambda done, total: report(done, total, what)
 
-    infos = inspect_logs(behav_root, read_corrections(bids_root), step("Reading logs"))
+    cache = ScanCache.open(behav_root, dicom_root)  # only what changed is read again
+    if fresh:
+        cache.logs, cache.dicom = {}, {}
+    infos = inspect_logs(behav_root, read_corrections(bids_root), step("Reading logs"), cache.logs)
     scanned = scan_dicom_root(
-        dicom_root, step("Scanning DICOM session folders"), read_scan_rules(bids_root)
+        dicom_root, step("Scanning DICOM session folders"), read_scan_rules(bids_root), cache.dicom
     )
+    cache.save()
     return BehavData(
         infos,
         scanned,
@@ -217,6 +229,10 @@ HELP_TEXT = (
     "code/dicom_id_corrections.json), and Convert to BIDS applies it. Raw files are never "
     "renamed. Sessions already converted under an old ID stay in the BIDS folder until you "
     "remove them."
+)
+REFRESH_CACHE_TIP = (
+    "This reloads everything: every log and DICOM folder is read again, not only what "
+    "changed since last time (Reload)."
 )
 FIX_RED = "Fix the cells marked red (dates as YYYY-MM-DD, sessions as a number)."
 # Where "Export logs..." can put the events files.
