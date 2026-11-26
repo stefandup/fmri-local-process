@@ -76,6 +76,13 @@ S_CORRECTED, S_DATE, S_FIXED, S_RESOLVED, S_SESSION, S_TASKS, S_LOGS, S_CHECKED,
     3, 12
 )
 Verdict = tuple[str, str]  # (review, note)
+# Which logs the table shows; the first is the default.
+ALL_LOGS = "All logs"
+MATCHED_NEEDS_REVIEW = "Matched and needs review"
+NEEDS_REVIEW_ONLY = "Needs review only"
+MATCHED_ONLY = "Matched"
+UNMATCHED_ONLY = "Unmatched"
+LOG_VIEWS = (ALL_LOGS, MATCHED_NEEDS_REVIEW, NEEDS_REVIEW_ONLY, MATCHED_ONLY, UNMATCHED_ONLY)
 ISO_PATTERN = re.compile(r"\d{0,4}(-\d{0,2}(-\d{0,2})?)?")  # YYYY-MM-DD as it is typed
 MAX_SESSION = 99
 
@@ -489,6 +496,20 @@ def export_text(report: ExportReport, out_root: Path, into_bids: bool) -> str:
     if unplaced:
         lines.append(f"{unplaced} not matched to a session: in {UNPLACED_DIR}/.")
     return "\n".join(lines)
+
+
+def log_shown(m: LogMatch, view: str) -> bool:
+    """Whether the log is listed under `view` (one of LOG_VIEWS)."""
+    matched = m.status == MATCHED
+    if view == MATCHED_NEEDS_REVIEW:
+        return matched and needs_review(m)
+    if view == NEEDS_REVIEW_ONLY:
+        return needs_review(m)
+    if view == MATCHED_ONLY:
+        return matched
+    if view == UNMATCHED_ONLY:
+        return not matched
+    return True
 
 
 def log_cells(m: LogMatch) -> dict[int, str]:

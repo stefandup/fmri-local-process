@@ -6,9 +6,10 @@ from collections.abc import Callable
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal
-from textual.widgets import Button, Checkbox, Input, ProgressBar, Static
+from textual.widgets import Button, Input, ProgressBar, Select, Static
 
 from fmri_local_process.app.behav import (
+    ALL_LOGS,
     COLUMNS,
     EXPORT_INTO_BIDS_QUESTION,
     EXPORT_LAYOUTS,
@@ -16,6 +17,7 @@ from fmri_local_process.app.behav import (
     HELP_TEXT,
     INTO_BIDS,
     INTO_OUTPUT,
+    LOG_VIEWS,
     MATCH,
     NOTES,
     S_CHECKED,
@@ -38,6 +40,7 @@ from fmri_local_process.app.behav import (
     inventory_text,
     load_behav_data,
     log_cells,
+    log_shown,
     log_title,
     missing_folders_notice,
     parse_date,
@@ -59,11 +62,11 @@ from fmri_local_process.processing.behav_match import (
     LogInfo,
     LogMatch,
     events_summary,
-    needs_review,
     same_day_rivals,
 )
 from fmri_local_process.tui.widgets import (
     BrowseScreen,
+    FilledSelect,
     Line,
     Notices,
     Page,
@@ -454,7 +457,7 @@ class BehavPage(SharedPage):
     def compose(self) -> ComposeResult:
         yield from self.compose_controls()
         with Horizontal(classes="row"):
-            yield Checkbox("Needs review only", id="problems-only")
+            yield FilledSelect([(v, v) for v in LOG_VIEWS], id="log-view", allow_blank=False)
             yield Button("Export logs...", id="export")
             yield Button("Contents per task", id="contents")
         yield TickTable(COLUMNS, id="logs")
@@ -497,12 +500,12 @@ class BehavPage(SharedPage):
 
     # ---- the logs -----------------------------------------------------------------------------
 
-    @on(Checkbox.Changed, "#problems-only")
+    @on(Select.Changed, "#log-view")
     def fill(self) -> None:
-        only = self.query_one("#problems-only", Checkbox).value
+        view = self.query_one("#log-view", FilledSelect).chosen() or ALL_LOGS
         rows = []
         for m in self.work.matches if self.work else []:
-            if only and not needs_review(m):
+            if not log_shown(m, view):
                 continue
             info, cells = m.info, log_cells(m)
             review = info.correction.review or ""

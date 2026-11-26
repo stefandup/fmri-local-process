@@ -496,6 +496,35 @@ def test_a_wrong_log_id_is_corrected_marked_and_saved(tmp_path: Path) -> None:
     assert saved.crosschecked
 
 
+def test_the_log_view_dropdown_filters_the_logs(tmp_path: Path) -> None:
+    folders, _folder, _log = behav_study(tmp_path)  # one log, its ID wrong: unmatched
+
+    async def scenario(app: ToolboxApp, pilot: Pilot) -> None:
+        page = page_of(app, BehavPage)
+        view = page.query_one("#log-view", FilledSelect)
+        table = page.query_one("#logs", TickTable)
+        assert view.chosen() == "All logs" and table.row_count == 1
+        shown = {
+            "Matched and needs review": 0,
+            "Needs review only": 1,
+            "Matched": 0,
+            "Unmatched": 1,
+        }
+        for choice, rows in shown.items():
+            view.value = choice
+            await settle(app, pilot)
+            assert table.row_count == rows, choice
+        view.value = "All logs"
+        await settle(app, pilot)
+        await submit(app, pilot, "#log-id", "12345-1")  # now matched, nothing left to review
+        for choice, rows in {"Matched": 1, "Unmatched": 0, "Needs review only": 0}.items():
+            view.value = choice
+            await settle(app, pilot)
+            assert table.row_count == rows, choice
+
+    run_app(tmp_path, scenario, BEHAV, **folders)
+
+
 def test_what_is_typed_for_a_log_is_never_lost(tmp_path: Path) -> None:
     folders, _folder, log = behav_study(tmp_path)
     other = log.replace("151000", "161000")
