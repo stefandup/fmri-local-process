@@ -44,9 +44,12 @@ def file_stamp(path: Path) -> list[int]:
 
 def folder_stamp(folder: Path) -> list[Any]:
     """The folder's modification time and that of each folder directly in it (the series):
-    adding a series, or a file to a series, changes it -- without listing every DICOM file."""
+    adding a series, or a file to a series, changes it -- without listing every DICOM file.
+
+    Each series is stat'ed itself: on Windows, os.scandir's entry.stat() gives the parent
+    folder's copy of the times, which NTFS updates only later, so a new file went unseen."""
     with os.scandir(folder) as entries:
-        children = sorted([e.name, e.stat().st_mtime_ns] for e in entries if e.is_dir())
+        children = sorted([e.name, os.stat(e.path).st_mtime_ns] for e in entries if e.is_dir())
     return [folder.stat().st_mtime_ns, children]
 
 

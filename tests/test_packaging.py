@@ -36,7 +36,8 @@ def test_linux_bundle_holds_every_command_but_the_windows() -> None:
     assert tools == expected
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+# Not on Windows: there `bash` is usually WSL's, which can't read a Windows path.
+@pytest.mark.skipif(os.name == "nt" or shutil.which("bash") is None, reason="needs Linux bash")
 @pytest.mark.parametrize("args", [[], ["--defacer", "x"], ["--defacer", "pydeface", "--no-cpac"]])
 def test_linux_docker_setup_refuses_wrong_options(args: list[str]) -> None:
     result = subprocess.run(["bash", str(SETUP), *args], capture_output=True, text=True)
