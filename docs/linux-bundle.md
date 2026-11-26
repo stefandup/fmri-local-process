@@ -63,3 +63,32 @@ Before the first run, on the server:
   says so.
 - **Home folder mounted `noexec`?** Programs can't run from there: install with
   `./install.sh /some/other/folder` (and `./install.sh --uninstall /some/other/folder`).
+
+## Releases and updates
+
+Pushing a tag builds the bundle on GitHub (`.github/workflows/release.yml`, the same `build.sh --tui`)
+and publishes it as a release:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The release has the bundle (also as `fmri_tui-linux-x86_64.tar.gz`, a name that stays the same),
+`fmri_update`, `VERSION` and `SHA256SUMS`. Users install and update with `fmri_update`, a small script
+that is also in the bundle, so it is on the PATH and updates itself:
+
+```bash
+curl -fsSLO https://github.com/stefandup/fmri-local-process/releases/latest/download/fmri_update
+bash fmri_update && rm fmri_update   # first time; then log in again
+
+fmri_update            # the latest release, if newer than the installed one
+fmri_update --check    # only say whether there is a newer one
+fmri_update v0.2.0     # a given release, e.g. to go back one
+fmri_update --file fmri_tui-…-linux-x86_64.tar.gz   # a local bundle, without the internet
+fmri_update --uninstall
+```
+
+It downloads with curl (or wget), checks the download against `SHA256SUMS` and runs the bundle's own
+`install.sh`, so an update replaces the earlier version. The Docker images are kept: the toolbox finds
+them by name, and they are shared by every user on the server. `./build.sh --tui --remote-install`
+stays for trying a local build on a server.

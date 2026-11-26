@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Installs or updates fMRI Local Process from its GitHub releases, for you, without sudo.
+# First time:  curl -fsSLO https://github.com/stefandup/fmri-local-process/releases/latest/download/fmri_update
+#              bash fmri_update
+# After that, fmri_update is on your PATH (it comes with every release, so it updates itself too).
+set -euo pipefail
+
+RELEASES="${FMRI_UPDATE_URL:-https://github.com/stefandup/fmri-local-process/releases}"  # override: tests
+ASSET="fmri_tui-linux-x86_64.tar.gz"
+DEFAULT_FOLDER="$HOME/.local/opt/fmri_local_process"
+
+usage() {
+    cat <<USAGE
+Usage: fmri_update [TAG] [--check] [--force] [--folder DIR]
+       fmri_update --file BUNDLE.tar.gz [--folder DIR]
+       fmri_update --uninstall [--folder DIR]
+
+Installs or updates fMRI Local Process (the terminal app fmri_tui and the command-line tools) for
+your user, from https://github.com/stefandup/fmri-local-process/releases. No sudo.
+
+  (nothing)      install the latest release, if it is newer than the installed one
+  TAG            a given release instead, e.g. v0.2.0 (also to go back one)
+  --check        only say whether a newer release is there
+  --force        install even when it is the installed version
+  --file FILE    install a downloaded or locally built fmri_tui-*-linux-x86_64.tar.gz
+  --uninstall    remove it again (settings and backups are kept)
+  --folder DIR   the toolbox folder (default: the one this runs from, else
+                 ~/.local/opt/fmri_local_process); for a home folder mounted noexec
+  -h, --help     show this help
+
+The Docker images (C-PAC, MRIQC, defacer) aren't touched: an update doesn't download them again.
+USAGE
+}
+
+fail() { echo "fmri_update: $*" >&2; exit 1; }
+
+is_toolbox() { [[ -f "$1/commands.txt" && -d "$1/_internal" ]]; }
+
+fetch() {  # URL FILE
+    if command -v curl >/dev/null; then
+        curl -fsSL -o "$2" "$1" || fail "couldn't download $1"
+    elif command -v wget >/dev/null; then
+        wget -q -O "$2" "$1" || fail "couldn't download $1"
+    else
+        fail "needs curl or wget to download"
+    fi
+}
+
+install_bundle() {  # TARBALL TEMP_FOLDER
+    tar -xzf "$1" -C "$2"
+    local bundle="" folder
+    for folder in "$2"/*/; do
+        if [[ -f "$folder/install.sh" ]]; then bundle="${folder%/}"; break; fi
+    done
+    [[ -n "$bundle" ]] || fail "$1 isn't an fmri_tui bundle (no install.sh in it)"
+    # The new bundle's own install.sh: it replaces the earlier toolbox folder.
+    "$bundle/install.sh" "$FOLDER"
+}
+
+main() {
+    local tag="" file="" check="" force="" uninstall=""
+    FOLDER=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help) usage; exit ;;
+            --check) check=1 ;;
+            --force) force=1 ;;
+            --uninstall) uninstall=1 ;;
+            --file) [[ -n "${2:-}" ]] || fail "--file needs a .tar.gz"; file="$2"; shift ;;
+            --folder) [[ -n "${2:-}" ]] || fail "--folder needs a folder"; FOLDER="$2"; shift ;;
+            v[0-9]*) tag="$1" ;;
+            *) usage >&2; fail "unknown option: $1" ;;
+        esac
+        shift
+    done
+    if [[ -z "$FOLDER" ]]; then
+        local here
+        here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        if is_toolbox "$here"; then FOLDER="$here"; else FOLDER="$DEFAULT_FOLDER"; fi
+    fi
+
+    if [[ -n "$uninstall" ]]; then
+        [[ -x "$FOLDER/.installer/install.sh" ]] \
+            || fail "no installer in $FOLDER (installed before fmri_update existed?): run fmri_update --force, then this again"
+        exec "$FOLDER/.installer/install.sh" --uninstall "$FOLDER"
+    fi
+
+    # A temporary folder in the home folder: /tmp can be small or mounted noexec.
+    TEMP="$(mktemp -d "$HOME/.fmri_update.XXXXXX")"
+    trap 'rm -rf "$TEMP"' EXIT
+
+    if [[ -n "$file" ]]; then
+        [[ -f "$file" ]] || fail "no such file: $file"
+        install_bundle "$file" "$TEMP"
+        return
+    fi
+
+    local url installed="" latest
+    if [[ -n "$tag" ]]; then url="$RELEASES/download/$tag"; else url="$RELEASES/latest/download"; fi
+    fetch "$url/VERSION" "$TEMP/VERSION"
+    latest="$(tr -d '[:space:]' < "$TEMP/VERSION")"
+    if [[ -f "$FOLDER/VERSION" ]]; then installed="$(tr -d '[:space:]' < "$FOLDER/VERSION")"; fi
+    if [[ -n "$check" ]]; then
+        echo "Installed: ${installed:-none}    release${tag:+ $tag}: $latest"
+        if [[ "$installed" != "$latest" ]]; then echo "Run fmri_update${tag:+ $tag} to install it."; fi
+        return
+    fi
+    if [[ "$installed" == "$latest" && -z "$force" ]]; then
+        echo "fMRI Local Process $installed is up to date (--force installs it again)."
+        return
+    fi
+
+    echo "Downloading fMRI Local Process $latest (about 200 MB)"
+    fetch "$url/SHA256SUMS" "$TEMP/SHA256SUMS"
+    fetch "$url/$ASSET" "$TEMP/$ASSET"
+    (cd "$TEMP" && grep "  $ASSET\$" SHA256SUMS | sha256sum -c --quiet -) \
+        || fail "the download doesn't match its checksum: nothing was installed, try again"
+    mkdir "$TEMP/unpack"
+    install_bundle "$TEMP/$ASSET" "$TEMP/unpack"
+}
+
+# All in main, read before it runs: an update replaces this file while it runs.
+main "$@"
+exit

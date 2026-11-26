@@ -61,6 +61,9 @@ STAGE="/tmp/stage/$PACKAGE"
 step "Packaging $PACKAGE.tar.gz"
 mkdir -p "$STAGE"
 cp -R /tmp/dist/fmri_tui "$STAGE/app"
+cp packaging/linux/fmri_update "$STAGE/app/"  # the updater, a command like the others
+chmod +x "$STAGE/app/fmri_update"
+echo "$VERSION" > "$STAGE/app/VERSION"  # what fmri_update compares with the latest release
 (cd "$STAGE/app" && find . -maxdepth 1 -type f -perm -u+x -printf '%P\n' | sort) > "$STAGE/app/commands.txt"
 cp packaging/install.sh "$STAGE/install.sh"
 mkdir "$STAGE/docker"  # the C-PAC / MRIQC / defacer images, as in the Windows installer

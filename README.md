@@ -1,5 +1,17 @@
 # fmri_local_process
 
+## Install on a Linux server (e.g. nala)
+
+```bash
+curl -fsSLO https://github.com/stefandup/fmri-local-process/releases/latest/download/fmri_update
+bash fmri_update && rm fmri_update   # then log in again
+fmri_tui                             # start it (best inside tmux)
+fmri_update                          # later: get the newest version
+```
+
+No sudo; it installs for your user only. You need to be in the server's `docker` group.
+More: [docs/linux-bundle.md](docs/linux-bundle.md).
+
 > **Status:** step 0, the Philani DICOM → BIDS conversion, and step 1a, C-PAC preprocessing,
 > are built and tested on synthetic data. Everything from "The idea" onwards is still the
 > plan. User guides: [docs/bids-conversion.md](docs/bids-conversion.md) and

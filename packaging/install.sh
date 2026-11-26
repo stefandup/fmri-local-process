@@ -76,6 +76,9 @@ install() {
     mkdir -p "$FOLDER"
     cp -R "$HERE/app/." "$FOLDER/"
     if [[ -d "$HERE/docker" ]]; then cp -R "$HERE/docker" "$FOLDER/docker"; fi
+    # A copy of this script, for --uninstall without the unpacked bundle (fmri_update uses it).
+    mkdir -p "$FOLDER/.installer"
+    cp "$HERE/install.sh" "$FOLDER/.installer/install.sh"
     if [[ "$(uname -s)" == Darwin ]]; then
         # Unsigned binaries from a download are quarantined by Gatekeeper; clear it.
         xattr -dr com.apple.quarantine "$FOLDER" 2>/dev/null || true

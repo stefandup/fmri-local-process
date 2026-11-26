@@ -61,6 +61,9 @@ for image in "${IMAGES[@]}"; do
                 echo "  ok  $command"
             done
             fmri_tui --version
+            test -s $toolbox/VERSION
+            fmri_update --file /bundle.tar.gz >/dev/null  # offline: the release download is checked apart
+            echo "  ok  fmri_update --file"
             test -x $toolbox/docker/setup_docker_image.sh
             $toolbox/_internal/dcm2niix/dcm2niix -v | head -n 1
             fmri_tui </dev/null 2>&1 | grep -q "needs a terminal"
@@ -73,7 +76,7 @@ for image in "${IMAGES[@]}"; do
         && check_tui && echo "  ok  terminal app" \
         && check_tui -e LC_ALL=C && echo "  ok  terminal app, C locale" \
         && in_container "$SESSION" bash -ec '
-            ~/unpack/*/install.sh --uninstall
+            bash -lc "fmri_update --uninstall"
             test ! -e ~/.local/opt/fmri_local_process && ! grep -qs fmri_local_process ~/.bashrc ~/.profile ~/.bash_profile'; then
         echo "  $image: PASSED"
     else
