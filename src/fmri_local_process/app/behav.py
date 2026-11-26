@@ -77,6 +77,20 @@ S_CORRECTED, S_DATE, S_FIXED, S_RESOLVED, S_SESSION, S_TASKS, S_LOGS, S_CHECKED,
     3, 12
 )
 Verdict = tuple[str, str]  # (review, note)
+# What can be wrong with a DICOM folder, most important first (its Status shows the first).
+NOT_CONVERTED, ID_PROBLEM, NO_SCAN_RULE = "not converted", "ID problem", "no scan rule"
+SESSION_CLASH, MISSING_LOG, FOLDER_OK = "session clash", "missing log", "ok"
+FOLDER_PROBLEMS = (NOT_CONVERTED, ID_PROBLEM, NO_SCAN_RULE, SESSION_CLASH, MISSING_LOG)
+# Which DICOM folders the table shows; the first is the default.
+ALL_FOLDERS = "All folders"
+FOLDERS_NEED_REVIEW = "Needs review only"
+FOLDERS_WITH_PROBLEMS = "Problems"
+FOLDERS_MISSING_LOGS = "Missing logs"
+FOLDERS_NOT_CONVERTED = "Not converted"
+FOLDER_VIEWS = (
+    ALL_FOLDERS, FOLDERS_NEED_REVIEW, FOLDERS_WITH_PROBLEMS, FOLDERS_MISSING_LOGS,
+    FOLDERS_NOT_CONVERTED,
+)  # fmt: skip
 # Which logs the table shows; the first is the default.
 ALL_LOGS = "All logs"
 MATCHED_NEEDS_REVIEW = "Matched and needs review"
@@ -363,41 +377,99 @@ class BehavWork:
     def waiting(self) -> int:
         return sum(needs_review(m) for m in self.matches)
 
-    def folder_cells(self, row: int) -> dict[int, str]:
-        """A DICOM folder's row once matched: resolved ID, BIDS session, logs, notes."""
-        folder, tasks = self.scanned[row]
-        session = next((s for s in self.sessions if s.folder == folder.name), None)
-        _, raw_id = folder_name_parts(folder.name)
-        matched = [
+    def matched_logs(self, folder_name: str) -> list[str]:
+        """'<task>: <time>' of each log matched to this DICOM folder."""
+        return sorted(
             f"{m.info.task.task}: {m.info.time_text}"
             for m in self.matches
             if m.status == MATCHED
             and m.session is not None
             and m.info.task is not None
-            and m.session.folder == folder.name
-        ]
-        missing = sorted(t for t in tasks if not any(x.startswith(f"{t}:") for x in matched))
-        notes = [id_problem(raw_id)] if not self.fixes.ids.get(folder.name) else []
+            and m.session.folder == folder_name
+        )
+
+    def folder_problems(self, row: int) -> list[tuple[str, str]]:
+        """(kind, note) of what is wrong with a DICOM folder, in FOLDER_PROBLEMS order."""
+        folder, tasks = self.scanned[row]
+        session = next((s for s in self.sessions if s.folder == folder.name), None)
+        _, raw_id = folder_name_parts(folder.name)
+        matched = self.matched_logs(folder.name)
+        problems = []
         if session is None:
-            notes.append(
-                "not converted: no date or ID in the folder name; give it a Corrected ID "
-                "and a Corrected date, then Re-check and Save"
+            problems.append(
+                (
+                    NOT_CONVERTED,
+                    "not converted: no date or ID in the folder name; give it a Corrected ID "
+                    "and a Corrected date, then Re-check and Save",
+                )
+            )
+        if not self.fixes.ids.get(folder.name) and (problem := id_problem(raw_id)):
+            problems.append((ID_PROBLEM, problem))
+        if not tasks:
+            problems.append(
+                (
+                    NO_SCAN_RULE,
+                    "no series matches a scan rule: nothing would be converted (the "
+                    "conversion summary lists its series folders)",
+                )
             )
         fixed = self.fixes.sessions.get(folder.name, "")
         if session is not None and fixed and session.label != fixed:
-            notes.append(f"ses-{fixed} already set for another of its folders")
-        if not tasks:
-            notes.append(
-                "no series matches a scan rule: nothing would be converted (the "
-                "conversion summary lists its series folders)"
-            )
-        notes += [f"no {task} log" for task in missing if task in self.behav_tasks]
+            problems.append((SESSION_CLASH, f"ses-{fixed} already set for another of its folders"))
+        problems += [(MISSING_LOG, f"no {task} log") for task in self.missing_logs(tasks, matched)]
+        return sorted(problems, key=lambda p: FOLDER_PROBLEMS.index(p[0]))
+
+    def missing_logs(self, tasks: frozenset[str], matched: list[str]) -> list[str]:
+        """The folder's behaviour tasks without a matched log."""
+        return sorted(
+            t
+            for t in tasks
+            if t in self.behav_tasks and not any(x.startswith(f"{t}:") for x in matched)
+        )
+
+    def folder_status(self, row: int) -> tuple[str, str]:
+        """(text, colour) of the folder's most important problem, or ok."""
+        problems = self.folder_problems(row)
+        if not problems:
+            return FOLDER_OK, OK_COLOR
+        kind = problems[0][0]
+        return kind, WARN_COLOR if kind == MISSING_LOG else BAD_COLOR
+
+    def folder_log_marks(self, row: int) -> str:
+        """'Matching ✔, Reappraisal ✘': each behaviour task scanned, with a log or not."""
+        folder, tasks = self.scanned[row]
+        missing = self.missing_logs(tasks, self.matched_logs(folder.name))
+        scanned = sorted(t for t in tasks if t in self.behav_tasks)
+        return ", ".join(f"{t} {'✘' if t in missing else '✔'}" for t in scanned)
+
+    def folder_shown(self, row: int, view: str) -> bool:
+        """Whether the folder is listed under `view` (one of FOLDER_VIEWS)."""
+        kinds = {kind for kind, _note in self.folder_problems(row)}
+        checked = self.scanned[row][0].name in self.fixes.checked
+        if view == FOLDERS_NEED_REVIEW:
+            return bool(kinds) and not checked
+        if view == FOLDERS_WITH_PROBLEMS:
+            return bool(kinds)
+        if view == FOLDERS_MISSING_LOGS:
+            return MISSING_LOG in kinds
+        if view == FOLDERS_NOT_CONVERTED:
+            return NOT_CONVERTED in kinds
+        return True
+
+    def folders_to_review(self) -> int:
+        return sum(self.folder_shown(row, FOLDERS_NEED_REVIEW) for row in range(len(self.scanned)))
+
+    def folder_cells(self, row: int) -> dict[int, str]:
+        """A DICOM folder's row once matched: resolved ID, BIDS session, logs, notes."""
+        folder, _tasks = self.scanned[row]
+        session = next((s for s in self.sessions if s.folder == folder.name), None)
+        _, raw_id = folder_name_parts(folder.name)
         return {
             S_RESOLVED: id_text(raw_id, session.subject) if session else "-",
             S_SESSION: session.name if session else "",
-            S_LOGS: "; ".join(sorted(matched)),
+            S_LOGS: "; ".join(self.matched_logs(folder.name)),
             S_CHECKED: CROSSCHECKED_ICON if folder.name in self.fixes.checked else "",
-            S_NOTES: "; ".join(filter(None, notes)),
+            S_NOTES: "; ".join(note for _kind, note in self.folder_problems(row)),
         }
 
     def notices(self) -> list[str]:

@@ -697,14 +697,14 @@ def test_a_scan_folder_is_corrected_on_raw_dicoms(tmp_path: Path) -> None:
     async def scenario(app: ToolboxApp, pilot: Pilot) -> None:
         page = page_of(app, SessionsPage)
         table = page.query_one("#folders", TickTable)
-        assert table.texts(folder)[3] == "12345-1"
+        assert table.texts(folder)[table.names.index("ID Corrected")].startswith("12345-1")
         await submit(app, pilot, "#folder-session", "x")
         assert "not a session number" in line(page, "#problem")
         page.query_one("#folder-session", Input).value = "2"
         await submit(app, pilot, "#folder-id", "12345-2")
         cells = table.texts(folder)
         assert "12345T2" in " ".join(cells)
-        assert cells[table.names.index("BIDS session")] == "2"  # just the number
+        assert cells[table.names.index("Session")] == "2"  # just the number
         table.tick_all(True)
         await settle(app, pilot)
         await press(app, pilot, "#mark")
@@ -715,6 +715,52 @@ def test_a_scan_folder_is_corrected_on_raw_dicoms(tmp_path: Path) -> None:
     assert pb.read_dicom_corrections(bids) == {folder: "12345-2"}
     assert pb.read_dicom_session_corrections(bids) == {folder: "2"}
     assert pb.read_crosschecked_folders(bids) == {folder}
+
+
+def test_raw_dicoms_show_status_first_and_filter_by_view(tmp_path: Path) -> None:
+    folders, folder, _log = behav_study(tmp_path)  # the log's ID is wrong: no log for it
+    undated = folders["dicom"] / "scans_without_a_date" / "1_localizer"
+    undated.mkdir(parents=True)
+    (undated / "img.dcm").write_bytes(b"fake")
+
+    async def scenario(app: ToolboxApp, pilot: Pilot) -> None:
+        page = page_of(app, SessionsPage)
+        table = page.query_one("#folders", TickTable)
+        assert table.names[1:] == [
+            "Status", "Checked", "ID Corrected", "Session", "Scanned", "Scans", "Logs",
+            "Corr ID", "Corr Date", "Set Ses", "DICOM folder",
+        ]  # fmt: skip
+        dated = table.texts(folder)
+        assert dated[1:5] == ["missing log", "!", "12345-1 -> 12345T1", "1"]
+        assert dated[7] == "Matching ✘" and dated[-1] == folder
+        assert table.texts("scans_without_a_date")[1] == "not converted"
+        assert "(2 to review)" in str(app.tabs.get_tab(pane_id(SESSIONS)).label)
+        box = page.query_one("#details", DetailBox)
+        assert box.value("Notes") == "no Matching log"
+
+        view = page.query_one("#folder-view", FilledSelect)
+        assert view.chosen() == "All folders"
+        for choice, rows in {"Missing logs": 1, "Not converted": 1, "Problems": 2}.items():
+            view.value = choice
+            await settle(app, pilot)
+            assert table.row_count == rows, choice
+
+        view.value = "Missing logs"
+        await settle(app, pilot)
+        await press(app, pilot, "#tick-all")
+        mark = page.query_one("#mark", Button)
+        assert table.ticked == {folder} and str(mark.label) == "Mark ticked crosschecked"
+        await press(app, pilot, "#mark")
+        assert table.texts(folder)[2] == CROSSCHECKED_ICON
+        assert str(mark.label) == "Un-crosscheck ticked"
+        assert "(1 to review)" in str(app.tabs.get_tab(pane_id(SESSIONS)).label)
+        view.value = "Needs review only"
+        await settle(app, pilot)
+        assert table.row_keys == ["scans_without_a_date"]
+        await press(app, pilot, "#untick-all")
+        assert not table.ticked and mark.disabled
+
+    run_app(tmp_path, scenario, SESSIONS, **folders)
 
 
 def test_logs_export_into_a_chosen_folder(tmp_path: Path) -> None:

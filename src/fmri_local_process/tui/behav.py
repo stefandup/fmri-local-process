@@ -9,10 +9,12 @@ from textual.containers import Horizontal
 from textual.widgets import Button, Input, ProgressBar, Select, Static
 
 from fmri_local_process.app.behav import (
+    ALL_FOLDERS,
     ALL_LOGS,
     EXPORT_INTO_BIDS_QUESTION,
     EXPORT_LAYOUTS,
     EXPORT_SUBFOLDER,
+    FOLDER_VIEWS,
     HELP_TEXT,
     INTO_BIDS,
     INTO_OUTPUT,
@@ -20,13 +22,11 @@ from fmri_local_process.app.behav import (
     MATCH,
     NOTES,
     REFRESH_CACHE_TIP,
-    S_CHECKED,
     S_LOGS,
     S_NOTES,
     S_RESOLVED,
     S_SESSION,
     SAVED_TEXT,
-    SESSION_COLUMNS,
     SESSIONS_HELP_TEXT,
     STATE,
     VERDICT_COLORS,
@@ -48,7 +48,7 @@ from fmri_local_process.app.colors import ERROR_COLOR, OK_COLOR, WARNING_COLOR
 from fmri_local_process.app.crosscheck import CROSSCHECKED_COLOR, CROSSCHECKED_ICON
 from fmri_local_process.app.events import Event
 from fmri_local_process.app.state import VIEW_ONLY, ToolboxState
-from fmri_local_process.app.tabs import BEHAV
+from fmri_local_process.app.tabs import BEHAV, SESSIONS
 from fmri_local_process.processing.behav_export import BIDS_LAYOUT
 from fmri_local_process.processing.behav_logs import EventTable
 from fmri_local_process.processing.behav_match import (
@@ -82,7 +82,17 @@ TUI_LOG_COLUMNS = (
     "Corr Date", "Log",
 )  # fmt: skip
 UNCHECKED_ICON = "!"  # not crosschecked yet
+CHECKED_MARK: tuple[str, str] = (
+    CROSSCHECKED_ICON,
+    CROSSCHECKED_COLOR,
+)  # (text, colour) in a Checked column
+UNCHECKED_MARK: tuple[str, str] = (UNCHECKED_ICON, WARNING_COLOR)
 MARK_TEXT, UNMARK_TEXT = "Mark ticked crosschecked", "Un-crosscheck ticked"
+# The Raw DICOMs table here: status first, the folder name last.
+TUI_SESSION_COLUMNS = (
+    "Status", "Checked", "ID Corrected", "Session", "Scanned", "Scans", "Logs", "Corr ID",
+    "Corr Date", "Set Ses", "DICOM folder",
+)  # fmt: skip
 
 
 def log_date(info: LogInfo) -> str:
@@ -365,7 +375,11 @@ class SessionsPage(SharedPage):
 
     def compose(self) -> ComposeResult:
         yield from self.compose_controls()
-        yield TickTable(SESSION_COLUMNS, id="folders")
+        with Horizontal(classes="row"):
+            yield FilledSelect([(v, v) for v in FOLDER_VIEWS], id="folder-view", allow_blank=False)
+            yield Button("Tick all", id="tick-all")
+            yield Button("Untick all", id="untick-all")
+        yield TickTable(TUI_SESSION_COLUMNS, id="folders")
         with Horizontal(classes="row"):
             yield Static("Corrected ID:", classes="label")
             yield Input(id="folder-id")
@@ -377,34 +391,41 @@ class SessionsPage(SharedPage):
         yield Line(id="problem")
         yield Line(id="ticked")
         with Horizontal(classes="row"):
-            yield Button("Mark ticked crosschecked", id="mark", variant="success")
-            yield Button("Un-mark ticked", id="unmark")
+            yield Button(MARK_TEXT, id="mark", variant="success")
         yield DetailBox(id="details")
 
+    def on_shared_changed(self) -> None:
+        super().on_shared_changed()
+        waiting = self.work.folders_to_review() if self.work else 0
+        self.toolbox.set_badge(SESSIONS, f"{waiting} to review" if waiting else "")
+
+    @on(Select.Changed, "#folder-view")
     def fill(self) -> None:
         work = self.work
+        view = self.query_one("#folder-view", FilledSelect).chosen() or ALL_FOLDERS
         rows = []
         for row in range(len(work.scanned) if work else 0):
             assert work is not None
+            if not work.folder_shown(row, view):
+                continue
             folder, tasks = work.scanned[row]
-            when, raw_id = folder_name_parts(folder.name)
-            fixes, cells = work.fixes, work.folder_cells(row)
+            name, fixes, cells = folder.name, work.fixes, work.folder_cells(row)
+            checked = name in fixes.checked
             rows.append(
                 (
-                    folder.name,
+                    name,
                     (
-                        folder.name,
-                        when,
-                        raw_id,
-                        fixes.ids.get(folder.name, ""),
-                        date_text(fixes.dates.get(folder.name)),
-                        fixes.sessions.get(folder.name, ""),
+                        cell(*work.folder_status(row)),
+                        cell(*(CHECKED_MARK if checked else UNCHECKED_MARK)),
                         cells[S_RESOLVED],
                         session_number(cells[S_SESSION]),
+                        folder_name_parts(name)[0],
                         ", ".join(sorted(tasks)),
-                        cells[S_LOGS],
-                        cell(cells[S_CHECKED], CROSSCHECKED_COLOR),
-                        cell(cells[S_NOTES], WARNING_COLOR),
+                        work.folder_log_marks(row),
+                        fixes.ids.get(name, ""),
+                        date_text(fixes.dates.get(name)),
+                        fixes.sessions.get(name, ""),
+                        name,
                     ),
                 )
             )
@@ -431,16 +452,24 @@ class SessionsPage(SharedPage):
         when, raw_id = folder_name_parts(name)
         number = session_number(cells[S_SESSION])
         resolved = f"{cells[S_RESOLVED]}, session {number}" if number else cells[S_RESOLVED]
+        checked = CHECKED_MARK if name in fixes.checked else UNCHECKED_MARK
         box.show(
             name,
             [
+                ("Status", *work.folder_status(row)),
+                ("Checked", *checked),
                 ("Scanned", when, ""),
                 ("ID in folder", raw_id, ""),
                 ("Corrected ID", fixes.ids.get(name, ""), ""),
                 ("Corrected date", date_text(fixes.dates.get(name)), ""),
                 ("Set session", fixes.sessions.get(name, ""), ""),
                 ("Resolves to", resolved, ""),
-                ("Notes", cells[S_NOTES], WARNING_COLOR),
+                ("Logs", cells[S_LOGS] or "none matched", ""),
+                (
+                    "Notes",
+                    cells[S_NOTES] or "no issues found",
+                    WARNING_COLOR if cells[S_NOTES] else "",
+                ),
             ],
         )
 
@@ -481,24 +510,28 @@ class SessionsPage(SharedPage):
         total = len(work.scanned) if work else 0
         done = len(checked & {f.name for f, _t in work.scanned}) if work else 0
         self.query_one("#ticked", Line).set(
-            f"{len(ticked)} ticked (space); {CROSSCHECKED_ICON} {done} of {total} crosschecked"
+            f"{len(ticked)} ticked (space or click the box); "
+            f"{CROSSCHECKED_ICON} {done} of {total} crosschecked"
         )
-        self.query_one("#mark", Button).disabled = not ticked - checked
-        self.query_one("#unmark", Button).disabled = not ticked & checked
+        mark = self.query_one("#mark", Button)
+        mark.disabled = not ticked
+        mark.label = MARK_TEXT if ticked - checked or not ticked else UNMARK_TEXT
+
+    @on(Button.Pressed, "#tick-all")
+    def tick_all(self) -> None:
+        self.query_one("#folders", TickTable).tick_all(True)
+
+    @on(Button.Pressed, "#untick-all")
+    def untick_all(self) -> None:
+        self.query_one("#folders", TickTable).tick_all(False)
 
     @on(Button.Pressed, "#mark")
     def mark(self) -> None:
-        self.set_checked(True)
-
-    @on(Button.Pressed, "#unmark")
-    def unmark(self) -> None:
-        self.set_checked(False)
-
-    def set_checked(self, marked: bool) -> None:
+        """Mark the ticked folders crosschecked, or un-mark them when all already are."""
         if self.work is None:
             return
         ticked = self.query_one("#folders", TickTable).ticked
-        if marked:
+        if ticked - self.work.fixes.checked:
             self.work.fixes.checked |= ticked
         else:
             self.work.fixes.checked -= ticked

@@ -51,3 +51,16 @@ from PowerShell, test the window there, then remove the entry.
 - **TUI:** Save shows `SAVED_TEXT` (`app/behav.py`): convert to apply, or Export logs when only
   behaviour logs changed.
 - **Window:** show the same `SAVED_TEXT` after Save in `gui/behav_logs_dialog.py`.
+
+## Raw DICOMs: Status first, view dropdown, one crosscheck toggle
+
+- **Shared (done):** `app/behav.py` has `folder_problems` / `folder_status` (most important
+  problem first: not converted, ID problem, no scan rule, session clash, missing log),
+  `folder_log_marks`, `folder_shown` + `FOLDER_VIEWS`, `folders_to_review`. The notes in the
+  window's Notes column now list the problems in that order.
+- **TUI:** `tui/behav.py` `SessionsPage`. Columns `TUI_SESSION_COLUMNS`: Status, Checked (☑ / !),
+  ID Corrected, Session (number), Scanned, Scans, Logs (`Matching ✔`), Corr ID, Corr Date,
+  Set Ses, DICOM folder. View dropdown + Tick all / Untick all; one `#mark` toggle; the details
+  box adds Status, Checked, Logs and Notes; the tab title shows "N to review".
+- **Window:** the same columns, dropdown, toggle and badge in `gui/behav_logs_dialog.py`'s
+  sessions panel.
