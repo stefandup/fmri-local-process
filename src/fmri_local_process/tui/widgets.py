@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -543,6 +543,12 @@ class TickTable(Table):
         key = self.current_key()
         if key is not None and not self.locked:
             self.set_ticked({key} ^ self.ticked)
+
+    def on_click(self, event: events.Click) -> None:
+        """A click on a row's box ticks or unticks it (the click has moved the cursor there)."""
+        meta = event.style.meta
+        if meta.get("column") == 0 and meta.get("row", -1) >= 0:
+            self.action_tick()
 
     def set_ticked(self, keys: set[str]) -> None:
         self.ticked = keys & set(self.row_keys)

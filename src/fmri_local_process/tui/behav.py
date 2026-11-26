@@ -25,11 +25,10 @@ from fmri_local_process.app.behav import (
     S_NOTES,
     S_RESOLVED,
     S_SESSION,
-    SESSION,
+    SAVED_TEXT,
     SESSION_COLUMNS,
     SESSIONS_HELP_TEXT,
     STATE,
-    VERDICT,
     VERDICT_COLORS,
     BehavData,
     BehavWork,
@@ -79,9 +78,27 @@ from fmri_local_process.tui.widgets import (
 # The logs table here: what matters first, the file name last (the window keeps COLUMNS
 # for now; see docs/gui-pending.md).
 TUI_LOG_COLUMNS = (
-    "Match", "Task", "ID in name", "Log state", "Logged", "Corrected ID", "Corrected date",
-    "Verdict", "Session", "Notes", "Log",
+    "Match", "Checked", "Task", "ID Corrected", "Log state", "Logged", "Session", "Corr ID",
+    "Corr Date", "Log",
 )  # fmt: skip
+UNCHECKED_ICON = "!"  # not crosschecked yet
+MARK_TEXT, UNMARK_TEXT = "Mark ticked crosschecked", "Un-crosscheck ticked"
+
+
+def session_number(name: str) -> str:
+    """'sub-12345_ses-2' -> '2' ('' stays '')."""
+    return name.rpartition("_ses-")[2]
+
+
+def checked_text(m: LogMatch) -> tuple[str, str]:
+    """(text, colour): ✔ and the verdict once crosschecked; ! (and any verdict) until then."""
+    correction = m.info.correction
+    review = correction.review or ""
+    if not correction.crosschecked:
+        return f"{UNCHECKED_ICON} {review}".strip(), WARNING_COLOR
+    return f"{CROSSCHECKED_ICON} {review}".strip(), VERDICT_COLORS.get(review, CROSSCHECKED_COLOR)
+
+
 MAX_EVENT_ROWS = 500  # shown; an events file is far shorter
 
 
@@ -332,7 +349,7 @@ class SharedPage(Page):
         except OSError as e:
             self.show_text("Not saved", str(e))
             return
-        self.show_text("Saved", "Corrections saved. Convert to BIDS (tab 1) to apply them.")
+        self.show_text("Saved", SAVED_TEXT)
 
 
 class SessionsPage(SharedPage):
@@ -378,7 +395,7 @@ class SessionsPage(SharedPage):
                         date_text(fixes.dates.get(folder.name)),
                         fixes.sessions.get(folder.name, ""),
                         cells[S_RESOLVED],
-                        cells[S_SESSION],
+                        session_number(cells[S_SESSION]),
                         ", ".join(sorted(tasks)),
                         cells[S_LOGS],
                         cell(cells[S_CHECKED], CROSSCHECKED_COLOR),
@@ -407,7 +424,8 @@ class SessionsPage(SharedPage):
         row = [f.name for f, _tasks in work.scanned].index(name)
         cells, fixes = work.folder_cells(row), work.fixes
         when, raw_id = folder_name_parts(name)
-        resolved = " ".join(filter(None, [cells[S_RESOLVED], cells[S_SESSION]]))
+        number = session_number(cells[S_SESSION])
+        resolved = f"{cells[S_RESOLVED]}, session {number}" if number else cells[S_RESOLVED]
         box.show(
             name,
             [
@@ -485,15 +503,14 @@ class SessionsPage(SharedPage):
 def log_details(m: LogMatch, fit: tuple[str, str]) -> list[DetailBox.Detail]:
     """The highlighted log, for the box under the table."""
     info, cells = m.info, log_cells(m)
-    review = info.correction.review or ""
-    session = f" -> {cells[SESSION]}" if cells[SESSION] else ""
+    session = f" -> session {m.session.label} ({m.session.when})" if m.session else ""
     return [
         ("Match", f"{m.status}{session}", OK_COLOR if m.status == MATCHED else ERROR_COLOR),
         ("Log state", info.state, "" if info.state == COMPLETE else WARNING_COLOR),
         ("Log file date", cells[3], ""),
         ("Corrected ID", info.correction.subject or "", ""),
         ("Corrected date", date_text(info.correction.date), ""),
-        ("Verdict", cells[VERDICT], VERDICT_COLORS.get(review, CROSSCHECKED_COLOR)),
+        ("Checked", *checked_text(m)),
         ("Notes", cells[NOTES] or "no issues found", WARNING_COLOR if cells[NOTES] else ""),
         ("Events", *fit),
     ]
@@ -511,11 +528,12 @@ class BehavPage(SharedPage):
             yield FilledSelect([(v, v) for v in LOG_VIEWS], id="log-view", allow_blank=False)
             yield Button("Export logs...", id="export")
             yield Button("Contents per task", id="contents")
+            yield Button("Tick all", id="tick-all")
+            yield Button("Untick all", id="untick-all")
         yield TickTable(TUI_LOG_COLUMNS, id="logs")
         yield Line(id="ticked", muted=True)
         with Horizontal(classes="row"):
-            yield Button("Mark ticked crosschecked", id="mark", variant="success")
-            yield Button("Un-mark ticked", id="unmark")
+            yield Button(MARK_TEXT, id="mark", variant="success")
         yield DetailBox(id="details")
         with Horizontal(classes="row"):
             yield Static("Corrected ID:", classes="label")
@@ -558,22 +576,19 @@ class BehavPage(SharedPage):
             if not log_shown(m, view):
                 continue
             info, cells = m.info, log_cells(m)
-            review = info.correction.review or ""
-            color = VERDICT_COLORS[review] if review else CROSSCHECKED_COLOR
             rows.append(
                 (
                     info.key,
                     (
                         cell(cells[MATCH], OK_COLOR if m.status == MATCHED else ERROR_COLOR),
+                        cell(*checked_text(m)),
                         cells[1],
                         cells[2],
                         cell(cells[STATE], "" if info.state == COMPLETE else WARNING_COLOR),
                         cells[3],
+                        m.session.label if m.session else "",
                         info.correction.subject or "",
                         date_text(info.correction.date),
-                        cell(cells[VERDICT], color),
-                        cells[SESSION],
-                        cells[NOTES],
                         info.path.name,
                     ),
                 )
@@ -677,9 +692,11 @@ class BehavPage(SharedPage):
             case "use-this" if m is not None:
                 work.use_this_one(m, self.note())
             case "mark":
-                work.crosschecked |= self.query_one("#logs", TickTable).ticked
-            case "unmark":
-                work.crosschecked -= self.query_one("#logs", TickTable).ticked
+                ticked = self.query_one("#logs", TickTable).ticked
+                if ticked - work.crosschecked:
+                    work.crosschecked |= ticked
+                else:
+                    work.crosschecked -= ticked
             case _:
                 return
         self.recheck()
@@ -693,9 +710,18 @@ class BehavPage(SharedPage):
     def update_ticked(self) -> None:
         ticked = self.query_one("#logs", TickTable).ticked
         marked = self.work.crosschecked if self.work else set()
-        self.query_one("#ticked", Line).set(f"{len(ticked)} ticked (space)")
-        self.query_one("#mark", Button).disabled = not ticked - marked
-        self.query_one("#unmark", Button).disabled = not ticked & marked
+        self.query_one("#ticked", Line).set(f"{len(ticked)} ticked (space or click the box)")
+        mark = self.query_one("#mark", Button)
+        mark.disabled = not ticked
+        mark.label = MARK_TEXT if ticked - marked or not ticked else UNMARK_TEXT
+
+    @on(Button.Pressed, "#tick-all")
+    def tick_all(self) -> None:
+        self.query_one("#logs", TickTable).tick_all(True)
+
+    @on(Button.Pressed, "#untick-all")
+    def untick_all(self) -> None:
+        self.query_one("#logs", TickTable).tick_all(False)
 
     @on(Button.Pressed, "#contents")
     def contents(self) -> None:

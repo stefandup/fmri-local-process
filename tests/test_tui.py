@@ -23,6 +23,7 @@ from textual.widgets import Button, Checkbox, Input, Static  # noqa: E402
 
 from fmri_local_process.app import backup, image_download, preprocess  # noqa: E402
 from fmri_local_process.app import mriqc as app_mriqc  # noqa: E402
+from fmri_local_process.app.crosscheck import CROSSCHECKED_ICON  # noqa: E402
 from fmri_local_process.app.settings import JsonSettings  # noqa: E402
 from fmri_local_process.app.state import CONVERTING, ToolboxState  # noqa: E402
 from fmri_local_process.app.tabs import (  # noqa: E402
@@ -486,7 +487,8 @@ def test_a_wrong_log_id_is_corrected_marked_and_saved(tmp_path: Path) -> None:
         await press(app, pilot, "#ok")
         assert not (bids / "code").exists()  # only Save writes
         await press(app, pilot, "#save")
-        assert "Corrections saved" in await close_text(app, pilot)
+        saved = await close_text(app, pilot)
+        assert "Corrections saved" in saved and "Export logs" in saved
         assert "review" not in str(app.tabs.get_tab(pane_id(BEHAV)).label)
 
     run_app(tmp_path, scenario, BEHAV, **folders)
@@ -498,21 +500,40 @@ def test_a_wrong_log_id_is_corrected_marked_and_saved(tmp_path: Path) -> None:
 
 
 def test_the_match_comes_first_and_the_box_shows_the_highlighted_row(tmp_path: Path) -> None:
-    folders, folder, log = behav_study(tmp_path)
+    folders, _folder, log = behav_study(tmp_path)
 
     async def scenario(app: ToolboxApp, pilot: Pilot) -> None:
         page = page_of(app, BehavPage)
         table = page.query_one("#logs", TickTable)
-        assert table.names[1:5] == ["Match", "Task", "ID in name", "Log state"]  # after the tick
-        assert table.names[-1] == "Log"
-        cells = [str(c) for c in table.get_row_at(0)]
-        assert cells[1] == "unknown ID" and cells[-1] == Path(log).name  # no folder
+        assert table.names[1:] == [
+            "Match", "Checked", "Task", "ID Corrected", "Log state", "Logged", "Session",
+            "Corr ID", "Corr Date", "Log",
+        ]  # fmt: skip
+        cells = table.texts(log)
+        assert cells[1:3] == ["unknown ID", "!"] and cells[-1] == Path(log).name  # no folder
         box = page.query_one("#details", DetailBox)
         assert box.display and box.value("Match") == "unknown ID"
         assert box.value("Log file date").startswith("2024-10-14")
         await submit(app, pilot, "#log-id", "12345-1")
         assert box.value("Corrected ID") == "12345-1"
-        assert box.value("Match").startswith("matched -> ")
+        assert box.value("Match").startswith("matched -> session 1 ")
+        assert table.texts(log)[7] == "1"  # the session, as a number
+
+        mark = page.query_one("#mark", Button)
+        assert mark.disabled
+        await press(app, pilot, "#tick-all")
+        assert table.ticked == {log} and str(mark.label) == "Mark ticked crosschecked"
+        await press(app, pilot, "#mark")
+        assert (
+            table.texts(log)[2] == CROSSCHECKED_ICON and str(mark.label) == "Un-crosscheck ticked"
+        )
+        await press(app, pilot, "#mark")
+        assert table.texts(log)[2] == "!"
+        await press(app, pilot, "#untick-all")
+        assert not table.ticked and mark.disabled
+        await pilot.click(table, offset=(1, 1))  # the first row's box
+        await settle(app, pilot)
+        assert table.ticked == {log}
 
         table.focus()  # number keys switch tabs, but not while typing in a box
         await pilot.press(str(app.tab_names.index(SESSIONS) + 1))
@@ -520,6 +541,7 @@ def test_the_match_comes_first_and_the_box_shows_the_highlighted_row(tmp_path: P
         sessions = page_of(app, SessionsPage)
         folder_box = sessions.query_one("#details", DetailBox)
         assert folder_box.display and folder_box.value("Scanned") == "2024-10-14 13:41"
+        assert folder_box.value("Resolves to").endswith("session 1")
         await submit(app, pilot, "#folder-session", "2")
         assert folder_box.value("Set session") == "2"
 
@@ -680,9 +702,9 @@ def test_a_scan_folder_is_corrected_on_raw_dicoms(tmp_path: Path) -> None:
         assert "not a session number" in line(page, "#problem")
         page.query_one("#folder-session", Input).value = "2"
         await submit(app, pilot, "#folder-id", "12345-2")
-        assert "12345T2" in " ".join(table.texts(folder)) and "ses-2" in " ".join(
-            table.texts(folder)
-        )
+        cells = table.texts(folder)
+        assert "12345T2" in " ".join(cells)
+        assert cells[table.names.index("BIDS session")] == "2"  # just the number
         table.tick_all(True)
         await settle(app, pilot)
         await press(app, pilot, "#mark")

@@ -34,3 +34,20 @@ from PowerShell, test the window there, then remove the entry.
   `CORRECTED_ID` ... `NOTES`, plus `log_cells`), then drop `TUI_LOG_COLUMNS`. In
   `gui/behav_logs_dialog.py` put the same details in a QGroupBox under the Mark buttons on both
   panels.
+
+## Behaviour logs: Checked column, one crosscheck button, Tick all, session numbers
+
+- **TUI:** `tui/behav.py`. Logs columns: Match, Checked, Task, ID Corrected, Log state, Logged,
+  Session, Corr ID, Corr Date, Log (Notes left out: they're in the details box). Checked is
+  `checked_text`: ☑ + verdict once crosschecked, ! (+ any verdict) until then. Session is just the
+  number (also tab 2's BIDS session column, via `session_number`). One `#mark` button whose label
+  flips between "Mark ticked crosschecked" and "Un-crosscheck ticked" (the Un-mark button is gone);
+  "Tick all" / "Untick all" next to Export logs. A click on a row's tick box ticks it.
+- **Window:** the same columns and button in `gui/behav_logs_dialog.py`; the window already ticks
+  by mouse (it selects rows).
+
+## Save: remind about Export logs
+
+- **TUI:** Save shows `SAVED_TEXT` (`app/behav.py`): convert to apply, or Export logs when only
+  behaviour logs changed.
+- **Window:** show the same `SAVED_TEXT` after Save in `gui/behav_logs_dialog.py`.

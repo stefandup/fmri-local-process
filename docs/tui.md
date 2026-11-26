@@ -40,7 +40,7 @@ ends when nala shuts down or reboots, so check on long batches after maintenance
 | `[` `]` | Previous / next tab |
 | `Tab`, `Shift+Tab` | Move between boxes, buttons and tables |
 | `Enter` | Press a button; keep what you typed in a box |
-| `Space` | Tick the highlighted row (sessions, logs, subjects, tasks, regions) |
+| `Space` | Tick the highlighted row (sessions, logs, subjects, tasks, regions); or click its box |
 | `y` / `n`, `Escape` | Answer a question; close it |
 | `?` | Help for this tab |
 | `Ctrl+Q` | Quit (asks first while something runs) |

@@ -230,6 +230,11 @@ HELP_TEXT = (
     "renamed. Sessions already converted under an old ID stay in the BIDS folder until you "
     "remove them."
 )
+SAVED_TEXT = (
+    "Corrections saved. Convert to BIDS (tab 1) to apply them.\n\n"
+    "Only behaviour logs changed? Export logs... on the Behaviour logs tab writes their events "
+    "files into the BIDS folder without converting everything again."
+)
 REFRESH_CACHE_TIP = (
     "This reloads everything: every log and DICOM folder is read again, not only what "
     "changed since last time (Reload)."
