@@ -66,6 +66,18 @@ tar -xzf fmri_tui-*-linux-x86_64.tar.gz && cd fmri_tui-*/
 ~/.local/opt/fmri_local_process/docker/setup_docker_image.sh --defacer pydeface --mriqc    # C-PAC, MRIQC, defacer (~20 GB)
 ```
 
+Or build and install for your user on the server in one go (the SSH connection is checked before
+the build):
+
+```bash
+./build.sh --tui --remote-install user@server    # or a Host from ~/.ssh/config
+```
+
+An upgrade, either way, replaces the earlier version: `install.sh` swaps the toolbox folder, and
+`--remote-install` also removes earlier unpacked `~/fmri_tui-*/` folders. The Docker images stay,
+as the toolbox finds them by name, so `setup_docker_image.sh` only needs running again to change
+the defacer.
+
 On OpenMediaVault, check first: your user has a home folder (Users > Settings) and SSH access,
 `docker info` works without sudo, and the home folder isn't on a disk mounted `noexec`.
 

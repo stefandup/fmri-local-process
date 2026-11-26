@@ -36,6 +36,18 @@ tar -xzf fmri_tui-*-linux-x86_64.tar.gz
 ./fmri_tui-*/install.sh              # ./install.sh --uninstall removes it
 ```
 
+Or build and install in one go, for your own user on the server:
+
+```bash
+./build.sh --tui --remote-install myserver    # a Host from ~/.ssh/config, or user@server
+```
+
+It checks the SSH connection before the build, then streams the `.tar.gz` over one connection,
+unpacks it in your home folder there (`~/fmri_tui-<version>/`, keep it for `--uninstall`) and
+runs `install.sh`. An upgrade replaces the earlier version: `install.sh` swaps the toolbox folder, and
+earlier `~/fmri_tui-*/` folders are removed. The Docker images stay: the toolbox finds them by name,
+so they aren't downloaded again.
+
 No sudo: every tool goes into one toolbox folder, `~/.local/opt/fmri_local_process/`, and that folder is
 added to your PATH (as the Windows installer does). Open a new terminal afterwards. The commands are `fmri_tui`, `fmri_convert_to_bids`,
 `fmri_preprocess`, `fmri_mriqc`, `fmri_behav_events`, `fmri_behav_check`, `fmri_bids_check` and
