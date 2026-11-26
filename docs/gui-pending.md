@@ -21,3 +21,16 @@ from PowerShell, test the window there, then remove the entry.
   tooltip `REFRESH_CACHE_TIP` from `app/behav.py`; it calls `load_behav_data(..., fresh=True)`.
 - **Window:** in `gui/behav_logs_dialog.py`, add the same button next to each "Reload" button
   (about lines 784 and 927), with `setToolTip(REFRESH_CACHE_TIP)`, passing `fresh=True` to the load.
+
+## Behaviour logs / Raw DICOMs: Match first, file name last, a details box
+
+- **TUI:** `tui/behav.py`. The logs table uses `TUI_LOG_COLUMNS`: Match, Task, ID in name, Log
+  state, Logged, Corrected ID, Corrected date, Verdict, Session, Notes, Log (just the file name).
+  Under the Mark / Un-mark buttons, a bordered `DetailBox` (`#details`) shows the highlighted row:
+  on tab 4 Match, Log state, Log file date, Corrected ID, Corrected date, Verdict, Notes, Events
+  (`log_details`); on tab 2 Scanned, ID in folder, Corrected ID, Corrected date, Set session,
+  Resolves to, Notes. The inputs and buttons below it are unchanged.
+- **Window:** reorder `COLUMNS` in `app/behav.py` the same way (and the index constants
+  `CORRECTED_ID` ... `NOTES`, plus `log_cells`), then drop `TUI_LOG_COLUMNS`. In
+  `gui/behav_logs_dialog.py` put the same details in a QGroupBox under the Mark buttons on both
+  panels.

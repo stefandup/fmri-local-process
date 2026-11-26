@@ -11,6 +11,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.markup import escape
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (
@@ -343,6 +344,33 @@ class Line(Static):
         self.text = text
         self.update(Text(text, style=color))
         self.display = bool(text)
+
+
+class DetailBox(Static):
+    """The highlighted row's details, one "label: value" per line, in a border titled with
+    the row's name; hidden while nothing is highlighted."""
+
+    DEFAULT_CSS = "DetailBox { height: auto; border: round $primary; padding: 0 1; }"
+    Detail = tuple[str, str, str]  # (label, value, colour)
+
+    def __init__(self, id: str | None = None) -> None:
+        super().__init__(Text(""), id=id, markup=False)
+        self.display = False
+        self.details: list[DetailBox.Detail] = []
+
+    def show(self, title: str, details: Sequence[Detail]) -> None:
+        self.border_title = escape(title)
+        self.details = list(details)
+        text = Text()
+        for n, (label, value, color) in enumerate(details):
+            text.append(f"{chr(10) if n else ''}{label}: ", style="bold")
+            text.append(value or "-", style=color)
+        self.update(text)
+        self.display = bool(title)
+
+    def value(self, label: str) -> str:
+        """What is shown for label ('' if not shown)."""
+        return next((v for name, v, _color in self.details if name == label), "")
 
 
 class Activity(RichLog):

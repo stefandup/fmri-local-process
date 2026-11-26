@@ -10,7 +10,6 @@ from textual.widgets import Button, Input, ProgressBar, Select, Static
 
 from fmri_local_process.app.behav import (
     ALL_LOGS,
-    COLUMNS,
     EXPORT_INTO_BIDS_QUESTION,
     EXPORT_LAYOUTS,
     EXPORT_SUBFOLDER,
@@ -42,7 +41,6 @@ from fmri_local_process.app.behav import (
     load_behav_data,
     log_cells,
     log_shown,
-    log_title,
     missing_folders_notice,
     parse_date,
     parse_session,
@@ -67,6 +65,7 @@ from fmri_local_process.processing.behav_match import (
 )
 from fmri_local_process.tui.widgets import (
     BrowseScreen,
+    DetailBox,
     FilledSelect,
     Line,
     Notices,
@@ -77,6 +76,12 @@ from fmri_local_process.tui.widgets import (
     cell,
 )
 
+# The logs table here: what matters first, the file name last (the window keeps COLUMNS
+# for now; see docs/gui-pending.md).
+TUI_LOG_COLUMNS = (
+    "Match", "Task", "ID in name", "Log state", "Logged", "Corrected ID", "Corrected date",
+    "Verdict", "Session", "Notes", "Log",
+)  # fmt: skip
 MAX_EVENT_ROWS = 500  # shown; an events file is far shorter
 
 
@@ -339,7 +344,6 @@ class SessionsPage(SharedPage):
     def compose(self) -> ComposeResult:
         yield from self.compose_controls()
         yield TickTable(SESSION_COLUMNS, id="folders")
-        yield Line(id="picked")
         with Horizontal(classes="row"):
             yield Static("Corrected ID:", classes="label")
             yield Input(id="folder-id")
@@ -353,6 +357,7 @@ class SessionsPage(SharedPage):
         with Horizontal(classes="row"):
             yield Button("Mark ticked crosschecked", id="mark", variant="success")
             yield Button("Un-mark ticked", id="unmark")
+        yield DetailBox(id="details")
 
     def fill(self) -> None:
         work = self.work
@@ -395,11 +400,26 @@ class SessionsPage(SharedPage):
             self.query_one(widget_id).disabled = name is None
         self.query_one("#problem", Line).set("")
         self.show_boxes(name if work is not None else None)
+        box = self.query_one("#details", DetailBox)
         if name is None or work is None:
-            self.query_one("#picked", Line).set("")
+            box.show("", [])
             return
         row = [f.name for f, _tasks in work.scanned].index(name)
-        self.query_one("#picked", Line).set(f"{name}   {work.folder_cells(row)[S_NOTES]}")
+        cells, fixes = work.folder_cells(row), work.fixes
+        when, raw_id = folder_name_parts(name)
+        resolved = " ".join(filter(None, [cells[S_RESOLVED], cells[S_SESSION]]))
+        box.show(
+            name,
+            [
+                ("Scanned", when, ""),
+                ("ID in folder", raw_id, ""),
+                ("Corrected ID", fixes.ids.get(name, ""), ""),
+                ("Corrected date", date_text(fixes.dates.get(name)), ""),
+                ("Set session", fixes.sessions.get(name, ""), ""),
+                ("Resolves to", resolved, ""),
+                ("Notes", cells[S_NOTES], WARNING_COLOR),
+            ],
+        )
 
     def saved_values(self, key: str) -> tuple[str, ...]:
         if self.work is None:
@@ -462,6 +482,23 @@ class SessionsPage(SharedPage):
         self.recheck()
 
 
+def log_details(m: LogMatch, fit: tuple[str, str]) -> list[DetailBox.Detail]:
+    """The highlighted log, for the box under the table."""
+    info, cells = m.info, log_cells(m)
+    review = info.correction.review or ""
+    session = f" -> {cells[SESSION]}" if cells[SESSION] else ""
+    return [
+        ("Match", f"{m.status}{session}", OK_COLOR if m.status == MATCHED else ERROR_COLOR),
+        ("Log state", info.state, "" if info.state == COMPLETE else WARNING_COLOR),
+        ("Log file date", cells[3], ""),
+        ("Corrected ID", info.correction.subject or "", ""),
+        ("Corrected date", date_text(info.correction.date), ""),
+        ("Verdict", cells[VERDICT], VERDICT_COLORS.get(review, CROSSCHECKED_COLOR)),
+        ("Notes", cells[NOTES] or "no issues found", WARNING_COLOR if cells[NOTES] else ""),
+        ("Events", *fit),
+    ]
+
+
 class BehavPage(SharedPage):
     """Behaviour logs: match each log to a session, look at its events, give a verdict."""
 
@@ -474,13 +511,12 @@ class BehavPage(SharedPage):
             yield FilledSelect([(v, v) for v in LOG_VIEWS], id="log-view", allow_blank=False)
             yield Button("Export logs...", id="export")
             yield Button("Contents per task", id="contents")
-        yield TickTable(COLUMNS, id="logs")
+        yield TickTable(TUI_LOG_COLUMNS, id="logs")
         yield Line(id="ticked", muted=True)
         with Horizontal(classes="row"):
             yield Button("Mark ticked crosschecked", id="mark", variant="success")
             yield Button("Un-mark ticked", id="unmark")
-        yield Line(id="title")
-        yield Line(id="fit")
+        yield DetailBox(id="details")
         with Horizontal(classes="row"):
             yield Static("Corrected ID:", classes="label")
             yield Input(id="log-id")
@@ -528,17 +564,17 @@ class BehavPage(SharedPage):
                 (
                     info.key,
                     (
-                        cells[0],
+                        cell(cells[MATCH], OK_COLOR if m.status == MATCHED else ERROR_COLOR),
                         cells[1],
                         cells[2],
+                        cell(cells[STATE], "" if info.state == COMPLETE else WARNING_COLOR),
                         cells[3],
                         info.correction.subject or "",
                         date_text(info.correction.date),
                         cell(cells[VERDICT], color),
-                        cell(cells[MATCH], OK_COLOR if m.status == MATCHED else ERROR_COLOR),
                         cells[SESSION],
-                        cell(cells[STATE], "" if info.state == COMPLETE else WARNING_COLOR),
                         cells[NOTES],
+                        info.path.name,
                     ),
                 )
             )
@@ -558,8 +594,10 @@ class BehavPage(SharedPage):
         m, work = self.current(), self.work
         for widget_id in ("log-id", "log-date", "use", "note", "ok", "error", "use-this", "clear"):
             self.query_one(f"#{widget_id}").disabled = m is None
-        for widget_id in ("title", "fit", "problem", "events-summary"):
+        for widget_id in ("problem", "events-summary"):
             self.query_one(f"#{widget_id}", Line).set("")
+        box = self.query_one("#details", DetailBox)
+        box.show("", [])
         events_table = self.query_one("#events", Table)
         events_table.fill([])
         self.show_boxes(m.info.key if m is not None else None)
@@ -568,12 +606,11 @@ class BehavPage(SharedPage):
         info = m.info
         self.query_one("#log-id", Input).placeholder = info.file_subject or "ID"
         self.query_one("#use-this", Button).disabled = not same_day_rivals(work.matches, m)
-        self.query_one("#title", Line).set(f"{info.key} -- {log_title(m)}")
         events = work.events_of(info)
+        fit = work.fit_of(m, events) if isinstance(events, EventTable) else (events, ERROR_COLOR)
+        box.show(info.key, log_details(m, fit))
         if not isinstance(events, EventTable):
-            self.query_one("#fit", Line).set(events, ERROR_COLOR)
             return
-        self.query_one("#fit", Line).set(*work.fit_of(m, events))
         self.query_one("#events-summary", Line).set("\n".join(events_summary(events)))
         columns = ["onset (s)", "duration (s)", "trial_type", events.modulator]
         if events_table.names != columns:

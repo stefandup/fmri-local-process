@@ -60,6 +60,7 @@ from fmri_local_process.tui.sequence import SequencePage  # noqa: E402
 from fmri_local_process.tui.toolbox import PAGES, ToolboxApp, pane_id  # noqa: E402
 from fmri_local_process.tui.widgets import (  # noqa: E402
     ConfirmScreen,
+    DetailBox,
     FilledSelect,
     FolderBox,
     ImageBox,
@@ -494,6 +495,35 @@ def test_a_wrong_log_id_is_corrected_marked_and_saved(tmp_path: Path) -> None:
     saved = read_corrections(bids)[log]
     assert (saved.subject, saved.review, saved.note) == ("12345-1", "ok", "fine [really]")
     assert saved.crosschecked
+
+
+def test_the_match_comes_first_and_the_box_shows_the_highlighted_row(tmp_path: Path) -> None:
+    folders, folder, log = behav_study(tmp_path)
+
+    async def scenario(app: ToolboxApp, pilot: Pilot) -> None:
+        page = page_of(app, BehavPage)
+        table = page.query_one("#logs", TickTable)
+        assert table.names[1:5] == ["Match", "Task", "ID in name", "Log state"]  # after the tick
+        assert table.names[-1] == "Log"
+        cells = [str(c) for c in table.get_row_at(0)]
+        assert cells[1] == "unknown ID" and cells[-1] == Path(log).name  # no folder
+        box = page.query_one("#details", DetailBox)
+        assert box.display and box.value("Match") == "unknown ID"
+        assert box.value("Log file date").startswith("2024-10-14")
+        await submit(app, pilot, "#log-id", "12345-1")
+        assert box.value("Corrected ID") == "12345-1"
+        assert box.value("Match").startswith("matched -> ")
+
+        table.focus()  # number keys switch tabs, but not while typing in a box
+        await pilot.press(str(app.tab_names.index(SESSIONS) + 1))
+        await settle(app, pilot)
+        sessions = page_of(app, SessionsPage)
+        folder_box = sessions.query_one("#details", DetailBox)
+        assert folder_box.display and folder_box.value("Scanned") == "2024-10-14 13:41"
+        await submit(app, pilot, "#folder-session", "2")
+        assert folder_box.value("Set session") == "2"
+
+    run_app(tmp_path, scenario, BEHAV, **folders)
 
 
 def test_the_log_view_dropdown_filters_the_logs(tmp_path: Path) -> None:
