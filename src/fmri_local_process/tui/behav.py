@@ -78,11 +78,16 @@ from fmri_local_process.tui.widgets import (
 # The logs table here: what matters first, the file name last (the window keeps COLUMNS
 # for now; see docs/gui-pending.md).
 TUI_LOG_COLUMNS = (
-    "Match", "Checked", "Task", "ID Corrected", "Log state", "Logged", "Session", "Corr ID",
+    "Match", "Checked", "Task", "ID Corrected", "Log state", "Log Date", "Session", "Corr ID",
     "Corr Date", "Log",
 )  # fmt: skip
 UNCHECKED_ICON = "!"  # not crosschecked yet
 MARK_TEXT, UNMARK_TEXT = "Mark ticked crosschecked", "Un-crosscheck ticked"
+
+
+def log_date(info: LogInfo) -> str:
+    """'2024-10-14 15:10' (no seconds), or just the date, or '-'."""
+    return info.time_text[:16]
 
 
 def session_number(name: str) -> str:
@@ -585,7 +590,7 @@ class BehavPage(SharedPage):
                         cells[1],
                         cells[2],
                         cell(cells[STATE], "" if info.state == COMPLETE else WARNING_COLOR),
-                        cells[3],
+                        log_date(m.info),
                         m.session.label if m.session else "",
                         info.correction.subject or "",
                         date_text(info.correction.date),

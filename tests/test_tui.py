@@ -506,7 +506,7 @@ def test_the_match_comes_first_and_the_box_shows_the_highlighted_row(tmp_path: P
         page = page_of(app, BehavPage)
         table = page.query_one("#logs", TickTable)
         assert table.names[1:] == [
-            "Match", "Checked", "Task", "ID Corrected", "Log state", "Logged", "Session",
+            "Match", "Checked", "Task", "ID Corrected", "Log state", "Log Date", "Session",
             "Corr ID", "Corr Date", "Log",
         ]  # fmt: skip
         cells = table.texts(log)
@@ -517,7 +517,7 @@ def test_the_match_comes_first_and_the_box_shows_the_highlighted_row(tmp_path: P
         await submit(app, pilot, "#log-id", "12345-1")
         assert box.value("Corrected ID") == "12345-1"
         assert box.value("Match").startswith("matched -> session 1 ")
-        assert table.texts(log)[7] == "1"  # the session, as a number
+        assert table.texts(log)[6:8] == ["2024-10-14 15:10", "1"]  # short date; session
 
         mark = page.query_one("#mark", Button)
         assert mark.disabled

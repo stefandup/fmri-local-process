@@ -37,8 +37,8 @@ from PowerShell, test the window there, then remove the entry.
 
 ## Behaviour logs: Checked column, one crosscheck button, Tick all, session numbers
 
-- **TUI:** `tui/behav.py`. Logs columns: Match, Checked, Task, ID Corrected, Log state, Logged,
-  Session, Corr ID, Corr Date, Log (Notes left out: they're in the details box). Checked is
+- **TUI:** `tui/behav.py`. Logs columns: Match, Checked, Task, ID Corrected, Log state, Log Date,
+  Session, Corr ID, Corr Date, Log (Log Date is the time without seconds; Notes left out: they're in the details box). Checked is
   `checked_text`: ☑ + verdict once crosschecked, ! (+ any verdict) until then. Session is just the
   number (also tab 2's BIDS session column, via `session_number`). One `#mark` button whose label
   flips between "Mark ticked crosschecked" and "Un-crosscheck ticked" (the Un-mark button is gone);
