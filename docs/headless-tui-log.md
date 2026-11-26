@@ -149,7 +149,10 @@ runs started from the bundle.
    `adcf4ae`). The run found a real Windows bug, fixed there: the scan cache could miss a DICOM
    file added to a series, as `os.scandir`'s `entry.stat()` gives the parent folder's copy of the
    times, which NTFS updates late. The Linux `bash` test is skipped on Windows (`bash` is WSL's).
-   Still to do: the window on `safe_data_source/`, the registry check and the two builds.
+   Then `build.ps1 -Full` built and installed without errors, and the window started and looked
+   right (a quick look, not a tab-by-tab check). Merged into `master` that day. Still to do: a
+   detailed check of the window, the registry check, and `build.ps1 -Review` (before the next
+   review package goes out; `tests/test_review_package.py` passes).
 2. **On the server:** processor, Docker access, `noexec` mounts, then install the bundle.
 3. **Pictures** in Windows Terminal over SSH.
 4. The crash when `pytest` exits with Qt loaded (there before; on Linux too). Narrowed down on
