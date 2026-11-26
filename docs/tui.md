@@ -10,6 +10,28 @@ tmux                # so the app keeps running if the connection drops (tmux att
 fmri_tui
 ```
 
+## Using tmux on nala
+
+`tmux` keeps your session alive on nala when your laptop sleeps, the Wi-Fi drops or you close the
+terminal. Long runs (C-PAC, MRIQC) keep going and you pick up where you left off.
+
+```bash
+ssh nala
+tmux new -s fmri        # start a session called "fmri"
+fmri_tui                # work as usual
+```
+
+| Do this | How |
+|---|---|
+| Leave it running and log out | `Ctrl+B`, then `D` (detach), then `exit` |
+| Come back later | `ssh nala`, then `tmux attach -t fmri` |
+| See which sessions you have | `tmux ls` |
+| Scroll back through output | `Ctrl+B`, then `[`; arrow keys or PgUp; `q` to stop |
+| End the session | `exit` inside it (or `tmux kill-session -t fmri`) |
+
+If the connection drops, nothing is lost: `ssh nala` and `tmux attach -t fmri`. `tmux` itself
+ends when nala shuts down or reboots, so check on long batches after maintenance.
+
 ## Keys
 
 | Key | Does |
