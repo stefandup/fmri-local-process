@@ -538,7 +538,7 @@ class SessionsPage(SharedPage):
         self.recheck()
 
 
-def log_details(m: LogMatch, fit: tuple[str, str]) -> list[DetailBox.Detail]:
+def log_details(m: LogMatch, fit: tuple[str, str], inventory: str) -> list[DetailBox.Detail]:
     """The highlighted log, for the box under the table."""
     info, cells = m.info, log_cells(m)
     session = f" -> session {m.session.label} ({m.session.when})" if m.session else ""
@@ -551,6 +551,7 @@ def log_details(m: LogMatch, fit: tuple[str, str]) -> list[DetailBox.Detail]:
         ("Checked", *checked_text(m)),
         ("Notes", cells[NOTES] or "no issues found", WARNING_COLOR if cells[NOTES] else ""),
         ("Events", *fit),
+        ("Scan inventory", inventory or "no row for this session", ""),
     ]
 
 
@@ -661,7 +662,7 @@ class BehavPage(SharedPage):
         self.query_one("#use-this", Button).disabled = not same_day_rivals(work.matches, m)
         events = work.events_of(info)
         fit = work.fit_of(m, events) if isinstance(events, EventTable) else (events, ERROR_COLOR)
-        box.show(info.key, log_details(m, fit))
+        box.show(info.key, log_details(m, fit, work.inventory_of(m)))
         if not isinstance(events, EventTable):
             return
         self.query_one("#events-summary", Line).set("\n".join(events_summary(events)))

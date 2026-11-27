@@ -15,6 +15,7 @@ rule). Convert / update BIDS applies it.
 """
 
 import datetime as dt
+from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
@@ -630,7 +631,8 @@ class BehavLogsPanel(QWidget):
         info = m.info
         self.use_button.setEnabled(bool(same_day_rivals(self.matches, m)))
         self.note_edit.setText(info.correction.note)
-        self.detail_title.setText(f"<b>{info.key}</b> -- {log_title(m)}")
+        inventory = self.work.inventory_of(m) or "Scan inventory: no row for this session"
+        self.detail_title.setText(f"<b>{info.key}</b> -- {log_title(m)}<br>{escape(inventory)}")
         events = self.work.events_of(info)
         if isinstance(events, str):
             self.fit_label.setText(events)

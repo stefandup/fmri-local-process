@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fmri_local_process.app.colors import ERROR_COLOR, OK_COLOR, WARNING_COLOR
-from fmri_local_process.app.crosscheck import CROSSCHECKED_ICON
+from fmri_local_process.app.crosscheck import CROSSCHECKED_ICON, scan_inventory_text
 from fmri_local_process.app.state import ToolboxState, paths_conflict
 from fmri_local_process.processing.action_log import record_action
 from fmri_local_process.processing.behav_export import (
@@ -60,6 +60,13 @@ from fmri_local_process.processing.philani_bids import (
     write_dicom_session_corrections,
 )
 from fmri_local_process.processing.scan_cache import ScanCache
+from fmri_local_process.processing.scan_inventory import (
+    InventoryError,
+    InventoryMatch,
+    InventoryRow,
+    match_inventory,
+    read_inventory,
+)
 
 WARN_COLOR = WARNING_COLOR
 BAD_COLOR = ERROR_COLOR
@@ -179,6 +186,7 @@ class BehavData:
     dicom_dates: dict[str, dt.date] = field(default_factory=dict)  # corrected scan dates
     dicom_sessions: dict[str, str] = field(default_factory=dict)  # session numbers set
     checked_folders: set[str] = field(default_factory=set)  # marked crosschecked
+    inventory: list[InventoryRow] = field(default_factory=list)  # code/scan_inventory.csv
 
 
 LoadProgress = Callable[[int, int, str], None]  # (done, total, what)
@@ -208,6 +216,10 @@ def load_behav_data(
         dicom_root, step("Scanning DICOM session folders"), read_scan_rules(bids_root), cache.dicom
     )
     cache.save()
+    try:
+        inventory, _ = read_inventory(bids_root)
+    except InventoryError:
+        inventory = []  # the BIDS Crosscheck tab says why
     return BehavData(
         infos,
         scanned,
@@ -216,6 +228,7 @@ def load_behav_data(
         read_dicom_date_corrections(bids_root),
         read_dicom_session_corrections(bids_root),
         read_crosschecked_folders(bids_root),
+        inventory,
     )
 
 
@@ -323,8 +336,10 @@ class BehavWork:
             if info.correction.review
         }
         self.crosschecked = {info.key for info in self.infos if info.correction.crosschecked}
+        self.inventory = data.inventory
         self.sessions: list[SessionInfo] = []
         self.matches: list[LogMatch] = []
+        self.inventory_matches: dict[str, InventoryMatch] = {}  # session name -> its row
         self.match()
 
     def match(self) -> None:
@@ -334,6 +349,17 @@ class BehavWork:
             self.scanned, fixes.ids, self.excluded, fixes.dates, fixes.sessions
         )
         self.matches = match_logs(self.infos, self.sessions)
+        self.inventory_matches = match_inventory(
+            self.inventory, {s.name: (s.subject, s.date) for s in self.sessions}
+        )
+
+    def inventory_of(self, m: LogMatch) -> str:
+        """The scan-inventory comment of the log's session ('' if it has none)."""
+        match = self.inventory_matches.get(m.session.name) if m.session else None
+        if match is None:
+            return ""
+        dated = f" (dated {match.row.date}: another day)" if match.date_differs else ""
+        return scan_inventory_text(match.row) + dated
 
     def set_corrections(self, typed: dict[str, tuple[str, dt.date | None]]) -> None:
         """{log key: (ID, date)} as typed, put together with the verdicts and marks."""

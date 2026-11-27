@@ -1139,7 +1139,7 @@ def test_names_are_shown_as_they_are_not_as_markup(tmp_path: Path) -> None:
         assert app.query_one("#bids-name", Static).content == "[red]bids"
         page = page_of(app, CrosscheckPage)
         await submit(app, pilot, "#note", "[/nonsense] ^ [b]")
-        assert page.table.texts("sub-A_ses-1")[-1] == "[/nonsense] ^ [b]"
+        assert page.table.texts("sub-A_ses-1")[-2] == "[/nonsense] ^ [b]"  # Note, then inventory
 
     run_app(tmp_path, scenario, CROSSCHECK, bids=bids)
 

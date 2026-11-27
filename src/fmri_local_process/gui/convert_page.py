@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -44,6 +45,12 @@ from fmri_local_process.app.convert import (
     restore_question,
     setup_notices,
 )
+from fmri_local_process.app.crosscheck import (
+    INVENTORY_CHOOSE_TIP,
+    choose_inventory,
+    inventory_status,
+    replace_inventory_question,
+)
 from fmri_local_process.app.state import CONVERTING
 from fmri_local_process.gui.backup_box import BackupBox
 from fmri_local_process.gui.docker_controls import DockerControlThread
@@ -63,6 +70,7 @@ from fmri_local_process.gui.qt_common import (
 from fmri_local_process.gui.scan_rules_dialog import ScanRulesDialog
 from fmri_local_process.gui.toolbox_state import ToolboxState
 from fmri_local_process.processing.crosscheck import (
+    CrosscheckError,
     read_expected_sessions,
     write_expected_sessions,
 )
@@ -155,6 +163,17 @@ class ConvertPage(QWidget):
                 home_base=True,
             )
         )
+        inventory = QGroupBox("Scan inventory (optional)")
+        inventory_layout = QHBoxLayout(inventory)
+        self.inventory_label = QLabel()
+        self.inventory_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.inventory_label.setWordWrap(True)
+        inventory_layout.addWidget(self.inventory_label, 1)
+        self.inventory_button = QPushButton("Choose CSV...")
+        self.inventory_button.setToolTip(INVENTORY_CHOOSE_TIP)
+        self.inventory_button.clicked.connect(self.on_choose_inventory)
+        inventory_layout.addWidget(self.inventory_button)
+        bids_column.addWidget(inventory)
         options = QGroupBox("Study and conversion")
         options.setStyleSheet(accent_group_box_stylesheet(HOME_BASE_ACCENT_COLOR))
         options_layout = QHBoxLayout(options)
@@ -302,6 +321,7 @@ class ConvertPage(QWidget):
 
     def update_notices(self) -> None:
         self.banner.set_messages(setup_notices(self.state))
+        self.inventory_label.setText(inventory_status(self.state.folder("bids")))
 
     def update_controls(self) -> None:
         dicom, bids = self.state.folder("dicom"), self.state.folder("bids")
@@ -316,9 +336,35 @@ class ConvertPage(QWidget):
             dicom is not None and bids is not None and self.convert_thread is None and not reason
         )
         self.convert_button.setEnabled(ready)
+        self.inventory_button.setEnabled(bids is not None and not self.state.lock_reason())
         self.deface_box.setEnabled(
             self.convert_thread is None and self.defacer_probe is None and not self.defacer_error
         )
+
+    def on_choose_inventory(self) -> None:
+        bids_root = self.state.folder("bids")
+        if bids_root is None or self.state.lock_reason():
+            return
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Scan inventory (CSV)", str(Path.home()), "CSV files (*.csv);;All files (*)"
+        )
+        if not chosen:
+            return
+        source = Path(chosen)
+        question = replace_inventory_question(bids_root, source)
+        if question and QMessageBox.question(self, "Confirm", question) != (
+            QMessageBox.StandardButton.Yes
+        ):
+            return
+        try:
+            done = choose_inventory(bids_root, source)
+        except (CrosscheckError, OSError) as e:
+            QMessageBox.warning(self, "Not done", str(e))
+            self.log_line(f"ERROR  scan inventory from {source}: {e}")
+            return
+        self.log_line(done)
+        self.state.bump()  # the tabs that show the inventory read it again
+        self.show_page()
 
     def on_scan_rules(self) -> None:
         bids_root = self.state.folder("bids")
