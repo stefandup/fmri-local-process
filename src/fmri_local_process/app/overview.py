@@ -5,7 +5,12 @@ import re
 from collections import Counter
 
 from fmri_local_process.app.crosscheck import needs_a_look
-from fmri_local_process.processing.crosscheck import Issue, SessionReview, overview_tasks
+from fmri_local_process.processing.crosscheck import (
+    INVENTORY_PREFIX,
+    Issue,
+    SessionReview,
+    overview_tasks,
+)
 
 # Cell background per status; black text on these reads in light and dark themes alike.
 CELL_COLORS = {
@@ -33,6 +38,7 @@ PROBLEM_WORDS = {
     "long": "trim",
     "check": "check log of",
     "extra": "extra session",
+    "inventory": "inventory differs",
 }
 PROBLEMS_LEGEND = (
     "missing: an expected file isn't there\n"
@@ -41,6 +47,7 @@ PROBLEMS_LEGEND = (
     "trim: longer than expected\n"
     "check log of: events from a log dated other than the scan\n"
     "extra session: the subject has more sessions than expected\n"
+    "inventory differs: the scan inventory counts other runs, or is dated another day\n"
     "crosschecked: marked as reviewed (whatever its problems)"
 )
 OWNER_PREFIX = re.compile(r"^sub-[^_]+_(?:ses-[^_]+_)?")
@@ -50,12 +57,13 @@ SESSION_KINDS = {
     "long": "session(s) with runs to trim",
     "missing": "session(s) with missing files",
     "check": "session(s) with a log dated other than the scan",
+    "inventory": "session(s) where the scan inventory differs",
 }
 
 
 def issue_target(issue: Issue) -> str:
     """The scan an issue is about, shortly: 'task-Rest_bold', 'T1w'; '' when about none."""
-    if issue.kind == "extra":
+    if issue.kind == "extra" or issue.text.startswith(INVENTORY_PREFIX):
         return ""
     if issue.path is not None:
         name = issue.path.name.split(".", 1)[0]

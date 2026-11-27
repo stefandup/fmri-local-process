@@ -15,6 +15,8 @@ found from the data itself:
 * check: an events.tsv made from a log dated other than its scan
 * extra: a subject with more sessions than the study expects (set per BIDS folder; default
   1): one may be a dud visit to delete
+* inventory: the scan inventory (code/scan_inventory.csv) counts other runs than were
+  converted, or its row for the session is dated another day
 
 A scan's expected length is the number the human set for it (e.g. task-Matching_bold: 441),
 else for a task timed in seconds (the checkerboard) what its design needs at the runs' TR,
@@ -47,6 +49,14 @@ from fmri_local_process.processing.behav_match import COMPLETE, LogInfo
 from fmri_local_process.processing.first_level import CHECKERBOARD
 from fmri_local_process.processing.philani_bids import DEFACE_NOTE, SCAN_RULES, exclude_session
 from fmri_local_process.processing.records import write_json_atomic
+from fmri_local_process.processing.scan_inventory import (
+    InventoryError,
+    InventoryRow,
+    match_inventory,
+    parse_date,
+    read_inventory,
+    run_differences,
+)
 from fmri_local_process.processing.session_sync import read_sessions_tsv
 
 log = logging.getLogger(__name__)
@@ -81,6 +91,7 @@ TR_TOLERANCE_S = 0.001
 # response to the last trials is still unfolding. Settable per task (crosscheck settings).
 DEFAULT_EVENTS_MARGIN_S = 15.0
 EVENTS_MARGIN_KEY = "events_margin_s"
+INVENTORY_PREFIX = "Scan inventory"  # starts an inventory issue that is about no one scan
 
 
 class CrosscheckError(Exception):
@@ -126,7 +137,7 @@ class DataFile:
 
 @dataclass(frozen=True)
 class Issue:
-    kind: str  # "missing" / "short" / "long" / "pending" / "check" / "extra"
+    kind: str  # "missing" / "short" / "long" / "pending" / "check" / "extra" / "inventory"
     text: str
     path: Path | None = None
     trim_to: int | None = None  # "long" only: the expected volumes
@@ -143,6 +154,7 @@ class SessionReview:
     source_folder: str = ""  # DICOM session folder it was converted from
     note: str = ""  # the human's note (code/session_notes.json)
     crosschecked: bool = False  # marked as reviewed by a human (code/crosscheck_decisions.json)
+    inventory: InventoryRow | None = None  # its row in code/scan_inventory.csv
 
     @property
     def note_key(self) -> str:
@@ -591,7 +603,44 @@ def review_bids_folder(bids_root: Path) -> list[SessionReview]:
     for review in reviews.values():
         review.note = notes.get(review.note_key, "")
         review.crosschecked = bool(review.source_folder) and review.source_folder in marks
+    add_inventory(bids_root, sessions)
     return sorted(reviews.values(), key=lambda r: (r.subject, r.session or ""))
+
+
+def add_inventory(bids_root: Path, sessions: list[SessionReview]) -> None:
+    """Pair each session with its scan-inventory row, and flag run counts that differ from
+    the converted runs. Sessions without a row are left alone: the sheet may cover only
+    some of the study."""
+    try:
+        rows, _ = read_inventory(bids_root)
+    except InventoryError:
+        return  # the tab's notices say why
+    if not rows:
+        return
+    matches = match_inventory(
+        rows, {r.name: (r.subject, parse_date(r.acq_time[:10])) for r in sessions}
+    )
+    kept_runs = read_decisions(bids_root)[KEPT_RUNS]
+    for review in sessions:
+        match = matches.get(review.name)
+        if match is None:
+            continue
+        row = review.inventory = match.row
+        if match.date_differs:
+            review.issues.append(
+                Issue(
+                    "inventory",
+                    f"{INVENTORY_PREFIX} {row.where}: "
+                    + (f"dated {row.date}" if row.date else "no readable date")
+                    + f", scanned {review.date[:10] or '?'}: is it this session?",
+                )
+            )
+        converted = Counter(d.label for d in review.files + review.pending if d.events is None)
+        kept = set(kept_runs.get(review.source_folder, {})) if review.source_folder else set()
+        for label, done, found in run_differences(row, converted, kept):
+            review.issues.append(
+                Issue("inventory", f"{label}: scan inventory says {done} run(s), BIDS has {found}")
+            )
 
 
 def long_runs(reviews: list[SessionReview]) -> list[tuple[DataFile, int]]:

@@ -18,10 +18,13 @@ from fmri_local_process.app.crosscheck import (
     badge_text,
     delete_question,
     delete_sessions,
+    inventory_detail,
+    inventory_notices,
     mark_text,
     note_text,
     problem_color,
     review_cells,
+    scan_inventory_text,
     scanned_text,
     summary_text,
 )
@@ -77,10 +80,12 @@ class CrosscheckPage(Page):
             yield Button("Note...", id="note-ticked")
             yield Button("Delete sessions...", id="delete-ticked", variant="error")
         yield Line(id="title")
+        yield Line(id="inventory")
         with Horizontal(classes="row"):
             yield Button("Mark crosschecked", id="mark", variant="success")
             yield Button("Un-mark crosschecked", id="unmark")
             yield Button("Delete session...", id="delete", variant="error")
+            yield Button("Inventory note...", id="inventory-note")
         with Horizontal(classes="row"):
             yield Static("Note:", classes="label")
             yield Input(
@@ -119,12 +124,14 @@ class CrosscheckPage(Page):
         bids = self.state.folder("bids")
         self.seen = (self.state.generation, bids)
         self.reviews = review_bids_folder(bids) if bids else []
-        self.query_one(Notices).set_messages(bids_notices(bids, bool(self.reviews)))
+        self.query_one(Notices).set_messages(
+            bids_notices(bids, bool(self.reviews)) + inventory_notices(bids, self.reviews)
+        )
         rows = []
         for review in self.reviews:
-            subject, day, session, files, problems, note = review_cells(review)
+            subject, day, session, files, problems, note, inventory = review_cells(review)
             coloured = cell(problems, problem_color(review))
-            rows.append((review.name, (subject, day, session, files, coloured, note)))
+            rows.append((review.name, (subject, day, session, files, coloured, note, inventory)))
         self.table.fill(rows)
         self.query_one("#summary", Line).set(summary_text(self.reviews, bids))
         self.toolbox.set_badge(CROSSCHECK, badge_text(self.reviews))
@@ -178,6 +185,10 @@ class CrosscheckPage(Page):
             )
         else:
             title.set(f"{review.name}: {scanned_text(review)}")
+        inventory = scan_inventory_text(review.inventory) if review else ""
+        self.query_one("#inventory", Line).set(inventory)
+        no_row = review is None or review.inventory is None
+        self.query_one("#inventory-note", Button).disabled = no_row
         crosschecked = review is not None and review.crosschecked
         self.query_one("#mark").display = not crosschecked
         self.query_one("#unmark").display = crosschecked
@@ -332,6 +343,12 @@ class CrosscheckPage(Page):
                 self.delete_reviews(self.ticked())
             case "note-ticked":
                 self.note_ticked()
+            case "inventory-note":
+                review = self.current()
+                if review is not None and review.inventory is not None:
+                    self.show_text(
+                        f"{review.name}: scan inventory", inventory_detail(review.inventory)
+                    )
 
     def note_ticked(self) -> None:
         reviews = self.ticked()

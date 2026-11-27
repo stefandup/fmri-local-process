@@ -409,3 +409,28 @@ def test_scan_rules_dialog_checks_rows_previews_and_saves(
 
     dialog.save()
     assert pb.read_scan_rules(bids) == pb.SCAN_RULES
+
+
+def test_setup_chooses_the_scan_inventory_csv_for_the_crosscheck(
+    window: toolbox.ToolboxWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_scan_inventory import HEADER, sheet_row
+
+    from fmri_local_process.app.crosscheck import INVENTORY_COLUMN
+    from fmri_local_process.gui import convert_page
+
+    bids = tmp_path / "bids"
+    two_session_subject(bids)
+    sheet = tmp_path / "inventory.csv"
+    sheet.write_text("\n".join([HEADER, sheet_row("A", "15/10/2024", comment="second visit")]))
+    window.state.set_folder("bids", bids)
+    setup = window.convert
+    assert setup.inventory_label.text().startswith("None chosen yet")
+    chosen = (str(sheet), "")
+    monkeypatch.setattr(convert_page.QFileDialog, "getOpenFileName", lambda *_a, **_k: chosen)
+    setup.inventory_button.click()
+    assert setup.inventory_label.text().startswith("1 row(s) in code/scan_inventory.csv")
+    open_crosscheck(window, bids)
+    page = window.crosscheck
+    assert [r.inventory is not None for r in page.reviews] == [False, True]
+    assert page.table.item(1, INVENTORY_COLUMN).text() == "second visit"  # pyright: ignore[reportOptionalMemberAccess]

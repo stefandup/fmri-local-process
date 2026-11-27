@@ -26,11 +26,18 @@ from fmri_local_process.app.convert import (
     restore_question,
     setup_notices,
 )
+from fmri_local_process.app.crosscheck import (
+    INVENTORY_CHOOSE_TIP,
+    choose_inventory,
+    inventory_status,
+    replace_inventory_question,
+)
 from fmri_local_process.app.scan_rules import HELP_TEXT as RULES_HELP
 from fmri_local_process.app.scan_rules import check_text
 from fmri_local_process.app.settings import is_on, saved_number
 from fmri_local_process.app.state import CONVERTING
 from fmri_local_process.processing.crosscheck import (
+    CrosscheckError,
     read_expected_sessions,
     write_expected_sessions,
 )
@@ -50,6 +57,7 @@ from fmri_local_process.processing.philani_bids import (
 from fmri_local_process.tui.widgets import (
     Activity,
     FolderBox,
+    InputScreen,
     Line,
     Notices,
     Page,
@@ -176,6 +184,10 @@ class ConvertPage(Page):
         )
         yield FolderBox(self.state, "bids", "BIDS folder", "Where Convert to BIDS writes.")
         with Horizontal(classes="row"):
+            yield Static("Scan inventory:", classes="label")
+            yield Button("Choose CSV...", id="inventory-csv")
+        yield Line(id="inventory-status", muted=True)
+        with Horizontal(classes="row"):
             yield Static("Sessions per subject:", classes="label")
             yield Input(id="sessions", max_length=2)
             yield Checkbox(
@@ -239,6 +251,7 @@ class ConvertPage(Page):
             sessions.value = str(read_expected_sessions(bids) if bids else 1)
         sessions.disabled = bids is None
         self.query_one(Notices).set_messages(setup_notices(self.state))
+        self.query_one("#inventory-status", Line).set(inventory_status(bids))
         self.update_controls()
 
     def update_controls(self) -> None:
@@ -247,9 +260,44 @@ class ConvertPage(Page):
         self.query_one("#lock", Line).set(f"Locked: {reason}." if reason else "", "#f39c12")
         ready = dicom is not None and bids is not None and self.job is None and not reason
         self.query_one("#convert", Button).disabled = not ready
+        self.query_one("#inventory-csv", Button).disabled = bids is None or bool(
+            self.state.lock_reason()
+        )
         self.query_one("#deface", Checkbox).disabled = (
             self.job is not None or self.checking_defacer or bool(self.defacer_error)
         )
+
+    # ---- scan inventory -----------------------------------------------------------------------
+
+    @on(Button.Pressed, "#inventory-csv")
+    def on_choose_inventory(self) -> None:
+        bids = self.state.folder("bids")
+        if bids is None or self.state.lock_reason():
+            return
+
+        def given(text: str | None) -> None:
+            if not text or not text.strip():
+                return
+            source = Path(text.strip()).expanduser()
+            question = replace_inventory_question(bids, source)
+            if question:
+                self.ask("Confirm", question, lambda: self.copy_inventory(bids, source))
+            else:
+                self.copy_inventory(bids, source)
+
+        title = f"{INVENTORY_CHOOSE_TIP}\n\nPath of the CSV file:"
+        self.app.push_screen(InputScreen(title, f"{Path.home() / 'Desktop'}/"), given)
+
+    def copy_inventory(self, bids: Path, source: Path) -> None:
+        try:
+            done = choose_inventory(bids, source)
+        except (CrosscheckError, OSError) as e:
+            self.activity.say(f"ERROR  scan inventory from {source}: {e}", error=True)
+            self.show_text("Not done", str(e))
+            return
+        self.activity.say(done)
+        self.state.bump()  # the tabs that show the inventory read it again
+        self.show_page()
 
     # ---- study settings -----------------------------------------------------------------------
 

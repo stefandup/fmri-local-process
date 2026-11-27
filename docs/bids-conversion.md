@@ -154,10 +154,34 @@ It reads only the BIDS folder. The only changes it makes there are the ones you 
 | ○ | Missing: a NIfTI without its sidecar, a task bold without its `events.tsv`, or a scan most other sessions have |
 | ⚑ | Events from a log dated other than the scan: check it's the right log |
 | ⊕ | The subject has more sessions than **Sessions per subject**: is one a dud visit? |
+| ☷ | The scan inventory counts other runs than were converted, or its row is dated another day (see below) |
+
+**Scan inventory.** Save the study's scan follow-up sheet as CSV (Excel: File > Save As >
+CSV UTF-8), then click **Choose CSV...** under **Scan inventory** on tab 1 (Setup & Convert
+to BIDS), which shows how many rows the one in use has and when it was chosen. The toolbox checks
+it (an Excel workbook only renamed to .csv is refused) and copies it into the BIDS folder as
+`code/scan_inventory.csv`, replacing any earlier one after asking. Choose it again whenever
+the sheet changes, because the copy doesn't follow the original. You can also copy the file
+there yourself. The toolbox only reads it.
+Each row is paired with its session by **Participant ID #** and **Scan Date**. A subject with
+just one session and one row is paired even when the dates differ, and gets ☷. Dates can be
+written as `2025-01-24`, `2025/01/24` or `24/01/2025` (day first). Then:
+
+- **Inventory note...** shows the session's whole row: the full comment and the number of
+  runs the sheet gives for each scan.
+- The session's **Comments on scan** show under its title here, and beside each of its logs
+  on the **Behaviour logs** tab. For a scan with several runs, that's where a note like "run 1
+  aborted" helps you choose which run to keep.
+- The **Number of runs** of the T1, Peer, Resting State, Cog reappraisal and Emotional
+  labelling (Matching) scans are compared with the runs converted. Once you've kept one run
+  at crosscheck, one run left is what's expected. DTI isn't converted, so it isn't compared.
+- The banner lists rows that match no session (a wrong ID or date in the sheet, or a
+  session not converted yet), and how many sessions have no row.
 
 The session list shows each session's **ID**, **Date** (scan date and time, from
-`sessions.tsv`; hover it for the DICOM folder), **Session**, number of files, problems and
-your **Note**.
+`sessions.tsv`; hover it for the DICOM folder), **Session**, number of files, problems, your
+**Note** and its **Scan inventory** comment (shortened; the full comment is under the
+session's title).
 
 **Sessions per subject** (tab 1, Setup & Convert to BIDS; default 1) is how many sessions this study
 expects; set it to 2 for a two-visit study. It is saved in `code/crosscheck_settings.json`.

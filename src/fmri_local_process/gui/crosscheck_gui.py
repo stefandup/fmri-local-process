@@ -45,6 +45,7 @@ from fmri_local_process.app.crosscheck import (
     CROSSCHECKED_ICON,
     HELP_TEXT,
     ICONS,
+    INVENTORY_COLUMN,
     LEGEND,
     NOTE_COLUMN,
     PROBLEMS_COLUMN,
@@ -52,10 +53,13 @@ from fmri_local_process.app.crosscheck import (
     badge_text,
     delete_question,
     delete_sessions,
+    inventory_detail,
+    inventory_notices,
     mark_text,
     note_text,
     problem_color,
     review_cells,
+    scan_inventory_text,
     scanned_text,
     summary_text,
 )
@@ -76,6 +80,7 @@ from fmri_local_process.processing.crosscheck import (
     set_note,
     sidecar_note,
 )
+from fmri_local_process.processing.scan_inventory import InventoryRow
 
 # vr_lab_toolbox's "Mark crosschecked" button: filled green, the main thing to click.
 MARK_COLOR = "#2ecc71"
@@ -253,7 +258,9 @@ class CrosscheckPage(QWidget):
         bids_root = self.state.folder("bids")
         selected = self.selected_review()
         self.reviews = review_bids_folder(bids_root) if bids_root else []
-        self.banner.set_messages(bids_notices(bids_root, bool(self.reviews)))
+        self.banner.set_messages(
+            bids_notices(bids_root, bool(self.reviews)) + inventory_notices(bids_root, self.reviews)
+        )
         self.ticked &= {r.name for r in self.reviews}
         self.table.blockSignals(True)  # no itemChanged (tick) signals while filling
         self.table.setRowCount(len(self.reviews))
@@ -272,6 +279,8 @@ class CrosscheckPage(QWidget):
                     item.setToolTip(LEGEND)
                 if column == NOTE_COLUMN:
                     item.setToolTip(review.note)
+                if column == INVENTORY_COLUMN:
+                    item.setToolTip(scan_inventory_text(review.inventory))
                 self.table.setItem(row, column, item)
         self.table.blockSignals(False)
         self.table.resizeColumnsToContents()
@@ -337,6 +346,18 @@ class CrosscheckPage(QWidget):
             title_row.addWidget(QLabel(f"<h2>{review.name}</h2>{scanned_text(review)}"), 1)
             title_row.addWidget(self.crosscheck_widget(review))
             layout.addLayout(title_row)
+            if review.inventory is not None:
+                inventory_row = QHBoxLayout()
+                inventory = QLabel(scan_inventory_text(review.inventory))
+                inventory.setTextFormat(Qt.TextFormat.PlainText)  # the sheet's own words
+                inventory.setWordWrap(True)
+                inventory_row.addWidget(inventory, 1)
+                full = QPushButton("Inventory note...")
+                full.setToolTip("The session's whole row of the scan inventory.")
+                row = review.inventory
+                full.clicked.connect(lambda: self.show_inventory(review.name, row))
+                inventory_row.addWidget(full)
+                layout.addLayout(inventory_row)
             layout.addLayout(self.session_row(review, bids_root))
             if review.issues:
                 layout.addWidget(self.issues_group(review))
@@ -496,6 +517,12 @@ class CrosscheckPage(QWidget):
     def on_delete(self, data: DataFile, bids_root: Path) -> None:
         if self.confirm(f"Delete {data.path.name} and its sidecar from the BIDS folder?"):
             self.run_action(f"Deleted {data.path.name}", partial(delete_data_file, bids_root, data))
+
+    def show_inventory(self, name: str, row: InventoryRow) -> None:
+        box = QMessageBox(QMessageBox.Icon.Information, f"{name}: scan inventory", "", parent=self)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(inventory_detail(row))
+        box.exec()
 
     def save_note(self, reviews: list[SessionReview], text: str) -> None:
         bids_root = self.state.folder("bids")
